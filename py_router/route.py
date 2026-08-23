@@ -330,6 +330,96 @@ def _emit_summary_min(gate_report: Optional[dict] = None,
         print(f"  WARNING: could not emit JSON_SUMMARY_MIN: {_e}")
 
 
+def _late_orphan_sweep659(pcb_data, output_file, return_results, results_data,
+                          protect_unfinished, keep_input_copper, skip_routing):
+    """Sweep pad-less copper islands off the FINAL board (#659).
+
+    run_post_route_cleanup is the only whole-scope cleanup and it runs long
+    before the plane finalize and the final reconciliation, both of which lay
+    copper WITH RIP AUTHORITY. Their rip-restore debris therefore lands after
+    the last pass that could remove it, and the only cleanups that DO run
+    later are the reconcile sub-runs', scoped to the reconcile subset. Same
+    staleness shape as #650's stale oracle audit.
+
+    Measured: daisho's /ddr2/DM6 carried a 7.35mm pad-less fragment -- born at
+    step 1, a BGA fanout, which runs no cleanup pipeline at all -- through
+    eleven chain steps and a full `--nets '*'` route; its step-9 log printed no
+    "Orphan islands" line at all. spartan6_4layer step 6 shipped 10 bare vias a
+    failed reroute left behind.
+
+    Deletion is safe by construction: an island reaching no pad and no zone of
+    its net conducts nothing, so removing it cannot change any pad's
+    connectivity. --keep-input-copper still makes input copper read-only, and
+    UNFINISHED nets are scoped out exactly as the main pipeline scopes them
+    (#473: a fragment graded "orphan" on a net this run could not finish is the
+    copper the NEXT chain step welds to).
+
+    Called from BOTH the normal end of a run and the "nothing to route" early
+    return -- the fragment gate now diverts pad-less-only nets to this sweep,
+    and a step whose whole scope is diverted takes that early path, where a
+    sweep that only ran at the normal end would silently never happen.
+
+    Cost: ~1s on a 12k-segment board. KICAD_LATE_ORPHAN_SWEEP=0 disables.
+    """
+    if (skip_routing or keep_input_copper
+            or os.environ.get('KICAD_LATE_ORPHAN_SWEEP', '1') == '0'):
+        return
+    try:
+        from pcb_modification import remove_orphan_islands as _roi659
+
+        def _scope(_p):
+            # Derived from the board being SWEPT, not from pcb_data: the CLI
+            # branch re-parses the written file, and a scope built from a
+            # different board object is only accidentally right.
+            if not protect_unfinished:
+                return None
+            return ({s.net_id for s in _p.segments}
+                    | {v.net_id for v in _p.vias}) - set(protect_unfinished)
+
+        if return_results:
+            # GUI: the copper lives in the write-lists + pcb_data. The pass
+            # drops this-run copper from `results` in place and hands back the
+            # INPUT copper for the applier's removal lists (the same channels
+            # the reconciliation sub-run's strips ride).
+            _n, _s, _strip, _vstrip, _nv = _roi659(
+                (results_data or {}).get('results') or [], pcb_data,
+                _scope(pcb_data))
+            if _n and results_data is not None:
+                if _strip:
+                    results_data.setdefault('segments_to_remove', []).extend(_strip)
+                if _vstrip:
+                    results_data.setdefault('vias_to_remove', []).extend(_vstrip)
+        elif output_file and os.path.exists(output_file):
+            # CLI: the finalize and the reconcile wrote through to the file, so
+            # the board on disk -- not pcb_data -- is the final state. Re-parse
+            # it, and strip what the sweep condemns from the file text (the
+            # oracle's own debris pass works the same way).
+            from kicad_parser import parse_kicad_pcb as _pk, is_kicad_10 as _k10
+            from kicad_writer import (remove_segments_from_content as _rsc,
+                                      remove_vias_from_content as _rvc)
+            _pcb = _pk(output_file)
+            _n, _s, _strip, _vstrip, _nv = _roi659([], _pcb, _scope(_pcb))
+            if _n and (_strip or _vstrip):
+                with open(output_file, 'r', encoding='utf-8') as _f:
+                    _c = _f.read()
+                _map = ({nid: n.name for nid, n in _pcb.nets.items()}
+                        if _k10(_c) else None)
+                if _strip:
+                    _c, _ = _rsc(_c, _strip, net_id_to_name=_map)
+                if _vstrip:
+                    _c, _ = _rvc(_c, _vstrip, net_id_to_name=_map)
+                with open(output_file, 'w', encoding='utf-8') as _f:
+                    _f.write(_c)
+        else:
+            return
+        if _n:
+            print(f"  Late orphan sweep (#659): removed {_n} pad-less copper "
+                  f"island(s) the finalize/reconcile left behind "
+                  f"({_s} segment(s), {_nv} via(s))")
+    except Exception as _e:
+        print(f"  (late orphan sweep skipped: {_e})")
+
+
 def batch_route(input_file: str, output_file: str, net_names: List[str],
                 layers: List[str] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -1249,9 +1339,21 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print("All nets are already fully connected - nothing to route!")
         if final_reconcile:
             _emit_summary_min(status='already_connected')
+        # The sweep runs HERE too (#659). The fragment gate diverts a net whose
+        # extra fragments are all pad-less to this sweep instead of the router,
+        # so a step whose WHOLE scope is diverted lands on this early return --
+        # and the debris the gate's message promises to remove would ship
+        # untouched. Measured on spartan6_4layer: three diverted nets took the
+        # run from 448s to 6s, and every one of their bare vias survived
+        # because the sweep only ran at the normal end of a run.
         if return_results:
-            return 0, 0, 0.0, _empty_results_data()
+            _rd659 = _empty_results_data()
+            _late_orphan_sweep659(pcb_data, output_file, True, _rd659,
+                                  None, keep_input_copper, skip_routing)
+            return 0, 0, 0.0, _rd659
         _write_passthrough_output(input_file, output_file)
+        _late_orphan_sweep659(pcb_data, output_file, False, None,
+                              None, keep_input_copper, skip_routing)
         return 0, 0, 0.0
 
     # Track all segment layer modifications for file output
@@ -3077,6 +3179,39 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             continue
         _net_name = (pcb_data.nets[_nid].name if _nid in pcb_data.nets
                      else f"Net {_nid}")
+        # Same #659 rule as the fragment gate in filter_already_routed, and
+        # the same trap: STRICT pad-less-ness is not "dead". Ask the
+        # authoritative graph which copper is dead, drop it, and re-count --
+        # only if the remainder is whole does the reconciliation have nothing
+        # to route (it would otherwise weld to copper the late sweep deletes).
+        try:
+            from check_connected import net_dead_copper as _ndc659
+            _dead_s659, _dead_v659 = _ndc659(
+                pcb_data, _nid, _segs, _vias_by_net.get(_nid, []),
+                pcb_data.pads_by_net.get(_nid, []), [])
+        except Exception:
+            _dead_s659, _dead_v659 = [], []
+        if _dead_s659 or _dead_v659:
+            _ds659 = {id(s) for s in _dead_s659}
+            _dv659 = {id(v) for v in _dead_v659}
+            try:
+                _frag2_659 = net_copper_fragments(
+                    _nid, [s for s in _segs if id(s) not in _ds659],
+                    [v for v in _vias_by_net.get(_nid, [])
+                     if id(v) not in _dv659],
+                    pcb_data.pads_by_net.get(_nid, []), [], pcb_data=pcb_data)
+                _nf2_659 = _max_fragments_within_one_outline(
+                    pcb_data, _frag2_659['fragment_anchors'])
+            except Exception:
+                _nf2_659 = _nf
+            if _nf2_659 <= 1:
+                print(f"  Fragment sweep: {_net_name} grades pad-connected "
+                      f"and every extra fragment is DEAD copper "
+                      f"({len(_dead_s659)} segment(s), {len(_dead_v659)} "
+                      f"via(s) tied to no pad or pour) -- not a route (#659); "
+                      f"left to the late orphan sweep instead of the "
+                      f"reconciliation")
+                continue
         print(f"{RED}FRAGMENT SWEEP: {_net_name} grades pad-connected but its "
               f"copper is {_nf} separate fragment(s) "
               f"({_frag['padless_fragments']} pad-less) -- reporting as "
@@ -3099,6 +3234,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # KICAD_ORACLE_SUMMARY=0 disables; the GUI path (return_results) skips
     # (in-memory board, file fidelity unavailable) with disclosure.
     oracle_open: Dict[str, int] = {}
+    # #659: the GENUINE opens among the flagged links -- both endpoints on
+    # live copper -- kept in kicad_unconnected's own shape so the final
+    # reconciliation can route the exact endpoints (#572 forced links)
+    # instead of re-deriving them and skipping the net as already connected.
+    _oracle_open_links: List = []
     oracle_check = 'skipped'
     if not (final_reconcile and not skip_routing and output_file
             and not return_results):
@@ -3171,16 +3311,68 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if (_net in _scope_names
                                 and _net not in _zone_names):
                             _by_net.setdefault(_net, []).append((_a, _b))
+                    # #659: KiCad saying "open" does NOT say which repair is
+                    # called for, and the three answers are different
+                    # operations. Classify each link by what its endpoints
+                    # actually sit on:
+                    #   live <-> live -> a GENUINE open; weld it (and hand the
+                    #       reconciliation the EXACT endpoints, or its own
+                    #       model skips the net as already connected).
+                    #   pad-less end -> rip/reroute DEBRIS; it conducts
+                    #       nothing, so welding adds dead metal. The late
+                    #       orphan sweep deletes it at the end of the run.
+                    #   graphic end -> net-tagged copper ART (#337/#513):
+                    #       immutable, so neither operation applies.
+                    # Measured over the recorded corpus the zone-less signal
+                    # links split 9 pad-less / 36 graphic / 6 live, so
+                    # enrolling all of them sends the router after 45 links it
+                    # cannot help -- which is exactly what cost spartan6 448s
+                    # and bred three fresh debris nets.
+                    from check_connected import classify_unconnected_link
+                    _routable_layers659 = set(config.layers or [])
                     for _net, _pairs in sorted(_by_net.items()):
                         oracle_open[_net] = len(_pairs)
                         if _net in _flagged:
                             continue
-                        print(f"{RED}ORACLE CHECK: {_net}: KiCad reports "
-                              f"{len(_pairs)} open link(s) the in-process "
-                              f"grading passed -- reporting as failed and "
-                              f"queuing for the final reconciliation{RESET}")
                         _onid = next((i for i, n in pcb_data.nets.items()
                                       if n.name == _net), None)
+                        _genuine659, _debris659, _art659 = [], 0, 0
+                        for (_a, _b) in _pairs:
+                            try:
+                                _ca, _cb = classify_unconnected_link(
+                                    pcb_data, _onid, _a, _b,
+                                    _a[3] if len(_a) > 3 else None,
+                                    _b[3] if len(_b) > 3 else None)
+                            except Exception:
+                                _ca = _cb = 'unknown'
+                            if 'graphic' in (_ca, _cb):
+                                _art659 += 1
+                            elif 'padless' in (_ca, _cb):
+                                _debris659 += 1
+                            elif _ca == 'live' and _cb == 'live':
+                                _genuine659.append((_a, _b))
+                        if not _genuine659:
+                            _why659 = []
+                            if _debris659:
+                                _why659.append(
+                                    f"{_debris659} to pad-less debris (the "
+                                    f"late orphan sweep removes it)")
+                            if _art659:
+                                _why659.append(
+                                    f"{_art659} to net-tagged copper GRAPHICS "
+                                    f"(#513: convert them to pads/tracks)")
+                            print(f"  ORACLE CHECK: {_net}: KiCad reports "
+                                  f"{len(_pairs)} open link(s), none weldable"
+                                  + (" -- " + "; ".join(_why659)
+                                     if _why659 else "")
+                                  + " -- not queued for the reconciliation "
+                                    "(#659)")
+                            continue
+                        print(f"{RED}ORACLE CHECK: {_net}: KiCad reports "
+                              f"{len(_genuine659)} GENUINE open link(s) the "
+                              f"in-process grading passed -- reporting as "
+                              f"failed and queuing for the final "
+                              f"reconciliation{RESET}")
                         failed_multipoint.append({
                             'net_name': _net,
                             'net_id': _onid if _onid is not None else -1,
@@ -3188,8 +3380,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                             'failed_pads': [
                                 {'x': _a[0], 'y': _a[1],
                                  'component_ref': '?', 'pad_number': '?'}
-                                for (_a, _b) in _pairs],
+                                for (_a, _b) in _genuine659],
                         })
+                        # Forward only links the weld router can actually
+                        # take: route_oracle_links returns on the FIRST
+                        # failure and discards the copper of every link
+                        # already routed for that net, so one endpoint on a
+                        # layer outside this run's stack would abort the rest.
+                        for (_a, _b) in _genuine659:
+                            if (len(_a) > 2 and len(_b) > 2
+                                    and _a[2] in _routable_layers659
+                                    and _b[2] in _routable_layers659):
+                                _oracle_open_links.append((_net, _a, _b))
             except Exception as _oe:
                 oracle_check = 'failed'
                 print(f"  (oracle summary check failed: {_oe})")
@@ -4650,8 +4852,24 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             # while every retry claims success. With them the sub-run routes
             # the exact endpoints, and a blocked link feeds the standard
             # frontier analysis -> rip ladder -> retries.
-            if _custody_links9:
-                _rk['oracle_links'] = _custody_links9
+            # #659: the oracle summary check's GENUINE opens ride the same
+            # channel as the plane finalize's custody links. Without them the
+            # sub-run's own model both skips the net ("Already fully
+            # connected" -- the very verdict KiCad just contradicted) and,
+            # past the skip, derives no missing edge: the net was enrolled,
+            # retried, and reported success while shipping the same open.
+            _forced659 = list(_custody_links9)
+            if _oracle_open_links:
+                _rec_set659 = set(_rec_names)
+                _fresh659 = [l for l in _oracle_open_links
+                             if l[0] in _rec_set659]
+                if _fresh659:
+                    print(f"  Oracle-open forced links (#659): "
+                          f"{len(_fresh659)} exact endpoint pair(s) on "
+                          f"{', '.join(sorted({l[0] for l in _fresh659}))}")
+                    _forced659.extend(_fresh659)
+            if _forced659:
+                _rk['oracle_links'] = _forced659
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran
@@ -5046,6 +5264,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 pass  # results_data only exists on the GUI path
         except Exception as _e10:
             print(f"  post-reconciliation re-audit failed: {_e10}")
+
+    _late_orphan_sweep659(
+        pcb_data, output_file, return_results,
+        locals().get('results_data'), _protect_unfinished, keep_input_copper,
+        skip_routing)
 
     # Per-net story dump (KICAD_NET_STORY=1): the complete journey of every
     # net -- bus membership, ordering, failures with named blockers, rips,

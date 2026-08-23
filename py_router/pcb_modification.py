@@ -1881,9 +1881,11 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
     art) are skipped whole. Nets with no pads at all are left alone.
 
     Returns (islands_removed, segments_removed, original_segments_to_strip,
-    original_vias_to_strip); this-run copper is dropped from its result's
-    write-list in place, original input copper is returned for the writer's
-    strip lists (an island's via barrel would otherwise ship floating).
+    original_vias_to_strip, vias_removed); this-run copper is dropped from its
+    result's write-list in place, original input copper is returned for the
+    writer's strip lists (an island's via barrel would otherwise ship
+    floating). `vias_removed` counts BOTH sources, so a via-only island (#659)
+    is reportable -- it has no segments at all.
     """
     from collections import defaultdict
     from check_connected import check_net_connectivity
@@ -1898,8 +1900,16 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         for v in r.get('new_vias') or []:
             via_owner[id(v)] = r
 
+    # Nets are gathered from VIAS as well as segments (#659 follow-up): a
+    # failed reroute strips a net's tracks and leaves the barrels behind, so
+    # the net's whole remaining copper can be via-only -- invisible to a scan
+    # seeded from pcb_data.segments. Measured on spartan6_4layer step 6:
+    # /GPIOS/GPIO-P27 went from 28 segments + 6 vias to 0 segments + 6 bare
+    # vias, and no cleanup in the codebase could see any of them.
     net_ids = {s.net_id for s in pcb_data.segments
                if scope_net_ids is None or s.net_id in scope_net_ids}
+    net_ids |= {v.net_id for v in pcb_data.vias
+                if scope_net_ids is None or v.net_id in scope_net_ids}
     net_ids.discard(0)
 
     islands_removed = 0
@@ -1915,7 +1925,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         net_zones = [z for z in (getattr(pcb_data, 'zones', []) or [])
                      if z.net_id == net_id]
-        if not net_segs:
+        if not net_segs and not net_vias:
             continue
         r = check_net_connectivity(net_id, net_segs, net_vias, pads,
                                    net_zones, return_graph=True,
@@ -1928,10 +1938,26 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
             uf.union(a, b)
         pad_roots = {uf.find(rep)
                      for rep in graph.get('pad_index_repr', {}).values()}
+        # Zone-anchored copper is NOT orphaned (#659 follow-up): a stitch via
+        # or a feed stub whose only tie is the net's pour reaches the net
+        # through the fill, and `pad_index_repr` alone cannot say so. The
+        # oracle's own debris deleter already excludes zone roots; matching it
+        # here can only make this pass MORE conservative, never delete more.
+        pad_roots |= {uf.find(rep)
+                      for rep in graph.get('zone_index_repr', {}).values()}
+        via_reprs = graph.get('via_index_repr', {})
         comp_segs = defaultdict(list)
         for i, s in enumerate(net_segs):
             comp_segs[uf.find(2 * i)].append(s)
-        via_reprs = graph.get('via_index_repr', {})
+        # A component can be VIA-ONLY, and such a component has no entry in
+        # comp_segs -- the loop below would never visit it. Seed those roots
+        # with an empty segment list so a bare barrel is a candidate island in
+        # its own right (the graphics/keep-input guards below still apply, and
+        # the via-collection step already sweeps each island's barrels).
+        for j, v in enumerate(net_vias):
+            rep = via_reprs.get(j)
+            if rep is not None:
+                comp_segs.setdefault(uf.find(rep), [])
         # #513 item 6 made graphics NON-conductive in the connectivity graph
         # (correct for grading: KiCad never credits them), so a track that
         # touches only a graphic is now its OWN pad-less component and the
@@ -1985,7 +2011,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                         original_vias.append(v)
 
     if not removed_ids and not removed_via_ids:
-        return 0, 0, [], []
+        return 0, 0, [], [], 0
     for r in results:
         segs = r.get('new_segments')
         if segs:
@@ -1997,7 +2023,8 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                          if id(s) not in removed_ids]
     pcb_data.vias = [v for v in pcb_data.vias
                      if id(v) not in removed_via_ids]
-    return islands_removed, len(removed_ids), originals, original_vias
+    return (islands_removed, len(removed_ids), originals, original_vias,
+            len(removed_via_ids))
 
 
 def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None,

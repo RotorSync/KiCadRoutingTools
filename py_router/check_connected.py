@@ -467,6 +467,142 @@ def net_copper_fragments(net_id, segments, vias, pads, zones=None,
             'zone_blob_fallback': bool(graph.get('zone_blob_fallback'))}
 
 
+def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
+    """The net's copper that reaches NO pad and NO zone of its own net (#659).
+
+    Read-only twin of remove_orphan_islands' verdict: it answers "which of
+    this net's copper is dead" without mutating anything, so callers deciding
+    whether ROUTING can help (the #549 A-2 fragment gate, the fragment sweep)
+    ask exactly the question the late sweep will act on.
+
+    Deliberately the AUTHORITATIVE (permissive) connectivity graph, not the
+    strict-fragment view. "Strictly pad-less" is a different question and
+    conflating them is a real bug: a fragment can miss a pad's copper by a
+    hair and still be the net's actual route -- the phantom split #549 A-2
+    exists to catch -- and diverting that away from the router would ship the
+    open it was built to close. Copper is dead only when the same graph that
+    grades the board says nothing ties it to a pad or the net's pour.
+
+    Graphics clusters (#337 immutable art) are never reported: they are not
+    ours to delete, so they are not "dead copper" for a caller's purposes.
+
+    Returns (dead_segments, dead_vias) as object lists.
+    """
+    from geometry_utils import UnionFind
+    segments = list(segments)
+    vias = list(vias)
+    if not pads or (not segments and not vias):
+        return [], []
+    r = check_net_connectivity(net_id, segments, vias, pads, zones or [],
+                               return_graph=True, pcb_data=pcb_data)
+    g = r.get('graph') or {}
+    uf = UnionFind()
+    for a, b in g.get('edges', []) or []:
+        uf.union(a, b)
+    live = {uf.find(x) for x in (g.get('pad_index_repr') or {}).values()} | \
+           {uf.find(x) for x in (g.get('zone_index_repr') or {}).values()}
+    via_repr = g.get('via_index_repr') or {}
+    graphic_roots = set()
+    for i, s in enumerate(segments):
+        if getattr(s, 'graphic', False):
+            graphic_roots.add(uf.find(2 * i))
+    dead_s = [s for i, s in enumerate(segments)
+              if uf.find(2 * i) not in live
+              and uf.find(2 * i) not in graphic_roots]
+    dead_v = [v for j, v in enumerate(vias)
+              if via_repr.get(j) is not None
+              and uf.find(via_repr[j]) not in live
+              and uf.find(via_repr[j]) not in graphic_roots]
+    return dead_s, dead_v
+
+
+def classify_unconnected_link(pcb_data, net_id, pt_a, pt_b,
+                              kind_a=None, kind_b=None, radius: float = 0.35):
+    """Classify the two ends of a KiCad-reported unconnected link (#659).
+
+    KiCad reporting a link says the net is open; it does NOT say what repair
+    is called for, and the three answers are different operations:
+
+      'live'    -- the endpoint's copper cluster reaches a pad or the net's
+                   own pour. A link between two live ends is a GENUINE open:
+                   welding it is the fix.
+      'padless' -- the cluster reaches no pad and no zone. It is rip/reroute
+                   DEBRIS: it conducts nothing, so welding it adds dead metal
+                   and deletion is the fix (remove_orphan_islands).
+      'graphic' -- the cluster is net-tagged copper ART (#337), which is
+                   immutable: neither weld nor delete applies, and the board's
+                   author has to convert it to pads/tracks (#513).
+      'unknown' -- no copper of this net located at the point (a shape the
+                   parser models differently, e.g. a filled gr_circle whose
+                   reported position is its centre).
+
+    Measured over the recorded corpus, the KiCad-only-open links on zone-less
+    signal nets split 9 padless / 36 graphic / 6 live -- so treating the whole
+    class as "weld it" is wrong for 45 of 51 links.
+
+    Returns (class_a, class_b). `kind_a`/`kind_b` are KiCad's own item kinds
+    ('pad', 'zone', 'track', 'via') when known: a pad or zone item IS live by
+    definition and needs no geometric search.
+    """
+    import math
+    from geometry_utils import UnionFind
+    segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+             if z.net_id == net_id]
+    if not pads or (not segs and not vias):
+        return 'unknown', 'unknown'
+    r = check_net_connectivity(net_id, segs, vias, pads, zones,
+                               return_graph=True, pcb_data=pcb_data)
+    g = r.get('graph') or {}
+    uf = UnionFind()
+    for a, b in g.get('edges', []) or []:
+        uf.union(a, b)
+    live = {uf.find(x) for x in (g.get('pad_index_repr') or {}).values()} | \
+           {uf.find(x) for x in (g.get('zone_index_repr') or {}).values()}
+    via_repr = g.get('via_index_repr') or {}
+    graphic_roots = set()
+    for i, s in enumerate(segs):
+        if getattr(s, 'graphic', False):
+            graphic_roots.add(uf.find(2 * i))
+
+    def _one(pt, kind):
+        if kind in ('pad', 'zone'):
+            return 'live'
+        px, py = pt[0], pt[1]
+        best, bd = None, radius
+        for i, s in enumerate(segs):
+            dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+            L2 = dx * dx + dy * dy
+            t = (max(0.0, min(1.0, ((px - s.start_x) * dx
+                                    + (py - s.start_y) * dy) / L2))
+                 if L2 else 0.0)
+            d = math.hypot(px - (s.start_x + t * dx), py - (s.start_y + t * dy))
+            if d < bd:
+                best, bd = i, d
+        if best is not None:
+            root = uf.find(2 * best)
+        else:
+            # No segment: the endpoint can be a BARE via -- a failed reroute
+            # keeps the barrel and drops every track around it.
+            vb, vd = None, None
+            for j, v in enumerate(vias):
+                if via_repr.get(j) is None:
+                    continue
+                d = math.hypot(px - v.x, py - v.y)
+                if d <= max(radius, v.size / 2.0 + 0.05) and (vd is None or d < vd):
+                    vb, vd = j, d
+            if vb is None:
+                return 'unknown'
+            root = uf.find(via_repr[vb])
+        if root in graphic_roots:
+            return 'graphic'
+        return 'live' if root in live else 'padless'
+
+    return _one(pt_a, kind_a), _one(pt_b, kind_b)
+
+
 def _point_in_pad(px: float, py: float, pad: Pad, margin: float = 0.0) -> bool:
     """True if (px, py) lies within `pad`'s copper outline (+margin).
 
