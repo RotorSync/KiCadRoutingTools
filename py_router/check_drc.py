@@ -69,20 +69,20 @@ def pad_copper_layers(pad, board_copper) -> set:
 
     KiCad writes two wildcards a pad's `layers` list can carry: ``*.Cu`` (every
     copper layer -- a through-hole barrel) and ``F&B.Cu`` (front and back only).
-    ``expand_pad_layers`` handles the first but passes ``F&B.Cu`` through
-    verbatim, because it only tests ``endswith('.Cu')`` -- so a consumer that
-    scopes a per-layer rule through it silently mis-scopes every ``F&B.Cu`` pad.
-    This is the one expansion the clearance paths use; #697 lifted it out of
-    ``run_drc`` so the PLACEMENT side (placement/legality.py) resolves layer
-    scope from the same function rather than a hand-mirrored copy.
+    #697 lifted this out of ``run_drc`` so the PLACEMENT side
+    (placement/legality.py) resolves layer scope from the same function rather
+    than a hand-mirrored copy.
+
+    It now DELEGATES to ``expand_pad_layers`` rather than re-implementing the
+    expansion. It originally forked because that function passed ``F&B.Cu``
+    through verbatim; #722 fixed it there instead, which is the right place --
+    ``expand_pad_layers`` is what check_connected and the ROUTER scope pads
+    with, so the fork left the authority and the router wrong while curing only
+    the clearance paths. Two spellings of one expansion is the defect class
+    #695/#722 are about; this is the set-returning adapter, not a second answer.
     """
-    out = set()
-    for l in (getattr(pad, 'layers', None) or []):
-        if l in ('*.Cu', 'F&B.Cu'):
-            out |= set(board_copper) if l == '*.Cu' else {'F.Cu', 'B.Cu'}
-        elif str(l).endswith('.Cu'):
-            out.add(l)
-    return out
+    return set(expand_pad_layers(list(getattr(pad, 'layers', None) or []),
+                                 list(board_copper)))
 
 
 def pads_shared_layer_clearance(eff: float, layer_rules, layers_a, layers_b=None):
