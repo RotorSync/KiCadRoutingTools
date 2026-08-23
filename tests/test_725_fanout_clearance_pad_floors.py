@@ -641,6 +641,48 @@ class TestNudgerGraderConsistency(unittest.TestCase):
     # MUTATION: the offender test in `nudge_vias_for_unresolved` back to
     # `vr + clearance - EPS` -> calls[0] == 0.
 
+    def test_a_RELOCATED_via_keeps_its_radius(self):
+        """`nudge_vias_for_unresolved` rebuilds `st.vias`, so a moved via is a
+        NEW tuple. Without carrying its entry across, it drops out of the radius
+        map and is graded at its keep-out SLOT -- the prune over-reach -- rather
+        than at the pair's requirement. Conservative, but wrong, and it is the
+        one map that gains entries after __init__, so the entry must also hold
+        its tuple or a recycled id hands back another via's radius.
+
+        No tracked board relocates a via at the shipped 0.6mm budget, so this
+        rigs one: a single foreign via just outside a cap pad, a cleared
+        neighbourhood, and a wider `max_shift`."""
+        pcb = parse_kicad_pcb(BOARD)
+        st = _repair(BOARD, pcb=pcb)
+        cap = st.caps['C67']
+        r = cap.pad_rects()[0]
+        own = {q[4] for q in cap.pads}
+        fnet = next(n for n in pcb.nets if n and n not in own)
+        vx, vy = r[2] + 0.20, (r[1] + r[3]) / 2.0
+        pcb.vias[:] = [make_via(vx, vy, net_id=fnet, size=0.5, drill=0.3)]
+        pcb.segments[:] = []
+        t0 = (vx, vy, fnet, 0.25 + st._item_reach(st.via_floor(fnet)))
+        st.vias = [t0]
+        st._via_radius_by_id = {id(t0): (t0, 0.25)}
+        st.cap_vias = {k: st.vias for k in st.caps}
+        st.segments = []
+        st.cap_segs = {k: [] for k in st.caps}
+        moves, _segs = nudge_vias_for_unresolved(st, pcb, CLEAR, max_shift=4.0)
+        # ON THE BRANCH: the via must actually have moved, or the carry-over
+        # branch never ran and this test would pass vacuously.
+        self.assertEqual(len(moves), 1, 'no via was relocated')
+        self.assertEqual(len(st.vias), 1)
+        moved = st.vias[0]
+        self.assertNotEqual((moved[0], moved[1]), (t0[0], t0[1]))
+        rec = st._via_radius_by_id.get(id(moved))
+        self.assertIsNotNone(rec, 'the relocated via lost its radius')
+        self.assertAlmostEqual(rec[1], 0.25, places=9)
+        self.assertIs(rec[0], moved,
+                      'the map does not hold the tuple it keys on -- a '
+                      'recycled id would return another via\'s radius')
+    # MUTATION: drop the `_radii[id(moved)] = ...` carry-over in
+    # `nudge_vias_for_unresolved` -> rec is None.
+
     def test_a_duck_typed_state_grades_flat_instead_of_crashing(self):
         """test_617 and test_370 drive the nudger with a _FakeSt/_FakeCap that
         carries none of this machinery."""

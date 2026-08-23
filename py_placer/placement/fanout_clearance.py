@@ -425,15 +425,23 @@ class _Repair:
         # The RADIUS, keyed on the tuple's identity. _via_effs has to strip the
         # over-reach back off element 3, and deriving the radius arithmetically
         # would silently mis-price a tuple a test assigned wholesale with a
-        # different keep-out convention. Absent from this map -> graded flat,
-        # which is the same fallback _pad_effs and _seg_effs already take.
-        self._via_radius_by_id: Dict[int, float] = {}
+        # different keep-out convention. Absent from this map -> graded at the
+        # tuple's own keep-out slot verbatim, i.e. exactly as injected.
+        #
+        # The VALUE holds the tuple as well as the radius, so the map itself
+        # keeps every registered tuple alive. Unlike the pad/segment floor maps
+        # -- which are filled only in __init__, where self.foreign_pads and
+        # self.segments hold their tuples -- this one gains entries later, when
+        # nudge_vias_for_unresolved relocates a via. A tuple that died while its
+        # id entry lived would hand a recycled id ANOTHER via's radius,
+        # silently.
+        self._via_radius_by_id: Dict[int, Tuple[tuple, float]] = {}
         for v in pcb_data.vias:
             size = v.size if v.size and v.size > 0 else default_via_size
             t = (v.x, v.y, v.net_id,
                  size / 2.0 + self._item_reach(self._via_floor_for(v.net_id)))
             self.vias.append(t)
-            self._via_radius_by_id[id(t)] = size / 2.0
+            self._via_radius_by_id[id(t)] = (t, size / 2.0)
 
         # --- avoidance: foreign-net tracks on the cap's own side ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
@@ -973,8 +981,9 @@ class _Repair:
         for fa in cap.pad_floors:
             row = []
             for v in vias:
-                r = by_id.get(id(v))
-                row.append(v[3] if r is None else r + self.via_required(fa, v[2]))
+                rec = by_id.get(id(v))
+                row.append(v[3] if rec is None
+                           else rec[1] + self.via_required(fa, v[2]))
             rows.append(row)
         self._cap_via_eff[ref] = (vias, rows)
         return rows
@@ -2044,9 +2053,21 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             # a moved via keeps its requirement. #725: this rebuild gives the
             # list a NEW identity, which is what makes _Repair's per-cap
             # required-clearance memos rebuild instead of going stale.
-            st.vias = [(nx, ny, w2[2], w2[3]) if (abs(w2[0] - old[0]) < 1e-6 and
-                                                  abs(w2[1] - old[1]) < 1e-6) else w2
-                       for w2 in st.vias]
+            _radii = getattr(st, '_via_radius_by_id', None)
+            _rebuilt = []
+            for w2 in st.vias:
+                if (abs(w2[0] - old[0]) < 1e-6 and abs(w2[1] - old[1]) < 1e-6):
+                    moved = (nx, ny, w2[2], w2[3])
+                    # A relocated via is a NEW tuple, so it would drop out of
+                    # the radius map and be graded at its keep-out slot -- the
+                    # prune OVER-reach -- instead of the pair's requirement.
+                    # Carry the radius across; the via did not change size.
+                    if _radii is not None and id(w2) in _radii:
+                        _radii[id(moved)] = (moved, _radii[id(w2)][1])
+                    _rebuilt.append(moved)
+                else:
+                    _rebuilt.append(w2)
+            st.vias = _rebuilt
             via_moves.append((old[0], old[1],
                               {'x': nx, 'y': ny, 'size': v.size, 'drill': v.drill,
                                'layers': v.layers, 'net_id': v.net_id}))
