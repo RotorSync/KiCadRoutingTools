@@ -2144,7 +2144,7 @@ placement-and-routing loop's machinery; this skill only needs to know that
      | fewer nets in the search | `route.py --nets` — name the sub-bus rather than `'*'` |
      | a shallower rip-up search | `--max-ripup` (on `route.py` and `route_diff.py`) |
      | fewer parts in a placement repair | `py_placer/place_seed.py --reseat <REFS>` takes the refs; scope it yourself instead of sweeping the board |
-     | no neighbour eviction | `py_placer/place_seed.py --evict-depth 0` (the default) — it censuses `no_pose_blockers` and moves nothing |
+     | no neighbour eviction | `py_placer/place_seed.py --evict-depth 0` (the default) — it censuses `no_pose_blockers`, records a `no_pose_verdict` per stuck part and moves nothing. 1 trades one blocker, 2 also censuses pairs and costs the most |
      | a half that closes on a counted plateau | `py_placer/converge.py verdict --flat N` counts RECORDED laps (default 5), and `converge.py record --exhausted <half>` closes one honestly |
 
      Then run the long step DETACHED and read its log, rather than wrapping it
