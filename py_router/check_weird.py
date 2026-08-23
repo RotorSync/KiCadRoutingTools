@@ -235,12 +235,18 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
     if not track_segs:
         return
     via_pts = [(v.x, v.y, getattr(v, 'size', 0.6) or 0.6) for v in net_vias]
+    # NO pads are handed to _point_anchored. Its pad test is a bounding CIRCLE
+    # of radius max(size_x, size_y)/2, which over-credits every non-square pad
+    # -- and because it runs FIRST it can only ADD credit, so the exact test
+    # below never gets to refuse. Measured over kicad_files/: it anchors 2
+    # endpoints the exact predicate refuses, both a 0.3mm track ending 0.575mm
+    # from a 1.8x0.45 pad's copper on lvds_converter_dualclk_gnd -- a board
+    # that reports zero findings today, so those are two masked dangling-ends.
+    # _point_anchored keeps the VIA and T-junction halves, which this function
+    # has no other source for; pads are answered by endpoint_reaches_pad alone.
+    # (The bounding circle is left alone in pcb_modification, where the pruner
+    # shares it and over-crediting is the safe direction for a REMOVAL gate.)
     pad_pts = []
-    for p in net_pads:
-        px = getattr(p, 'global_x', getattr(p, 'x', 0.0))
-        py = getattr(p, 'global_y', getattr(p, 'y', 0.0))
-        psize = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
-        pad_pts.append((px, py, psize, getattr(p, 'layers', [])))
 
     def key(x, y, layer):
         return (round(x, 3), round(y, 3), layer)
@@ -646,7 +652,8 @@ def _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads, floor,
     if floor <= 0 or not net_pads or not net_segs:
         return
     from pcb_modification import (terminal_pad_web_shortfall,
-                                  terminal_web_neck_exact)
+                                  terminal_web_neck_exact,
+                                  circular_pad_web_shortfall, _is_round_pad)
     from routing_utils import _to_pad_frame
     e = floor / 2.0
 
@@ -671,8 +678,9 @@ def _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads, floor,
                 continue  # not a free end
             target = None
             for pad in net_pads:
-                if getattr(pad, 'shape', None) not in ('rect', 'roundrect', 'oval'):
-                    continue
+                if getattr(pad, 'shape', None) not in ('rect', 'roundrect',
+                                                       'oval', 'circle'):
+                    continue  # custom-polygon pads have no closed-form web
                 if not pad.size_x or not pad.size_y:
                     continue
                 if not (s.layer in pad.layers or any('*' in L for L in pad.layers)):
@@ -684,8 +692,17 @@ def _check_terminal_web(pcb_data, net_id, name, net_segs, net_pads, floor,
                 continue
             elx, ely = _to_pad_frame(ex, ey, target)
             nlx, nly = _to_pad_frame(nx, ny, target)
-            is_neck, _ = terminal_pad_web_shortfall(
-                nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0, r, e)
+            if _is_round_pad(target):
+                # A round pad has no corner, but it has a RIM: a cap landing
+                # near the edge joins through a lens chord that can be far
+                # below the floor. Skipping circles here reported NOTHING on
+                # the same hazard the rect model catches (#416/#722).
+                is_neck, _ = circular_pad_web_shortfall(
+                    elx, ely, target.size_x / 2.0, r, e)
+            else:
+                is_neck, _ = terminal_pad_web_shortfall(
+                    nlx, nly, elx, ely, target.size_x / 2.0,
+                    target.size_y / 2.0, r, e)
             if is_neck and terminal_web_neck_exact(
                     pcb_data, net_id, s.layer, ex, ey, floor) is not False:
                 # size=None: narrow pad joints bypass the --tolerance

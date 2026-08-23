@@ -689,6 +689,58 @@ def main():
                     "the net is SPLIT",
                     _c['num_components'] > 1 or bool(_c['disconnected_pads'])))
 
+    # 19. _point_anchored's pad test is a bounding CIRCLE of radius
+    #     max(size_x, size_y)/2, and in _check_dangles it ran BEFORE the exact
+    #     one -- so it could only ADD credit and the exact test never got to
+    #     refuse. A 0.3mm track ending 0.575mm from a 1.8x0.45 pad's copper is
+    #     0.9mm from its centre, inside the bounding circle and nowhere near
+    #     the copper. Pads are answered by endpoint_reaches_pad alone now.
+    _long = _rect_pad(0, 0, 1.8, 0.45, num='1')
+    _lp2 = [_long, _rect_pad(-6, 0, 1.8, 0.45, num='2', ref='U2')]
+    _lseg = [_seg(-6, 0, -0.9, 0.42, width=0.3)]
+    results.append(("the long-pad row is ON its branch: inside the bounding "
+                    "circle, outside the copper",
+                    point_to_pad_distance(-0.9, 0.42, _long) > 0.15
+                    and math.hypot(-0.9, 0.42) < 1.8 / 2 + 0.15))
+    _lc = check_net_connectivity(NET, _lseg, [], _lp2, [])
+    results.append(("check_connected calls that end unconnected to the pad",
+                    _lc['num_components'] > 1 or bool(_lc['disconnected_pads'])))
+    results.append(("...and check_weird no longer credits it by the bounding "
+                    "circle: a dangling end",
+                    len([x for x in check_weird(_pcb(_lseg, pads=_lp2),
+                                                tolerance=0)[0]
+                         if x['category'] == 'dangling-end']) >= 1))
+    #     Control: an end genuinely ON that pad's copper is still anchored, so
+    #     the row above is the exact test firing and not a blanket refusal.
+    results.append(("an end on the long pad's real copper is still anchored",
+                    not [x for x in check_weird(
+                        _pcb([_seg(-6, 0, -0.5, 0, width=0.3)], pads=_lp2),
+                        tolerance=0)[0]
+                        if x['category'] == 'dangling-end']))
+
+    # 20. narrow-pad-joint on a ROUND pad (#416 follow-through). The shape gate
+    #     skipped circles -- "a circle has no corner to graze". It has no
+    #     corner, but it has a RIM, and the same connection_width hazard lives
+    #     there: a cap landing just outside the rim joins through a lens whose
+    #     chord is far below the floor. _pad_web_polygon has handled circles all
+    #     along; only the pre-filter and the gate did not.
+    def _rim(d, shape='circle', w=0.2, R=0.5, floor=0.1):
+        pad = _pad(0, 0, size=2 * R, num='1')
+        pad.shape = shape
+        far = _pad(6, 0, size=2 * R, num='2', ref='U2')
+        far.shape = shape
+        segs = [_seg(6, 0, d, 0, width=w),
+                _seg(-9, -9, -8, -9, width=floor)]   # sets the min-track floor
+        return _pcb(segs, pads=[pad, far])
+
+    results.append(("a cap grazing a ROUND pad's rim is a narrow-pad-joint",
+                    len([x for x in check_weird(_rim(0.59), tolerance=0)[0]
+                         if x['category'] == 'narrow-pad-joint']) == 1))
+    #     Control: the same cap biting deeper joins through full copper.
+    results.append(("the same cap deeper into the round pad is NOT flagged",
+                    not [x for x in check_weird(_rim(0.52), tolerance=0)[0]
+                         if x['category'] == 'narrow-pad-joint']))
+
     # 11. The reporter, which is what #696 actually broke: a finding whose
     #     category is missing from CATEGORIES counted toward the headline and
     #     the exit code but printed nothing, so the board was blocked by a

@@ -229,6 +229,77 @@ def run():
     check("close_soft_joints still bridges it (the layer guard holds)",
           close_soft_joints([], _pcb, None, _cfg()) == 1)
 
+
+    # --- graphic DEGREE parity between detection and repair ------------------
+    # close_soft_joints skipped graphics when counting endpoint DEGREE while
+    # check_drc counted them, so a track end sharing a vertex with copper art
+    # was degree 1 here and degree 2 there: check_drc reported nothing and this
+    # pass wrote a bridge anyway. The contract is "check_drc's exact soft-joint
+    # definition, so detection and repair agree" -- which needs the same degree.
+    _gsegs = [Segment(start_x=0.0, start_y=0.0, end_x=1.0, end_y=0.0,
+                      width=0.1, layer='F.Cu', net_id=1),
+              Segment(start_x=1.0, start_y=0.0, end_x=1.5, end_y=0.5,
+                      width=0.1, layer='F.Cu', net_id=1, graphic=True),
+              Segment(start_x=1.05, start_y=0.05, end_x=2.0, end_y=0.05,
+                      width=0.1, layer='F.Cu', net_id=1)]
+    _gpcb = PCBData(footprints={}, nets={1: Net(1, '/A')}, segments=_gsegs,
+                    vias=[], board_info=BoardInfo(
+                        layers={}, copper_layers=['F.Cu', 'B.Cu']),
+                    pads_by_net={})
+    check("a track end sharing a vertex with copper ART is not a free end",
+          close_soft_joints([], _gpcb, None, _cfg()) == 0,
+          "bridges written")
+    # Control: the identical geometry with the art absent IS a soft joint, so
+    # the row above is the degree count and not a blanket refusal.
+    _ngpcb = PCBData(footprints={}, nets={1: Net(1, '/A')},
+                     segments=[_gsegs[0], _gsegs[2]], vias=[],
+                     board_info=BoardInfo(layers={},
+                                          copper_layers=['F.Cu', 'B.Cu']),
+                     pads_by_net={})
+    check("without the art the same pair IS bridged (control)",
+          close_soft_joints([], _ngpcb, None, _cfg()) == 1)
+
+    # --- the bridge must clear a same-net UNPLATED hole -----------------------
+    # _seg_foreign_hole_dist skips own-net holes -- right for a PLATED barrel
+    # (that copper IS the net), wrong for an unplated one, which has no copper
+    # whatever net it is tagged with (#328). A net-tied M3 mounting hole is the
+    # hole a same-net bridge is most likely to cross, and nothing was looking.
+    _npth = Pad(component_ref='H1', pad_number='1', global_x=1.025,
+                global_y=0.025, local_x=0, local_y=0, size_x=3.2, size_y=3.2,
+                shape='circle', layers=['*.Cu'], net_id=1, net_name='/A',
+                rotation=0.0, drill=3.2)
+    _npth.pad_type = 'np_thru_hole'
+    _hsegs = [Segment(start_x=-4.0, start_y=0.0, end_x=1.0, end_y=0.0,
+                      width=0.1, layer='F.Cu', net_id=1),
+              Segment(start_x=1.05, start_y=0.05, end_x=6.0, end_y=0.05,
+                      width=0.1, layer='F.Cu', net_id=1)]
+    _hpcb = PCBData(footprints={}, nets={1: Net(1, '/A')}, segments=_hsegs,
+                    vias=[], board_info=BoardInfo(
+                        layers={}, copper_layers=['F.Cu', 'B.Cu']),
+                    pads_by_net={1: [_npth]})
+    check("a bridge is refused across a same-net UNPLATED drill",
+          close_soft_joints([], _hpcb, None, _cfg()) == 0, "bridges written")
+    # Control: the SAME unplated hole moved away from the joint does not
+    # block it -- so the row above is a distance test, not a blanket refusal
+    # whenever an NPTH pad exists on the net.
+    _far_npth = Pad(component_ref='H1', pad_number='1', global_x=1.025,
+                    global_y=9.0, local_x=0, local_y=0, size_x=3.2,
+                    size_y=3.2, shape='circle', layers=['*.Cu'], net_id=1,
+                    net_name='/A', rotation=0.0, drill=3.2)
+    _far_npth.pad_type = 'np_thru_hole'
+    _fpcb = PCBData(footprints={}, nets={1: Net(1, '/A')},
+                    segments=[Segment(start_x=-4.0, start_y=0.0, end_x=1.0,
+                                      end_y=0.0, width=0.1, layer='F.Cu',
+                                      net_id=1),
+                              Segment(start_x=1.05, start_y=0.05, end_x=6.0,
+                                      end_y=0.05, width=0.1, layer='F.Cu',
+                                      net_id=1)],
+                    vias=[], board_info=BoardInfo(
+                        layers={}, copper_layers=['F.Cu', 'B.Cu']),
+                    pads_by_net={1: [_far_npth]})
+    check("the same hole far from the joint does NOT block it (control)",
+          close_soft_joints([], _fpcb, None, _cfg()) == 1, "bridges written")
+
     print()
     if fails:
         print(f"FAIL: {len(fails)} check(s): {fails}")
