@@ -766,7 +766,6 @@ with tempfile.TemporaryDirectory() as wd:
 # its OWN state, so reseat_scope's extra_locked_refs never reached it.
 # --------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as wd:
-    import random as _r2
     from placement import floorplan as _fp2
     bpath = os.path.join(wd, 'lk.kicad_pcb')
     ipath = os.path.join(wd, 'lk.json')
