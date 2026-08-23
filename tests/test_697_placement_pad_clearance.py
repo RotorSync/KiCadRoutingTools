@@ -175,11 +175,20 @@ class TestCensus(unittest.TestCase):
         self.assertEqual(g['pad_conflicts'], 1, g)
 
     def test_beyond_the_old_cell_hash_halo(self):
-        # gap 0.9: further than the old `clearance + 0.5` neighbour halo, so
-        # the pair never even entered the census.
-        g = self._grade(two_pads(0.90, lc_a=1.2))
+        """The pair must be reachable through the CELL HASH, not just past the
+        per-pair reject.
+
+        `near_refs` walks a 4mm cell grid inflated by its halo, so a gap under
+        ~4mm lands in an adjacent cell and is enumerated whatever the halo is --
+        a test at 0.9mm exercises the reject and silently claims the halo. The
+        separation has to exceed a cell for the halo to be the thing under test.
+        """
+        # gap 5.0, requirement 6.0: the old halo (0.15 + 0.5) reaches neither
+        # the cell nor the pair.
+        g = self._grade(two_pads(5.0, lc_a=6.0))
         # MUTATION: revert near_refs to `m = clearance + 0.5` -> 0.
         self.assertEqual(g['pad_conflicts'], 1, g)
+        self.assertEqual(g['required'], [['A', 'B', 6.0, 'pad override']])
 
     def test_inert_when_nothing_is_declared(self):
         clean = self._grade(two_pads(0.40))
@@ -341,6 +350,31 @@ class TestRealBoards(unittest.TestCase):
         eff, src = model.pair_with_source(fa, fb)
         self.assertAlmostEqual(eff, 0.4)
         self.assertEqual(src, 'netclass')
+
+    def test_netclass_alone_reaches_the_census(self):
+        """A netclass with NO pad override anywhere must still raise the census.
+
+        Every other census test here carries a `local_clearance`, so they would
+        all pass with the netclass term deleted. This one has no override at
+        all: its only source is the class.
+        """
+        if not os.path.exists(FLAT_HIER):
+            self.skipTest('flat_hierarchy fixture not present')
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(FLAT_HIER)
+        wide = [nid for nid, v in PadClearanceModel.for_board(
+            pcb, 0.2, FLAT_HIER).net_floor.items() if v >= 0.4]
+        self.assertTrue(wide)
+        # Two 1x1 pads, one on a `Wide` net, 0.3mm apart: clear at the 0.2
+        # Default floor, in violation of the 0.4 class.
+        fps = {'A': fp_with('A', 0.0, 0.0,
+                            [pad(0.0, 0.0, net=wide[0], ref='A')]),
+               'B': fp_with('B', 1.3, 0.0, [pad(1.3, 0.0, net=0, ref='B')])}
+        pcb.footprints = fps
+        # MUTATION: drop the net_clearance_map_by_id read -> 0.
+        g = grade_pad_legality(pcb, 0.2, worst_n=0, pcb_file=FLAT_HIER)
+        self.assertEqual(g['pad_conflicts'], 1, g)
+        self.assertEqual(g['required'], [['A', 'B', 0.4, 'netclass']])
 
     def test_dru_half_end_to_end(self):
         """A sibling .kicad_dru must reach the census. No board in the repo
