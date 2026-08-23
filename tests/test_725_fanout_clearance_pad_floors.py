@@ -38,6 +38,7 @@ if _TESTS not in sys.path:
 
 from kicad_parser import parse_kicad_pcb
 from copy_board import copy_board
+from synth import make_via
 import placement.legality as L
 from placement.legality import PadClearanceModel
 from placement.fanout_clearance import (_Repair, _pad_pair_shortfall,
@@ -71,13 +72,13 @@ def _repair(path, clearance=CLEAR, prefix='C,R,FB', pcb=None):
                    clearance, 0.1, 0.55, 1.0, 2.0, 0.3, prefix, set())
 
 
-def _stage(tmp, name, classes=None, dru=None):
-    """A COPY of the in-repo board (siblings carried by copy_board), plus an
+def _stage(tmp, name, classes=None, dru=None, src=None):
+    """A COPY of an in-repo board (siblings carried by copy_board), plus an
     optional netclass project and/or an optional .kicad_dru."""
     d = os.path.join(tmp, name)
     os.makedirs(d, exist_ok=True)
     dst = os.path.join(d, 'b.kicad_pcb')
-    copy_board(BOARD, dst)
+    copy_board(src or BOARD, dst)
     pro = os.path.splitext(dst)[0] + '.kicad_pro'
     if classes is not None:
         with open(pro, 'w', encoding='utf-8') as f:
@@ -364,21 +365,78 @@ class TestPruneRadiiStayExact(unittest.TestCase):
 
     def test_the_bbox_prescreen_widens_with_the_requirement(self):
         """`_blocked_geom`'s pad-bbox prescreen is a SKIP: left at the flat
-        scalar it silently drops exactly the pairs a declaration raises."""
-        pairs = 0
-        for ref, cap in self.st.caps.items():
-            for oref in self.st.cap_caps[ref]:
-                other = self.st.caps[oref]
-                gap = _rect_gap(cap.pad_bbox(cap.x, cap.y, cap.rot),
-                                other.pad_bbox())
-                screen = max(self.st.clearance, cap.max_floor, other.max_floor)
-                if self.st.clearance <= gap < screen:
-                    pairs += 1
-        self.assertGreater(pairs, 0,
-                           'no mover pair sits between the flat scalar and the '
-                           'widened prescreen -- this test would pass vacuously')
-    # MUTATION: `_blocked_geom`'s prescreen back to `>= self.clearance` ->
-    # every one of those pairs is skipped before its shortfall is computed.
+        scalar it silently drops exactly the pairs a declaration raises.
+
+        Behavioural, not arithmetic: it walks a cap toward each neighbour until
+        the pair is charged beyond its seed baseline while the pad BBOXES are
+        still further apart than the flat scalar, then asserts _blocked_geom
+        actually vetoes that pose."""
+        pcb = parse_kicad_pcb(BOARD)
+        for p in pcb.footprints[ANCHOR_CAP].pads:
+            p.local_clearance = 1.2      # raise only this mover's own pads
+        st = _repair(BOARD, pcb=pcb)
+        cap = st.caps[ANCHOR_CAP]
+        found = None
+        for oref in st.cap_caps[ANCHOR_CAP]:
+            other = st.caps[oref]
+            base = st.base_cap_pad.get(frozenset((ANCHOR_CAP, oref)), 0.0)
+            effs = st._pair_effs(ANCHOR_CAP, cap, oref, other)
+            orect = other.rect()
+            ocx, ocy = (orect[0] + orect[2]) / 2.0, (orect[1] + orect[3]) / 2.0
+            d = math.hypot(ocx - cap.x, ocy - cap.y)
+            for k in range(1, 25):
+                step = k * 0.1
+                if step >= d:
+                    break
+                nx = cap.x + (ocx - cap.x) * step / d
+                ny = cap.y + (ocy - cap.y) * step / d
+                pads = cap.pad_rects(nx, ny, cap.rot)
+                bbox_gap = _rect_gap(cap.pad_bbox(nx, ny, cap.rot),
+                                     other.pad_bbox())
+                charged = _pad_pair_shortfall(pads, other.pad_rects(),
+                                              st.clearance, effs)
+                flat = _pad_pair_shortfall(pads, other.pad_rects(), st.clearance)
+                if (bbox_gap >= st.clearance and charged > base + 1e-6
+                        and flat == 0.0):
+                    found = (oref, nx, ny, bbox_gap, charged, base)
+                    break
+            if found:
+                break
+        # ON THE BRANCH: the pose must be one the OLD prescreen would skip, and
+        # one the flat pricing scores at exactly zero.
+        self.assertIsNotNone(found, 'no pose sits beyond the flat prescreen '
+                                    'while being charged -- this test would '
+                                    'pass vacuously')
+        oref, nx, ny, bbox_gap, charged, base = found
+        self.assertGreaterEqual(bbox_gap, st.clearance)
+        self.assertGreater(charged, base)
+        self.assertTrue(
+            st._blocked_geom(ANCHOR_CAP, cap, nx, ny, cap.rot),
+            '_blocked_geom let a charged %s<->%s pose through (bbox gap %.4f '
+            '>= the flat %.2f, so the prescreen skipped it)'
+            % (ANCHOR_CAP, oref, bbox_gap, st.clearance))
+    # MUTATION: `_blocked_geom`'s prescreen back to `>= self.clearance` -> the
+    # pair is skipped before its shortfall is computed and the pose is allowed.
+
+    def test_the_cap_side_slack_raises_the_via_and_track_reaches(self):
+        """`cap_segs`/`cap_vias` add the CAP's own excess over the flat scalar.
+        A uniform netclass hides this -- the item's own floor already grew the
+        list -- so raise one mover's pads and leave every via and track at the
+        flat value."""
+        pcb = parse_kicad_pcb(BOARD)
+        for p in pcb.footprints[ANCHOR_CAP].pads:
+            p.local_clearance = 1.2
+        st = _repair(BOARD, pcb=pcb)
+        # ON THE BRANCH: the cap is raised and the items are NOT.
+        self.assertAlmostEqual(st.caps[ANCHOR_CAP].max_floor, 1.2, places=6)
+        self.assertEqual(st._item_reach(st.via_floor(0)), CLEAR)
+        for name in ('cap_segs', 'cap_vias'):
+            a = len(getattr(self.flat, name)[ANCHOR_CAP])
+            b = len(getattr(st, name)[ANCHOR_CAP])
+            self.assertGreater(b, a, '%s did not grow with the cap-side slack '
+                                     '(%d -> %d)' % (name, a, b))
+    # MUTATION: `via_slack = 0.0`, or drop `max(0.0, cap_mf - clearance)` from
+    # `seg_reach` -> that list stops growing.
 
     def test_the_seed_baseline_is_in_the_SAME_currency(self):
         """A baseline priced flat while candidates price at the requirement
@@ -450,33 +508,45 @@ class TestNudgerGraderConsistency(unittest.TestCase):
     # MUTATION: build the via eff rows from anything but `via_required` -> the
     # equality fails.
 
-    def test_the_offender_predicate_sees_what_the_grader_charges(self):
-        """The nudger's offender test, replayed here against the same helper.
-        A via that the grader charges must be an offender, and there must be at
-        least one that the FLAT predicate would have missed."""
-        only_raised = 0
-        for ref, cap in self.st.caps.items():
-            rects = cap.pad_rects(cap.x, cap.y, cap.rot)
-            for vx, vy, vnet, keepout in self.st.cap_vias[ref]:
-                radius = keepout - self.st._item_reach(self.st.via_floor(vnet))
-                for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
-                    if vnet == net:
-                        continue
-                    d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
-                    want = self.st.via_required(cap.pad_floors[i], vnet)
-                    hit_now = d < radius + want - 1e-6
-                    hit_flat = d < radius + self.st.clearance - 1e-6
-                    self.assertFalse(hit_flat and not hit_now,
-                                     'the raised predicate LOST an offender '
-                                     'the flat one saw (%s, via %g,%g)'
-                                     % (ref, vx, vy))
-                    only_raised += (hit_now and not hit_flat)
-        self.assertGreater(only_raised, 0,
-                           'no via is an offender only under the raised '
-                           'requirement -- this test would pass vacuously')
+    def test_the_offender_loop_RESOLVES_rather_than_assuming_the_scalar(self):
+        """Drives the real `nudge_vias_for_unresolved` and counts how often its
+        offender loop consults `via_required`.
+
+        Every via is parked far from every cap, so there are no offenders and
+        the function returns empty either way -- but the loop must still have
+        EVALUATED the predicate through the resolver. Priced at the flat scalar
+        instead, the resolver is never called at all, and a cap unresolved
+        because of a RAISED via requirement yields an empty offender list: the
+        pass then reports it unresolved forever and prints nothing."""
+        pcb = parse_kicad_pcb(self.path)
+        st = _repair(self.path, pcb=pcb)
+        bounds = pcb.board_info.board_bounds
+        far = make_via(bounds[0] + 2.0, bounds[1] + 2.0, net_id=1)
+        pcb.vias[:] = [far]
+        st.vias = [(far.x, far.y, 1, 0.25 + st._item_reach(st.via_floor(1)))]
+        st.cap_vias = {r: st.vias for r in st.caps}
+        unresolved = [r for r in st.caps
+                      if st.graze_penalty(r, st.caps[r], st.caps[r].x,
+                                          st.caps[r].y, st.caps[r].rot) > 1e-6]
+        # ON THE BRANCH: the loop only runs at all if some cap is unresolved,
+        # and only reaches the resolver if a via is in the list.
+        self.assertTrue(unresolved, 'no cap is unresolved -- the offender loop '
+                                    'never runs and this proves nothing')
+        calls = [0]
+        real = st.via_required
+
+        def counting(pad_floor, via_net):
+            calls[0] += 1
+            return real(pad_floor, via_net)
+        st.via_required = counting
+        moves, segs = nudge_vias_for_unresolved(st, pcb, CLEAR)
+        self.assertEqual((moves, segs), ([], []),
+                         'the far-away via should offend nobody')
+        self.assertGreater(calls[0], 0,
+                           'the offender loop never consulted via_required -- '
+                           'it is pricing at the flat scalar')
     # MUTATION: the offender test in `nudge_vias_for_unresolved` back to
-    # `vr + clearance` -> those `only_raised` vias become invisible to the
-    # nudger while the grader still reports their caps unresolved.
+    # `vr + clearance - EPS` -> calls[0] == 0.
 
     def test_a_duck_typed_state_grades_flat_instead_of_crashing(self):
         """test_617 and test_370 drive the nudger with a _FakeSt/_FakeCap that
@@ -551,6 +621,11 @@ class TestShapeContract(unittest.TestCase):
     # silently wrong requirement.
 
     def test_injecting_cap_foreign_pads_grades_without_misindexing(self):
+        """A tuple a test injected carries no registered floor, so it must be
+        graded at the FLAT scalar. Without the source-list identity guard the
+        memo built during __init__ is reused, and row[0] silently supplies the
+        requirement of a completely different pad -- a wrong number that raises
+        no error and looks entirely plausible."""
         st = _repair(self.path)
         cap = st.caps[ANCHOR_CAP]
         own = {p[4] for p in cap.pads}
@@ -558,9 +633,21 @@ class TestShapeContract(unittest.TestCase):
         r = cap.pad_rects()[0]
         st.cap_foreign_pads[ANCHOR_CAP] = [
             (r[0] - 0.15, r[1], r[0] - 0.05, r[3], foreign, cap.side)]
-        self.assertIn(foreign, _short(st, ANCHOR_CAP))
-    # MUTATION: drop the source-list identity guard in `_pad_effs` -> stale
-    # rows index a list that no longer exists (IndexError).
+        rect = st.cap_foreign_pads[ANCHOR_CAP][0][:4]
+        got = _short(st, ANCHOR_CAP)
+        self.assertIn(foreign, got)
+        # Summed over EVERY cap pad, at the FLAT scalar. Graded off a stale row
+        # it would come out at the board's declared 0.4 instead.
+        flat = sum(max(0.0, CLEAR - _rect_gap(p[:4], rect))
+                   for p in cap.pad_rects())
+        declared = sum(max(0.0, 0.4 - _rect_gap(p[:4], rect))
+                       for p in cap.pad_rects())
+        self.assertNotAlmostEqual(flat, declared, places=6)   # not vacuous
+        self.assertAlmostEqual(got[foreign], flat, places=6,
+                               msg='the injected pad was graded at a stale '
+                                   'row rather than the flat scalar')
+    # MUTATION: drop the source-list identity guard in `_pad_effs` -> the
+    # shortfall reads 0.35.
 
     def test_ten_positional_arguments_still_construct(self):
         _Repair(parse_kicad_pcb(BOARD), BOARD, CLEAR, 0.1, 0.55, 1.0, 2.0, 0.3,
@@ -644,8 +731,12 @@ class TestReport(unittest.TestCase):
     # MUTATION: drop the `charged` filter in `required_rows` -> hundreds of rows.
 
     def test_an_unreadable_declaration_is_disclosed_not_silent(self):
-        """A FAILED read is exactly what makes a model look inert, so the notes
-        must be captured BEFORE the active-drop."""
+        """A FAILED read is exactly what makes a model look INERT, so the notes
+        must be captured BEFORE the active-drop.
+
+        Staged on the board with NO pad overrides on purpose: on a board that
+        has some, the failed netclass read still leaves the model active and
+        the notes survive by accident, so the ordering is never tested."""
         import list_nets
         orig = list_nets.net_clearance_map
 
@@ -654,7 +745,13 @@ class TestReport(unittest.TestCase):
         list_nets.net_clearance_map = boom
         try:
             with tempfile.TemporaryDirectory() as td:
-                st = _repair(_stage(td, 'unread', classes=_default_class(0.4)))
+                p = _stage(td, 'unread', classes=_default_class(0.4), src=INERT)
+                st = _repair(p)
+                # ON THE BRANCH: the failure must leave the model INACTIVE, or
+                # the notes survive for the wrong reason.
+                self.assertIsNone(st._floors,
+                                  'the model stayed active -- the ordering is '
+                                  'not under test on this fixture')
                 self.assertTrue(st.clearance_notes,
                                 'the failed netclass read was silent')
         finally:
