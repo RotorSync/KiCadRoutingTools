@@ -509,15 +509,23 @@ class QuenchState:
         self.pad_legality = bool(pad_legality)
         self.legality_ctx = None
         if self.pad_legality:
+            # #697: the per-pair required clearance (pad overrides, net
+            # classes, .kicad_dru layer rules), resolved from the board's own
+            # siblings exactly as check_drc does. Inert -- and every gate below
+            # then behaves as it did -- on a board that declares none of them.
+            pad_model = legality.PadClearanceModel.for_board(
+                pcb_data, clearance, pcb_file)
+            pad_model = pad_model if pad_model.active else None
             part_pads = legality.build_part_pads(
                 {ref: pcb_data.footprints[ref] for ref in self.parts
-                 if ref in pcb_data.footprints}, clearance)
+                 if ref in pcb_data.footprints}, clearance, pad_model)
             self.legality_ctx = legality.LegalityContext(
                 part_pads, self.edge_gate, clearance,
                 pose_of=lambda r: (self.parts[r].x, self.parts[r].y,
                                    self.parts[r].rot),
                 seed_of=lambda r: (self.parts[r].seed_x, self.parts[r].seed_y,
-                                   self.parts[r].orig_rot))
+                                   self.parts[r].orig_rot),
+                model=pad_model)
 
         # net -> refs touching it, as a SORTED LIST, not a set (#457).
         #
@@ -1617,8 +1625,17 @@ class QuenchState:
         union-of-rotations box at the seed inflated by the budget contains
         every rect the part can ever occupy. Any pair whose per-axis seed gap
         exceeds both budgets plus the largest interaction reach (hard
-        clearance / summed halos) can NEVER interact -- excluding it is exact
-        for candidate_valid AND part_geometry_cost, not an approximation.
+        clearance / summed halos / either part's largest PAD requirement) can
+        NEVER interact -- excluding it is exact for candidate_valid AND
+        part_geometry_cost, not an approximation.
+
+        The pad term is what #697 added: a pad's required clearance can exceed
+        the hard clearance (a fiducial keep-clear, a net class, a .kicad_dru
+        rule), and a reach that ignored it would quietly make this prune LOSSY
+        for the pad gate -- dropping exactly the pairs that gate exists to
+        catch. `PartPads.max_floor` is an upper bound per part, so folding it in
+        keeps the claim above literally true; it is 0.0 on a board that
+        declares nothing.
 
         Exactness survives the side rule unchanged: the side filter only ever
         REMOVES pairs from consideration, so an XY-only prune stays a superset of
@@ -1698,7 +1715,15 @@ class QuenchState:
             for oref, (rb, bb) in geom.items():
                 if oref == ref:
                     continue
-                m = ba + bb + max(self.clearance,
+                reach = self.clearance
+                if self.legality_ctx is not None:
+                    pa = self.legality_ctx.parts.get(ref)
+                    pb = self.legality_ctx.parts.get(oref)
+                    if pa is not None and pa.max_floor > reach:
+                        reach = pa.max_floor
+                    if pb is not None and pb.max_floor > reach:
+                        reach = pb.max_floor
+                m = ba + bb + max(reach,
                                   p.halo + self.parts[oref].halo) + 1e-9
                 if (ra[2] + m >= rb[0] and rb[2] + m >= ra[0]
                         and ra[3] + m >= rb[1] and rb[3] + m >= ra[1]):

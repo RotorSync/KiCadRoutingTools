@@ -532,6 +532,21 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   KiCad enforces max(the two items' clearances) per pair; the obstacle stamps
   and check_drc honor it the same way. Clearance consumers should read this
   field, never re-derive footprint inheritance.
+  **The PLACEMENT side honors it too, since #697** — `placement.legality`'s
+  `PadClearanceModel` resolves each pad pair at check_drc's own value
+  (`max(clearance, netclass a, netclass b)` → `.kicad_dru` layer rules over the
+  SHARED copper layers, which REPLACE → `max(…, lc_a, lc_b)`), and CALLS
+  check_drc's `pad_copper_layers` / `pads_shared_layer_clearance` rather than
+  mirroring them. It is strictly inert (`model.active` False, every consumer on
+  its original flat-scalar path) when the board declares no netclass, no dru
+  rule and no pad override. Before #697 the census priced every pair at one
+  flat scalar and read `local_clearance` nowhere in `py_placer/`, so a board
+  failing DRC on a 1.016mm fiducial keep-clear reported **0 conflict pairs** to
+  fix. Two consequences worth knowing: a pair graded above the board-wide
+  clearance is disclosed in `grade_pad_legality`'s `required` key (print it via
+  `legality.format_required_clause`, never a hand-copied string), and
+  `placement/fanout_clearance.py` is a SEPARATE flat-scalar channel that still
+  has this bug.
 
 ### Through-Hole vs SMD Pads
 

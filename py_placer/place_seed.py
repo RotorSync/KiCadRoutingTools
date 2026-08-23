@@ -348,7 +348,8 @@ Examples:
             copy_siblings(cur, args.output_file)
             from placement.legality import grade_pad_legality
             pcb_out = parse_kicad_pcb(args.output_file)
-            pads_after = grade_pad_legality(pcb_out, args.clearance)
+            pads_after = grade_pad_legality(pcb_out, args.clearance,
+                                            pcb_file=args.output_file)
             graded = floorplan.grade(intent, pcb_out, args.output_file,
                                      group_sources=sources,
                                      clearance=args.clearance,
@@ -357,6 +358,13 @@ Examples:
                 print(f"  GRADE ERROR [{v.rule}] {v.message}")
             summary['grade_errors'] = len(graded.errors)
             summary['pad_conflicts_after'] = pads_after['pad_conflicts']
+            # #697: the requirement each counted pair was graded at, when it
+            # sits above args.clearance, so the count is explainable.
+            summary['pad_clearance_required'] = pads_after.get('required') or []
+            from placement.legality import format_required_clause as _req_cl
+            if _req_cl(pads_after):
+                print(f"  above the {args.clearance}mm floor: "
+                      f"{_req_cl(pads_after)}")
             summary['hole_conflicts_after'] = pads_after['hole_conflicts']
             summary['oob_pad_count_after'] = pads_after['oob_pad_count']
             if graded.errors:
