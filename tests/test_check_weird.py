@@ -12,6 +12,9 @@ Synthetic Segment/Via/Pad cases:
   * a floating via                 -> unsupported-via flagged
   * a corner-graze terminal cap    -> narrow-pad-joint flagged (#696/#416)
   * the same cap landing in the pad body -> NOT flagged (clean)
+  * an off-centre via-in-pad (centre outside the pad, barrel overlapping)
+    -> NOT flagged, and its verdict AGREES with check_net_connectivity (#695)
+  * the same via moved until the barrel clears the pad -> dangling-via
 
 Plus two guards on the REPORTER, which is what #696 actually broke:
   * CATEGORIES is exactly the set of categories _finding(...) emits
@@ -36,6 +39,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from kicad_parser import Pad, Segment, Via, Zone, Net, BoardInfo, PCBData
 import check_weird as check_weird_mod
 from check_weird import check_weird, print_report, CATEGORIES
+from check_connected import check_net_connectivity
+from check_drc import point_to_pad_distance
+from connectivity import COINCIDENCE_TOL
 
 NET = 1
 NAME = '/TEST'
@@ -251,6 +257,77 @@ def main():
     f, _ = check_weird(pcb)
     results.append(("cap landing in the pad body NOT flagged",
                     not [x for x in f if x['category'] == 'narrow-pad-joint']))
+
+    # 12. Via-in-pad credited by the BARREL, not the centre (#695). The
+    #     router puts vias in pads on purpose (QFN allow_via_in_pad, plane
+    #     taps, BGA underpad), and an off-centre one has its centre just
+    #     OUTSIDE the pad outline while the barrel still overlaps the copper.
+    #     Crediting the centre only made this checker report `dangling-via`
+    #     on a joint check_net_connectivity -- the authoritative model, and
+    #     KiCad -- grades connected; check_weird's exit code is chain-blocking,
+    #     so that false positive cost a reroute lap.
+    #
+    #     Offset and pad are the kuchen case quoted in check_connected's own
+    #     comment (0.42mm circle pad, via centre 0.283mm away, so the centre
+    #     sits 0.073mm OUTSIDE the copper). The via here is _via()'s 0.6mm
+    #     default rather than kuchen's 0.42mm, so the barrel overlaps by
+    #     0.21 + 0.30 - 0.283 = 0.227mm, not kuchen's 0.137mm -- same class,
+    #     different number, and the guard below derives its bound from the
+    #     fixture instead of restating either. The via also carries a B.Cu run
+    #     to a second pad, so the pad is the only thing that can supply F.Cu.
+    def _via_in_pad_board(vx):
+        pads = [_pad(0, 0, size=0.42, num='1'),
+                _pad(5, 0, layers=('B.Cu',), num='2', ref='U2')]
+        segs = [_seg(vx, 0, 5, 0, layer='B.Cu')]
+        v = _via(vx, 0)
+        return _pcb(segs, vias=[v], pads=pads), segs, v, pads
+
+    # The row must be ON the branch it names: assert the via centre really is
+    # outside the pad copper by more than the old COINCIDENCE_TOL credit, or
+    # this passes for the wrong reason (the centre test would credit it too).
+    _gap = point_to_pad_distance(0.283, 0, _pad(0, 0, size=0.42))
+    _r = _via(0, 0).size / 2.0
+    results.append(("the #695 via centre is OUTSIDE the pad copper "
+                    "(guard is on the barrel branch, not the centre one)",
+                    COINCIDENCE_TOL < _gap < _r))
+
+    pcb, segs, v, pads = _via_in_pad_board(0.283)
+    f, _ = check_weird(pcb)
+    results.append(("via-in-pad whose barrel overlaps the pad NOT flagged",
+                    not [x for x in f if x['category']
+                         in ('dangling-via', 'unsupported-via')]))
+    #     Negative control: move the via until the barrel clears the copper
+    #     (0.55 -> 0.34mm gap > the 0.30 radius). Still a real dangling via.
+    #     Without this the row above would also pass on a check that credited
+    #     every pad unconditionally.
+    pcb_far, segs_far, v_far, pads_far = _via_in_pad_board(0.55)
+    f_far, _ = check_weird(pcb_far)
+    results.append(("via whose barrel does NOT reach the pad still flagged",
+                    len([x for x in f_far
+                         if x['category'] == 'dangling-via']) == 1))
+
+    #     The thesis of #695: this checker must not contradict the
+    #     AUTHORITATIVE connectivity model on the same geometry. Assert what
+    #     each model must say ABSOLUTELY, not merely that the two differ:
+    #     `joined != dangling` passes when BOTH are wrong (revert the margin
+    #     in check_weird AND check_connected -- the likely future edit, since
+    #     the fix mirrors them -- and it still holds), and it is not even the
+    #     right invariant, since it reads a whole-net verdict as a per-via one
+    #     and so goes red on any fixture that adds a third, unrouted pad.
+    for _label, (_pcb_, _segs_, _v_, _pads_), _want_joined in (
+            ('barrel overlaps', (pcb, segs, v, pads), True),
+            ('barrel clear', (pcb_far, segs_far, v_far, pads_far), False)):
+        _conn = check_net_connectivity(NET, _segs_, [_v_], _pads_, [])
+        _joined = (_conn['num_components'] == 1
+                   and not _conn['disconnected_pads'])
+        _dangling = any(x['category'] == 'dangling-via'
+                        for x in check_weird(_pcb_)[0])
+        results.append((f"check_connected joins this via to the pad "
+                        f"({_label}): expected {_want_joined}",
+                        _joined is _want_joined))
+        results.append((f"check_weird agrees with it ({_label}): "
+                        f"dangling must be {not _want_joined}",
+                        _dangling is (not _want_joined)))
 
     # 11. The reporter, which is what #696 actually broke: a finding whose
     #     category is missing from CATEGORIES counted toward the headline and
