@@ -16,7 +16,14 @@ Categories:
                      An end is ANCHORED -- and so not a free end at all -- by
                      a via barrel or by a pad its own cap overlaps, both by
                      RADIUS (#695); crediting a pad by centre containment made
-                     this contradict check_connected's endpoint-cap rule.
+                     this contradict check_connected's endpoint-cap rule. The
+                     anchor is the SHARED predicate (connectivity.
+                     endpoint_reaches_pad/_via), so this test, _check_dangles,
+                     check_drc's soft-joint detector and the close_soft_joints
+                     repair pass cannot drift apart again (#722) -- and it is
+                     layer- and NPTH-aware, because a pad that carries no
+                     copper on the end's layer anchors nothing. Copper-layer
+                     GRAPHICS are not candidates (#337: immutable input art).
   redundant-cycle    same-net loop edges whose removal leaves connectivity
                      identical (pcb_modification._prune_net_cycles machinery,
                      report-only; zoned nets skipped -- planes are meshes).
@@ -78,7 +85,8 @@ from check_connected import (matches_any_pattern, check_net_connectivity,
                              analyze_conn_excluding, point_in_polygon,
                              _point_in_pad)
 from check_drc import point_to_pad_distance
-from connectivity import COINCIDENCE_TOL
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
+                          endpoint_reaches_via)
 from routing_constants import SOFT_JOINT_MIN_GAP
 from pcb_modification import _point_anchored, _prune_net_cycles, _pt_seg_dist
 
@@ -123,37 +131,42 @@ def _via_span(via, copper_layers) -> set:
     return set(copper_layers)
 
 
-def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
+def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads,
+                       findings, copper_layers=()):
     """check_drc's 'segment-endpoint-gap' detection (same constants/approach):
     dangling free ends (degree 1, not on a via/own pad) whose caps overlap
     but whose endpoints are not coincident. Returns the set of participating
     endpoint keys (layer, rx, ry) so the dangle check can defer to this,
     more specific, category."""
-    via_r = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in net_vias]
+    def at_anchor(x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
 
-    def at_anchor(x, y, width):
-        for vx, vy, vr in via_r:
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+        The cap is what physically touches, so the cap radius is the credit
+        -- for the pad exactly as for the via. Both answers now come from the
+        SHARED predicates in connectivity, so the four copies of this test
+        (here, _check_dangles, check_drc._at_anchor and
+        pcb_modification.at_anchor) cannot drift apart again -- which is how
+        #695 and #722 shipped four lines from each other.
+
+        Three things the cap credit alone did not fix (#722):
+          * LAYER. This test credited ANY same-net pad whatever layer it sat
+            on, and widening the reach from 0.02mm to width/2 widened that
+            hole with it. check_connected iterates the pad's OWN copper
+            layers, so a B.Cu end near an F.Cu-only pad is genuinely SPLIT
+            there while this called it anchored -- a false NEGATIVE, the
+            direction that ships broken copper.
+          * NPTH. A plated hole is copper; an unplated one is not, whatever
+            its layer list says.
+          * The VIA branch is cap-blind in the same way the pad branch was:
+            `vr + 0.01` credits the barrel but not the cap, where the
+            authority credits (via_size + track_width)/2.
+        """
+        r = (width or 0.0) / 2.0
+        for v in net_vias:
+            if endpoint_reaches_via(x, y, r, v, (layer,), copper_layers):
                 return True
-        # The endpoint's round cap has a RADIUS (width/2), exactly as the via
-        # barrel two lines above has one -- so a stub ending just short of a
-        # pad outline can still have its cap physically overlapping the pad
-        # copper. Crediting the CENTRE only (COINCIDENCE_TOL, 0.02mm) made
-        # this branch contradict the authoritative model on copper KiCad
-        # grades joined: check_connected.py unions a track end into a pad at
-        # `_m = max(ewidth/2 - 1e-6, tolerance)` (the #285 endpoint-cap rule),
-        # so two 0.25mm stubs ending 0.05mm outside a 1.0x0.6 pad are ONE
-        # component there and a `soft-joint` here. That is the same
-        # centre-vs-barrel asymmetry #695 fixed for the via/pad credit, four
-        # lines apart from it, and it bites harder: `soft-joint` carries
-        # size=None, so --tolerance never filters it, and check_weird's exit
-        # code is chain-blocking through check_complete.
-        #
-        # `width` is REQUIRED rather than defaulted: a caller that forgot it
-        # would silently get the centre-only credit back, which is the defect.
-        _m = max(width / 2 - 1e-6, COINCIDENCE_TOL)
-        for p in net_pads:
-            if point_to_pad_distance(x, y, p) <= _m:
+        for pd in net_pads:
+            if endpoint_reaches_pad(x, y, r, (layer,), pd):
                 return True
         return False
 
@@ -170,24 +183,37 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if ep_count[(s.layer, rk(x, y))] != 1:
                 continue  # shared vertex = clean joint
-            if at_anchor(x, y, s.width):
-                continue  # terminates on a via / own pad = legitimate
-            dangles[s.layer].append((x, y, s.width))
+            if at_anchor(x, y, s.layer, s.width):
+            # A soft joint is a PAIR. Dropping a copper-layer GRAPHIC as a
+            # candidate drops the TRACK end paired with it, and nothing
+            # else picks that end up -- measured, a genuinely open net
+            # (check_connected: 2 components, 1 disconnected pad) went
+            # from exit 1 to exit 0, and check_complete gates DONE on that
+            # exit code. The ART end is the unactionable half (#337 forbids
+            # touching it); the TRACK end is entirely actionable (extend it,
+            # or make the art real copper). So a graphic is carried as a
+            # flag and only an art-MEETS-art pair is dropped.
+                continue  # its copper reaches a via / own pad = legitimate
+            dangles[s.layer].append((x, y, s.width, getattr(s, 'graphic', False)))
 
     soft_pts = set()
     for layer, ends in dangles.items():
         for i in range(len(ends)):
-            xi, yi, wi = ends[i]
+            xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
-                xj, yj, wj = ends[j]
+                xj, yj, wj, gj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
+                if gi and gj:
+                    continue  # art meets art: nothing anyone can act on
                 if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
                     # size=None: soft joints bypass the --tolerance filter.
                     # Filtering by GAP inverted the severity metric (small
                     # gap = still fragile) and on <=0.1mm-width routing every
                     # representable soft joint has gap < 0.1 -- the whole
                     # category silently vanished at the default tolerance.
+                    if gi:  # report where the fix goes: the TRACK end
+                        xi, yi, xj, yj = xj, yj, xi, yi
                     findings.append(_finding(
                         'soft-joint', name, layer, xi, yi,
                         f"endpoint gap {gap:.3f}mm to ({xj:.3f}, {yj:.3f}), "
@@ -255,16 +281,15 @@ def _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
             # max half-dimension) and misses rectangular pad corners: a stub
             # ending exactly on a 1.4x1.2 crystal pad's corner copper read
             # as a dangle. Exact outline test (glasgow XTALOUT/C11).
-            def _pad_carries(p):
-                # NPTH pads have no copper even when layers lists *.Cu; an
-                # other-layer SMD pad can't anchor this layer's free end.
-                if getattr(p, 'pad_type', '') == 'np_thru_hole':
-                    return False
-                if p.drill <= 0 and s.layer not in p.layers \
-                        and '*.Cu' not in p.layers:
-                    return False
-                return point_to_pad_distance(fx, fy, p) <= s.width / 2
-            if any(_pad_carries(p) for p in net_pads):
+            # The exact outline test is the SHARED predicate now --
+            # byte-identical to the one _check_soft_joints asks. Two
+            # spellings changed, both measured over kicad_files/:
+            # COINCIDENCE_TOL became a floor under the cap credit (it bites
+            # below 0.04mm track width; the corpus floor is 0.0762) and
+            # `'*.Cu' not in p.layers` became `any('*' in L)`, the form every
+            # other site already used.
+            if any(endpoint_reaches_pad(fx, fy, s.width / 2.0, (s.layer,), p)
+                   for p in net_pads):
                 continue
             if any(point_in_polygon(fx, fy, z.polygon)
                    for z in zones_by_layer.get(s.layer, ())):
@@ -731,7 +756,7 @@ def check_weird(pcb_data: PCBData, net_patterns: Optional[List[str]] = None,
         has_zone = bool(net_zones)
 
         soft_pts = _check_soft_joints(net_id, name, net_segs, net_vias,
-                                      net_pads, findings)
+                                      net_pads, findings, copper_layers)
         _check_dangles(net_id, name, net_segs, net_vias, net_pads, net_zones,
                        soft_pts, findings, join_tol=tolerance or 0.0)
         _check_orphan_islands(net_id, name, net_segs, net_vias, net_pads,

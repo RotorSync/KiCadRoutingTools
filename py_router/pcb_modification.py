@@ -199,7 +199,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-from connectivity import COINCIDENCE_TOL
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
+                          endpoint_reaches_via)
 _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
@@ -503,16 +504,34 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             continue  # #337: immutable art -- its termini are not dangles
         ep_count[(s.net_id, s.layer, rk(s.start_x, s.start_y))] += 1
         ep_count[(s.net_id, s.layer, rk(s.end_x, s.end_y))] += 1
+    vias_by_net = defaultdict(list)
     via_by_net = defaultdict(list)
     for v in pcb_data.vias:
-        via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
+        vias_by_net[v.net_id].append(v)
+        # (x, y, radius) tuples for the via->pad GRAZE bridge below and the
+        # terminal-web via-terminal skip: those ask a DIFFERENT question (a
+        # graze band, a "is this a via terminal" test), not "does this end's
+        # own copper reach the barrel", so they keep their own geometry.
+        via_by_net[v.net_id].append((v.x, v.y,
+                                     (getattr(v, "size", 0) or 0) / 2.0))
 
-    def at_anchor(nid, x, y):
-        for vx, vy, vr in via_by_net.get(nid, []):
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    def at_anchor(nid, x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
+
+        Shared predicate (connectivity.endpoint_reaches_*). This function and
+        check_drc's soft-joint detector MUST agree -- this pass repairs what
+        that one reports -- and they did not: a pad was credited by its CENTRE
+        while a via was credited by its RADIUS, so two ordinary stubs landing
+        on one pad were "dangling" and this pass bridged them with a segment
+        laid across copper both ends already touched (#722).
+        """
+        r = (width or 0.0) / 2.0
+        for v in vias_by_net.get(nid, []):
+            if endpoint_reaches_via(x, y, r, v, (layer,), _copper):
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
 
@@ -523,7 +542,7 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if ep_count[(s.net_id, s.layer, rk(x, y))] != 1:
                 continue
-            if at_anchor(s.net_id, x, y):
+            if at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue
             dangles[(s.net_id, s.layer)].append((x, y, s.width))
 
@@ -1383,14 +1402,22 @@ def _soft_joint_pairs(segs, vias, pads):
     from routing_constants import SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
 
-    via_pts = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in (vias or [])]
+    def anchored(x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
 
-    def anchored(x, y):
-        for vx, vy, vr in via_pts:
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+        Shared predicate (connectivity.endpoint_reaches_*). This function and
+        check_drc's soft-joint detector MUST agree -- this pass repairs what
+        that one reports -- and they did not: a pad was credited by its CENTRE
+        while a via was credited by its RADIUS, so two ordinary stubs landing
+        on one pad were "dangling" and this pass bridged them with a segment
+        laid across copper both ends already touched (#722).
+        """
+        r = (width or 0.0) / 2.0
+        for v in (vias or []):
+            if endpoint_reaches_via(x, y, r, v, (layer,)):
                 return True
         for p in (pads or []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
 
@@ -1398,23 +1425,29 @@ def _soft_joint_pairs(segs, vias, pads):
     for s in segs:
         deg[(s.layer, _rk3(s.start_x, s.start_y))] += 1
         deg[(s.layer, _rk3(s.end_x, s.end_y))] += 1
-    dangles = defaultdict(list)  # layer -> [(key, x, y, width)]
+    dangles = defaultdict(list)  # layer -> [(key, x, y, width, is_graphic)]
     seen = set()
     for s in segs:
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             key = (s.layer, _rk3(x, y))
             if deg[key] != 1 or key in seen:
                 continue
-            if anchored(x, y):
+            if anchored(x, y, s.layer, s.width):
                 continue
             seen.add(key)
-            dangles[s.layer].append((key, x, y, s.width))
+            dangles[s.layer].append((key, x, y, s.width,
+                                     getattr(s, 'graphic', False)))
     pairs = set()
     for layer, ends in dangles.items():
         for i in range(len(ends)):
-            ki, xi, yi, wi = ends[i]
+            ki, xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
-                kj, xj, yj, wj = ends[j]
+                kj, xj, yj, wj, gj = ends[j]
+                if gi and gj:
+                    # Art meets art: nothing anyone can act on (#337 forbids
+                    # touching it), and check_weird/check_drc drop the same
+                    # pair. A MIXED pair is kept -- the track end is real.
+                    continue
                 gap = math.hypot(xi - xj, yi - yj)
                 if SOFT_JOINT_MIN_GAP < gap < (wi + wj) / 2.0 - 1e-6:
                     pairs.add(frozenset((ki, kj)))
