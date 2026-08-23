@@ -26,6 +26,7 @@ Plus two guards on the REPORTER, which is what #696 actually broke:
 """
 import ast
 import io
+import math
 import os
 import re
 import sys
@@ -103,6 +104,29 @@ def _pcb(segments, vias=(), pads=(), zones=()):
 
 def _cats(findings):
     return Counter(f['category'] for f in findings)
+
+
+def _pad_geometry_askers():
+    """Functions in check_weird.py that ask pad/via CONTACT geometry directly
+    instead of through the shared predicate.
+
+    #722's thesis is that ONE question answered several ways is the defect,
+    not any single coordinate -- so the guard has to be STRUCTURAL. Nothing
+    that merely RUNS the checker can notice a fifth spelling appearing; this
+    can, the same way _emitted_categories() catches an unregistered category.
+    Nested functions are attributed to their parent, so an offender inside a
+    closure fails this too."""
+    tree = ast.parse(io.open(check_weird_mod.__file__, encoding='utf-8').read())
+    out = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in ('point_to_pad_distance',
+                                         '_point_in_pad')):
+                out.add(fn.name)
+    return out
 
 
 def main():
@@ -403,6 +427,267 @@ def main():
         results.append((f"check_weird agrees with it ({_label}): "
                         f"soft-joint must be {not _want_joined}",
                         _soft is (not _want_joined)))
+
+    # 14. The three things the cap credit alone did NOT fix (#722). Each is a
+    #     way this anchor still disagreed with check_connected after the cap
+    #     radius landed, and each row carries its own control.
+    #
+    #     (a) LAYER. at_anchor credited ANY same-net pad whatever layer it sat
+    #         on, and widening the reach from 0.02mm to width/2 WIDENED that
+    #         hole rather than closing it. check_connected iterates the pad's
+    #         OWN copper layers, so B.Cu ends near an F.Cu-only pad are
+    #         genuinely SPLIT there while this called them anchored -- a false
+    #         NEGATIVE, the direction that ships broken copper.
+    def _land(pad_layer='F.Cu', seg_layer='F.Cu', ex=-0.55, w=0.25, pad=None):
+        lp = pad if pad is not None else _rect_pad(
+            0, 0, 1.0, 0.6, layers=(pad_layer,), num='1')
+        pads = [lp, _rect_pad(-3, 0, 1.0, 0.6, layers=(seg_layer,), num='2',
+                              ref='U2')]
+        segs = [_seg(-3, -0.06, ex, -0.06, layer=seg_layer, width=w),
+                _seg(-3, 0.06, ex, 0.06, layer=seg_layer, width=w)]
+        return _pcb(segs, pads=pads), segs, pads
+
+    def _sj(board):
+        return len([x for x in check_weird(board, tolerance=0)[0]
+                    if x['category'] == 'soft-joint'])
+
+    pcb, segs, pads = _land(pad_layer='F.Cu', seg_layer='B.Cu')
+    conn = check_net_connectivity(NET, segs, [], pads, [])
+    results.append(("an other-layer pad anchors nothing: check_connected "
+                    "calls this net SPLIT",
+                    conn['num_components'] == 2
+                    and len(conn['disconnected_pads']) == 1))
+    results.append(("...and check_weird agrees: still a soft joint",
+                    _sj(pcb) == 1))
+    #     Control: the SAME pad on the ends' own layer anchors both and the
+    #     board is clean -- so the row above is the LAYER test firing, not the
+    #     predicate refusing everything.
+    results.append(("the same pad on the ends' own layer anchors them: clean",
+                    _sj(_land(pad_layer='F.Cu', seg_layer='F.Cu')[0]) == 0))
+
+    #     (b) NPTH. An unplated hole has no copper even when its layer list
+    #         says *.Cu, so it anchors nothing. Its PLATED twin -- identical
+    #         geometry -- must still anchor, or the row would be passing
+    #         because the predicate refuses everything.
+    _npth = _rect_pad(0, 0, 1.0, 0.6, layers=('*.Cu',), num='1')
+    _npth.drill, _npth.pad_type = 0.8, 'np_thru_hole'
+    _plated = _rect_pad(0, 0, 1.0, 0.6, layers=('*.Cu',), num='1')
+    _plated.drill, _plated.pad_type = 0.8, 'thru_hole'
+    results.append(("a PLATED through pad anchors the ends (control)",
+                    _sj(_land(pad=_plated)[0]) == 0))
+    results.append(("an NPTH pad has no copper and anchors nothing",
+                    _sj(_land(pad=_npth)[0]) == 1))
+
+    #     (c) The VIA branch was cap-blind in exactly the way the pad branch
+    #         was: `vr + 0.01` credits the barrel but not the end's own cap,
+    #         where check_connected credits (via_size + track_width)/2. On a
+    #         0.6mm via and a 0.25mm track that is 0.310mm against 0.425mm.
+    def _via_land(dx, w=0.25):
+        pads = [_pad(-3, 0, num='1'),
+                _pad(3, 0, layers=('B.Cu',), num='2', ref='U2')]
+        segs = [_seg(-3, 0, -dx, -0.06, width=w),
+                _seg(-dx, 0.06, -3, 0, width=w),
+                _seg(0, 0, 3, 0, layer='B.Cu', width=w)]
+        v = _via(0, 0)
+        return _pcb(segs, vias=[v], pads=pads), segs, [v], pads
+
+    _d_band = math.hypot(0.35, 0.06)
+    results.append(("the via row is ON the cap band (clears barrel+0.01, "
+                    "inside barrel+cap)",
+                    0.3 + 0.01 < _d_band <= 0.3 + 0.125))
+    pcb_v, segs_v, vias_v, pads_v = _via_land(0.35)
+    conn_v = check_net_connectivity(NET, segs_v, vias_v, pads_v, [])
+    results.append(("check_connected joins through the barrel+cap overlap",
+                    conn_v['num_components'] == 1
+                    and not conn_v['disconnected_pads']))
+    results.append(("...and check_weird agrees: not a soft joint",
+                    _sj(pcb_v) == 0))
+    pcb_f, segs_f, vias_f, pads_f = _via_land(0.50)
+    conn_f = check_net_connectivity(NET, segs_f, vias_f, pads_f, [])
+    results.append(("an end beyond barrel+cap is genuinely split "
+                    "(check_connected)",
+                    conn_f['num_components'] > 1
+                    or bool(conn_f['disconnected_pads'])))
+    results.append(("...and check_weird agrees: still a soft joint",
+                    _sj(pcb_f) == 1))
+
+    # 15. Copper-layer GRAPHICS (#337) are immutable input art. They were
+    #     soft-joint CANDIDATES here and nowhere else -- _check_dangles refuses
+    #     them and check_connected refuses them outright ("graphics never
+    #     conduct") -- so a graphic pair produced an unactionable finding in a
+    #     size=None category that --tolerance can never drop.
+    _gpads = [_pad(-5, 0, num='1'), _pad(-6, 0, num='2', ref='U2')]
+    _real = [_seg(-6, 0, -5, 0), _seg(3, 0, 5, 0), _seg(3.12, 0, 6, 0.5)]
+    _art = [_real[0]] + [Segment(start_x=s.start_x, start_y=s.start_y,
+                                 end_x=s.end_x, end_y=s.end_y, width=s.width,
+                                 layer=s.layer, net_id=NET, graphic=True)
+                         for s in _real[1:]]
+    _w_art = check_net_connectivity(NET, _art, [], _gpads, [])
+    _wo_art = check_net_connectivity(NET, [_real[0]], [], _gpads, [])
+    results.append(("graphics are invisible to check_connected (identical "
+                    "verdict with and without them)",
+                    (_w_art['num_components'], _w_art['disconnected_pads'])
+                    == (_wo_art['num_components'],
+                        _wo_art['disconnected_pads'])))
+    results.append(("a graphic near-open is NOT a soft joint",
+                    _sj(_pcb(_art, pads=_gpads)) == 0))
+    #     Control: the SAME coordinates as real track copper still are one, so
+    #     the graphic flag is the only difference between these two rows.
+    results.append(("the same pair as TRACK copper still is a soft joint",
+                    _sj(_pcb(_real, pads=_gpads)) == 1))
+
+    #     (d) A size-less via claims the 0.6 default, as every other consumer
+    #         already does; `or 0` gave it radius ZERO, so it anchored nothing
+    #         at all. Not reachable through check_weird() -- a size=None via
+    #         raises in check_net_connectivity long before at_anchor sees it --
+    #         so this is a DIRECT row on the predicate, and the change is a
+    #         consistency fix rather than a behaviour one. The control pins
+    #         that a genuinely tiny barrel still does not reach.
+    from connectivity import endpoint_reaches_via
+    _sizeless = _via(0, 0)
+    _sizeless.size = None
+    results.append(("a size-less via claims the 0.6 default's radius, not 0",
+                    endpoint_reaches_via(0.29, 0, 0.0, _sizeless,
+                                         ('F.Cu',)) is True))
+    results.append(("a genuinely 0.02mm barrel still does not reach 0.29mm "
+                    "away (control)",
+                    endpoint_reaches_via(0.29, 0, 0.0,
+                                         _via(0, 0, size=0.02),
+                                         ('F.Cu',)) is False))
+
+    # 16. STRUCTURAL: only the shared predicate may ask pad-contact geometry.
+    #     This is the row that makes #722 a CLASS fix rather than a coordinate
+    #     fix -- nothing that merely runs the checker can see a fifth spelling
+    #     appear, which is exactly how #695 and #722 shipped four lines apart.
+    _ALLOWED = {
+        # _check_terminal_web is a deliberate exception, and it is NOT asking
+        # this question: it selects the pad an EROSION model runs against, and
+        # that model is undefined unless the cap strictly overlaps the pad body
+        # (`< r - 1e-6`, with NO COINCIDENCE_TOL floor -- a floor would turn a
+        # sub-0.04mm cap that does not touch into a target). Measured while
+        # fixing #722: routing it through the shared predicate flips 0 of the
+        # terminal ends in kicad_files/, so this is a recorded scope choice.
+        '_check_terminal_web',
+        # _check_unsupported_vias asks the same question about a BARREL and is
+        # the next site to fold in; #695 fixed its margin in place.
+        '_check_unsupported_vias',
+    }
+    results.append(("the pad-geometry guard is not vacuous",
+                    len(_pad_geometry_askers()) >= 1))
+    results.append(("only the shared predicate asks pad-contact geometry "
+                    "(#722)", _pad_geometry_askers() == _ALLOWED))
+
+    # 17. Two under-reports this branch introduced and a review caught. Both
+    #     are the SAME mistake the fix exists to correct, made while making it:
+    #     a credit widened without the guard that keeps it honest.
+    #
+    #     (a) VIA LAYERS. Crediting the endpoint's cap against a via barrel
+    #         (correct) while ignoring which layers that barrel occupies
+    #         (wrong) makes a layer-blind credit ~37% WIDER than the
+    #         `vr + 0.01` it replaced. A blind F.Cu/In1.Cu via then anchors
+    #         B.Cu track ends it carries no copper for, silencing a real open.
+    def _blind_via_board(seg_layer):
+        pads = [_pad(-3, 0, layers=(seg_layer,), num='1'),
+                _pad(3, 0, layers=(seg_layer,), num='2', ref='U2')]
+        segs = [_seg(-3, 0, -0.35, -0.06, layer=seg_layer, width=0.25),
+                _seg(-0.35, 0.06, -3, 0, layer=seg_layer, width=0.25)]
+        v = Via(x=0, y=0, size=0.6, drill=0.3, layers=['F.Cu', 'In1.Cu'],
+                net_id=NET)
+        pcb = _pcb(segs, vias=[v], pads=pads)
+        pcb.board_info.copper_layers = ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu']
+        return pcb, segs, [v], pads
+
+    pcb_b, segs_b, vias_b, pads_b = _blind_via_board('B.Cu')
+    conn_b = check_net_connectivity(NET, segs_b, vias_b, pads_b, [])
+    results.append(("a blind F.Cu/In1.Cu via carries no B.Cu copper: "
+                    "check_connected calls this net SPLIT",
+                    conn_b['num_components'] > 1
+                    or bool(conn_b['disconnected_pads'])))
+    results.append(("...and check_weird agrees: still a soft joint",
+                    _sj(pcb_b) == 1))
+    #     Control: the same via and the same geometry on a layer the barrel
+    #     DOES occupy anchors the ends, so the row above is the LAYER test
+    #     firing and not the predicate refusing every via.
+    results.append(("the same ends on a layer the barrel occupies are "
+                    "anchored: clean", _sj(_blind_via_board('F.Cu')[0]) == 0))
+
+    #     (b) A soft joint is a PAIR. Excluding a copper-layer GRAPHIC as a
+    #         CANDIDATE drops the TRACK end paired with it, and nothing else
+    #         picks that end up -- so a genuinely open net went from exit 1 to
+    #         exit 0, which is what check_complete gates DONE on. The art half
+    #         is unactionable (#337); the track half is not.
+    _gp = [_pad(-6, 0, num='1'), _pad(6, 0, num='2', ref='U2')]
+    _track = _seg(-6, 0, -0.05, 0, width=0.25)
+    _artseg = Segment(start_x=0.05, start_y=0, end_x=6, end_y=0, width=0.25,
+                      layer='F.Cu', net_id=NET, graphic=True)
+    _mixed = _pcb([_track, _artseg], pads=_gp)
+    _cm = check_net_connectivity(NET, [_track, _artseg], [], _gp, [])
+    results.append(("a track ending short of ART is a real open "
+                    "(check_connected)",
+                    _cm['num_components'] > 1 or bool(_cm['disconnected_pads'])))
+    results.append(("...and the track-vs-art pair is still reported",
+                    _sj(_mixed) == 1))
+    _rep = [x for x in check_weird(_mixed, tolerance=0)[0]
+            if x['category'] == 'soft-joint']
+    results.append(("...reported at the TRACK end, where the fix goes",
+                    len(_rep) == 1 and abs(_rep[0]['x'] - (-0.05)) < 1e-6))
+    #     Control: art meeting art has no actionable end, and is dropped.
+    _art2 = Segment(start_x=-6, start_y=0, end_x=-0.05, end_y=0, width=0.25,
+                    layer='F.Cu', net_id=NET, graphic=True)
+    results.append(("art meeting art is NOT reported (nothing to act on)",
+                    _sj(_pcb([_art2, _artseg], pads=_gp)) == 0))
+
+    # 18. The pad LAYER SET comes from net_queries.expand_pad_layers -- the
+    #     same expansion check_connected uses -- not from a local reading of
+    #     pad.layers. Two ways a local reading goes wrong, both caught by
+    #     review rather than by any board in kicad_files/.
+    from connectivity import endpoint_reaches_pad
+    from check_connected import check_net_connectivity as _cnc
+
+    #     (a) `*.Mask` is not copper. A pad carrying it is an ordinary
+    #         single-layer SMD pad, and 641 pads in kicad_files/ carry one --
+    #         but `any('*' in L)` reads the wildcard as "every copper layer"
+    #         and hands a B.Cu end an F.Cu-only pad.
+    _mask = _rect_pad(0, 0, 1.0, 0.6, layers=('F.Cu', '*.Mask', '*.Paste'),
+                      num='1')
+    results.append(("a mask wildcard is not copper: the pad reaches F.Cu",
+                    endpoint_reaches_pad(0, 0, 0.125, ('F.Cu',), _mask)
+                    == {'F.Cu'}))
+    results.append(("...and reaches NO other layer (a mask wildcard is not "
+                    "an all-copper pad)",
+                    endpoint_reaches_pad(0, 0, 0.125, ('B.Cu',), _mask)
+                    == set()
+                    and endpoint_reaches_pad(0, 0, 0.125, ('In1.Cu',), _mask)
+                    == set()))
+    #         Control: the copper wildcard DOES span every layer asked about,
+    #         so the row above is the *.Cu/*.Mask distinction firing and not
+    #         the predicate refusing wildcards outright.
+    _cuwild = _rect_pad(0, 0, 1.0, 0.6, layers=('*.Cu', '*.Mask'), num='1')
+    results.append(("a *.Cu wildcard spans every layer asked about (control)",
+                    endpoint_reaches_pad(0, 0, 0.125,
+                                         ('F.Cu', 'In1.Cu', 'B.Cu'), _cuwild)
+                    == {'F.Cu', 'In1.Cu', 'B.Cu'}))
+
+    #     (b) A DRILLED pad occupies the layers it declares, not every layer.
+    #         `drill > 0 -> all layers` over-credits a PTH pad declared
+    #         ("F.Cu" "B.Cu") on a 4-layer board; check_connected grades an
+    #         In1.Cu end as not reaching it, and the agreement row pins that
+    #         absolutely rather than merely asserting the two differ.
+    _pth = _rect_pad(0, 0, 1.0, 0.6, layers=('F.Cu', 'B.Cu', '*.Mask'),
+                     num='1')
+    _pth.drill, _pth.pad_type = 0.4, 'thru_hole'
+    results.append(("a drilled pad declared F.Cu/B.Cu reaches B.Cu",
+                    endpoint_reaches_pad(0, 0, 0.125, ('B.Cu',), _pth)
+                    == {'B.Cu'}))
+    results.append(("...and does NOT reach In1.Cu, which it never declared",
+                    endpoint_reaches_pad(0, 0, 0.125, ('In1.Cu',), _pth)
+                    == set()))
+    _far = _rect_pad(-3, 0, 1.0, 0.6, layers=('In1.Cu',), num='2', ref='U2')
+    _in1 = [_seg(-3, 0, 0, 0, layer='In1.Cu', width=0.25)]
+    _c = _cnc(NET, _in1, [], [_pth, _far], [])
+    results.append(("check_connected agrees the In1.Cu end does not reach it: "
+                    "the net is SPLIT",
+                    _c['num_components'] > 1 or bool(_c['disconnected_pads'])))
 
     # 11. The reporter, which is what #696 actually broke: a finding whose
     #     category is missing from CATEGORIES counted toward the headline and
