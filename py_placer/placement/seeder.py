@@ -2315,9 +2315,20 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                  board_edge_clearance: float = 0.55,
                  grid_step: float = 0.1,
                  seed: int = 0,
+                 evict_depth: int = 0,
                  edge_bands: Optional[Dict[str, float]] = None) -> Dict:
     """LIFT a subset of parts and re-seat them FROM SCRATCH at their net
     centroids, holding every other part fixed as an obstacle.
+
+    `evict_depth` (#699) is the ONE exception to "every other part fixed",
+    and it is off by default. At depth >= 1 a scope ref with no legal pose
+    may have a seated NON-SCOPE neighbour traded out from under it, under
+    `_evict_trade`'s acceptance rule. Those refs are named in `evicted`, in a
+    NOTE, and in `moves` -- they have to be in `moves`, because `moves` is
+    the whole of what gets written, so an evicted part left out of it would
+    be written at its OLD pose while the scope ref takes its pocket. At
+    depth 0 the fixed-obstacle contract holds exactly and every code path
+    below reduces to what it was.
 
     The contract that distinguishes this from `repair_placement`: **the part's
     current pose is never consulted.** Every other repair path in this stack --
@@ -2378,9 +2389,11 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
          stack, an hpwl blow-up or piled-on overlap below it. This conjunct is
          what stops the pass 'succeeding' by moving a part sideways.
 
-    Returns `{'moves', 'reseated', 'refused', 'unseated', 'scope',
+    Returns `{'moves', 'reseated', 'refused', 'unseated', 'evicted', 'scope',
     'scope_source', 'notes', 'gate_before', 'gate_after', 'accepted',
     'witnesses_before', 'witnesses_after', 'edge_bands_dropped', 'pruned'}`.
+    `reseated` stays the SCOPE parts that moved; an evicted part is not a
+    re-seat and is counted separately.
 
     NOT `placement/reseat.py`, which is a different mechanism for a different
     problem (Hungarian re-assignment of a proximity-tethered decap cluster onto
@@ -2458,7 +2471,7 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
                 # different schemas and a reader could not tell "the census
                 # found nothing" from "no census ran".
                 'no_pose_blockers': {}, 'no_pose_verdict': {},
-                'no_pose_census': {},
+                'no_pose_census': {}, 'evicted': [],
                 'evictions': 0, 'evictions_reverted': 0,
                 'gate_before': list(_recon.measure(state, edge_bands or {})),
                 'gate_after': list(_recon.measure(state, edge_bands or {})),
@@ -2537,27 +2550,77 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
         pcb_data, pcb_file, intent2, random.Random(f"{seed}"),
         group_sources=group_sources, clearance=clearance,
         board_edge_clearance=board_edge_clearance, grid_step=grid_step,
-        seed_refs=set(scope))
+        seed_refs=set(scope), evict_depth=evict_depth,
+        # The seeder builds its OWN state, so `--lock` -- which this pass
+        # resolved into ITS state as extra_locked_refs -- is invisible to the
+        # eviction rung. Without this it would cheerfully trade out a ref the
+        # user locked by name.
+        immovable_extra=sorted(_extra_locked))
     notes.extend(res['notes'])
+
+    # A part the rung evicted is OUTSIDE the scope, and `moves` is the whole
+    # of what gets written: left out of it, the blocker is written at its old
+    # pose while the scope ref takes the pocket it vacated -- overlapping
+    # copper, exit 0. Snapshot them here, BEFORE any pose is applied, so the
+    # revert below can put them back too.
+    evicted = sorted({b for e in (res.get('evictions') or [])
+                      if e.get('accepted')
+                      for b in (e.get('blockers') or [e.get('blocker')])
+                      if b and b not in scope})
+    for r in evicted:
+        if r in state.parts:
+            pp = state.parts[r]
+            old.setdefault(r, (pp.x, pp.y, pp.rot))
+    adopt = set(scope) | set(evicted)
+    if evicted:
+        notes.append(
+            f"the eviction rung moved {len(evicted)} part(s) OUTSIDE the "
+            f"scope to seat it: {', '.join(evicted)}. That is what "
+            f"--evict-depth licenses; at depth 0 no part outside the scope "
+            f"is touched.")
 
     # `placements` covers every PLACED ref -- 101 of 107 on the measured board
     # -- and `make_state` normalises rotation mod 360, so returning all of them
     # rewrites -112.5 -> 247.5 on parts this pass never touched and pollutes
-    # every diff, every movie frame and every recovery measurement. Filter.
+    # every diff, every movie frame and every recovery measurement. Filter --
+    # to the scope AND to the parts the rung was licensed to evict, which is
+    # the only widening of this filter that does not bring the churn back.
     seated = {p['reference']: p for p in res['placements']
-              if p['reference'] in scope}
+              if p['reference'] in adopt}
     for ref, p in sorted(seated.items()):
         state.apply_move(ref, p['new_x'], p['new_y'], p['new_rotation'])
 
     # ---- gate ---------------------------------------------------------------
+    # `evidenced=adopt`, not `set(scope)`: prune reverts on an EQUAL tuple
+    # for anything unevidenced, and an evicted blocker with few connected
+    # pads is gate-neutral -- so prune would restore it on top of the part
+    # just seated and split an atomic trade in half. `_evict_trade`'s three
+    # conjuncts are that ref's evidence.
     pruned = _recon.prune_assignment(state, old, notes,
                                      edge_bands=gate_bands,
-                                     evidenced=set(scope))
+                                     evidenced=adopt)
     after = _recon.measure(state, gate_bands)
     witnesses_after = _recon.damage_witnesses(state)
     _oob = _recon.GATE_TERMS.index('oob')
     accepted = (after[_oob] < before[_oob]
                 and len(witnesses_after) <= len(witnesses_before))
+    if evicted:
+        # Once the pass may move parts it was not asked about, "oob improved
+        # and no new witness" is not a sufficient licence: the gate tuple is
+        # lexicographic and `oob` moves hugely in this pass's own favour, so
+        # a new stack or a pile of overlap sits below it unread. Both terms
+        # are already computed; comparing them costs nothing and is what
+        # makes the widened contract auditable on the board that is written.
+        _stk = _recon.GATE_TERMS.index('stacks')
+        _ovl = _recon.GATE_TERMS.index('overlap')
+        if not (after[_stk] <= before[_stk]
+                and after[_ovl] <= before[_ovl] + 1e-9):
+            accepted = False
+            notes.append(
+                f"the eviction licence is REFUSED: moving "
+                f"{', '.join(evicted)} outside the scope raised stacks "
+                f"{before[_stk]:g} -> {after[_stk]:g} or overlap "
+                f"{before[_ovl]:g} -> {after[_ovl]:g}")
     if not accepted:
         for ref, (x, y, rot) in old.items():
             state.apply_move(ref, x, y, rot)
@@ -2574,7 +2637,9 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
 
     moves = []
     if accepted:
-        for ref in sorted(scope):
+        # `adopt`, not `scope`: see the snapshot above -- an evicted part
+        # missing from `moves` is written at its old pose.
+        for ref in sorted(adopt):
             p = state.parts[ref]
             ox, oy, orot = old[ref]
             if (math.hypot(p.x - ox, p.y - oy) > 1e-9
@@ -2592,14 +2657,18 @@ def reseat_scope(pcb_data, pcb_file: str, intent, *,
             # whose 11 off-outline parts had all come home). That is the same
             # laundering as the band itself, one step later.
             'intent_used': intent2,
-            'reseated': sorted(m['reference'] for m in moves),
+            # SCOPE parts that moved. An evicted part is not a re-seat and
+            # must not inflate the count this pass is judged by.
+            'reseated': sorted(m['reference'] for m in moves
+                               if m['reference'] in scope),
+            'evicted': evicted,
             'refused': sorted(refused),
             'unseated': sorted(r for r in res['unseated'] if r in scope),
             # The census travels with the verdict here too (#630): a scope
-            # ref with no legal pose names what is in its way. This pass
-            # runs the seeder at its default evict_depth (0), so the two
-            # eviction counts are 0 by construction; they are carried so a
-            # reader sees the same keys on both paths.
+            # ref with no legal pose names what is in its way. The
+            # eviction counts are 0 unless the caller passed `evict_depth`
+            # (#699); they are carried either way so a reader sees the same
+            # keys on both paths.
             'no_pose_blockers': {r: v for r, v in
                                  (res.get('no_pose_blockers') or {}).items()
                                  if r in scope},

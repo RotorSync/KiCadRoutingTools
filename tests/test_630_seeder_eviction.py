@@ -665,6 +665,145 @@ with tempfile.TemporaryDirectory() as wd:
               f"{sr.get('evictions')} {sr.get('evictions_reverted')}")
 
 # --------------------------------------------------------------------------
+# #699: --reseat can evict too, and MUST WRITE THE PART IT EVICTED.
+#
+# `reseat_scope` filters the seeder's placements to its scope, for a good
+# reason (returning all of them rewrites rotations on parts it never touched
+# and pollutes every diff). But `moves` is the whole of what reaches the
+# board, so an evicted NON-SCOPE blocker left out of it is written at its OLD
+# pose while the scope ref takes the pocket it vacated -- overlapping copper
+# reported as success. The `pairwise_legal` row below is the kill for that.
+# --------------------------------------------------------------------------
+def offboard_blocked(path):
+    """BIG parked 9mm off a 16x14 board, its only pocket held by SMALL.
+
+    BIG is off the outline, so the AUTO scope (`damage_witnesses`, pad centres
+    off the board) is exactly {BIG} with no --reseat argument. SMALL sits at
+    the centre and, by the same theorem as `pile_board`, leaves BIG no legal
+    pose. Lifting it frees the board, and bringing BIG home takes `oob` to 0,
+    so the pass's own gate accepts -- the eviction is the only reason it can.
+    """
+    board(path, [_part('BIG', 25, 7, 5.0, 5.0, 2),
+                 _part('SMALL', 8, 7, 0.5, 0.5, 4)])
+
+
+def run_reseat(workdir, make_board, intent, *extra, tag='rs'):
+    bpath = os.path.join(workdir, f'{tag}-in.kicad_pcb')
+    ipath = os.path.join(workdir, f'{tag}-fp.json')
+    out = os.path.join(workdir, f'{tag}-out.kicad_pcb')
+    make_board(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(intent, f)
+    r = subprocess.run(
+        [sys.executable, '-X', 'utf8',
+         os.path.join('py_placer', 'place_seed.py'), bpath, out,
+         '--intent', ipath, '--clearance', '0.2',
+         '--board-edge-clearance', '0.5', '--reseat', *extra],
+        capture_output=True, text=True, encoding='utf-8', errors='replace',
+        cwd=REPO, timeout=900,
+        env=dict(os.environ, PYTHONHASHSEED='0', PYTHONIOENCODING='utf-8'))
+    summary = None
+    for line in r.stdout.splitlines():
+        if line.startswith('JSON_SUMMARY:'):
+            summary = json.loads(line.split(':', 1)[1])
+    return r, summary, out, bpath
+
+
+with tempfile.TemporaryDirectory() as wd:
+    it = intent_for(['BIG', 'SMALL'])
+    p0, s0, o0, b0 = run_reseat(wd, offboard_blocked, it, tag='rs0')
+    p1, s1, o1, b1 = run_reseat(wd, offboard_blocked, it,
+                                '--evict-depth', '1', tag='rs1')
+    check("#699 --reseat: both runs produced a summary",
+          s0 is not None and s1 is not None,
+          (p1.stdout[-400:] + p1.stderr[-400:]))
+    if s0 and s1:
+        # The control. Without it, the depth-1 row below could be passing on
+        # a board that never needed an eviction.
+        check("#699 --reseat: the fixture reproduces -- at depth 0 (the "
+              "default) BIG has no pose, nothing outside the scope moves, "
+              "and the gate refuses",
+              s0.get('unseated') == ['BIG'] and s0.get('evicted') == []
+              and s0.get('accepted') is False
+              and s0.get('no_pose_verdict', {}).get('BIG')
+              == 'blocker_available',
+              f"unseated {s0.get('unseated')} evicted {s0.get('evicted')} "
+              f"accepted {s0.get('accepted')}")
+        check("#699 --reseat: the flag was parsed but IGNORED on this path "
+              "before; at depth 1 the scope ref comes home",
+              s1.get('unseated') == [] and s1.get('reseated_refs') == ['BIG']
+              and s1.get('evictions') == 1,
+              f"unseated {s1.get('unseated')} reseated "
+              f"{s1.get('reseated_refs')} evictions {s1.get('evictions')}")
+        check("#699 --reseat: it DISCLOSES the part it moved outside its "
+              "declared scope, and does not count it as a re-seat",
+              s1.get('evicted') == ['SMALL']
+              and 'SMALL' not in (s1.get('reseated_refs') or []),
+              f"evicted {s1.get('evicted')} reseated "
+              f"{s1.get('reseated_refs')}")
+        check("#699 --reseat: and says so in a NOTE, since the pass's whole "
+              "contract is that parts outside the scope are held fixed",
+              any('OUTSIDE the scope' in ln and 'SMALL' in ln
+                  for ln in p1.stdout.splitlines()),
+              str([ln for ln in p1.stdout.splitlines() if 'OUTSIDE' in ln]))
+        check("#699 --reseat: the load-bearing number improves (off-outline "
+              "parts 1 -> 0)",
+              s1.get('witnesses_before') == 1
+              and s1.get('witnesses_after') == 0,
+              f"{s1.get('witnesses_before')} -> {s1.get('witnesses_after')}")
+    # THE BOARD, and this is the mutation kill: with the evicted ref left out
+    # of `moves`, BIG is written into the pocket SMALL still occupies.
+    ok, detail = pairwise_legal(o1)
+    check("#699 --reseat THE BOARD: the written output is pairwise legal -- "
+          "the evicted part is written at its NEW pose, not its old one",
+          ok, detail)
+    check("#699 --reseat: depth 0 wrote nothing (the gate refused), so the "
+          "output equals the input board",
+          poses(o0) == poses(b0), f"{poses(o0)} vs {poses(b0)}")
+
+# --------------------------------------------------------------------------
+# #699: a --lock'd part is not this rung's to evict either. The seeder builds
+# its OWN state, so reseat_scope's extra_locked_refs never reached it.
+# --------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as wd:
+    import random as _r2
+    from placement import floorplan as _fp2
+    bpath = os.path.join(wd, 'lk.kicad_pcb')
+    ipath = os.path.join(wd, 'lk.json')
+    offboard_blocked(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(intent_for(['BIG', 'SMALL']), f)
+    lintent = _fp2.load_intent(ipath)
+
+    def _rs(refs=('BIG',), **kw):
+        return seeder.reseat_scope(
+            parse_kicad_pcb(bpath), bpath, lintent, refs=list(refs),
+            group_sources=(), clearance=0.2, board_edge_clearance=0.5,
+            grid_step=0.1, seed=0, **kw)
+
+    free = _rs(evict_depth=1)
+    held = _rs(evict_depth=1, lock_globs=['SMALL'])
+    check("#699: the control -- unlocked, SMALL is evicted",
+          free.get('evicted') == ['SMALL'], str(free.get('evicted')))
+    check("#699: --lock protects a blocker from the eviction rung "
+          "(reseat_scope locks into ITS state; the seeder builds another)",
+          held.get('evicted') == []
+          and 'SMALL' not in [m['reference'] for m in held['moves']],
+          f"evicted {held.get('evicted')} moves "
+          f"{[m['reference'] for m in held['moves']]}")
+    check("#699: and the census NAMES the lock as the reason BIG is stuck",
+          held.get('no_pose_census', {}).get('BIG', {}).get('frozen')
+          == {'SMALL': 'lock-glob'},
+          str(held.get('no_pose_census')))
+    empty = _rs(refs=['NOSUCHREF'])
+    check("#699: reseat_scope's early-out returns the SAME keys as its "
+          "seated path (it returned none of the census keys before)",
+          set(empty) >= {'no_pose_blockers', 'no_pose_verdict',
+                         'no_pose_census', 'evicted', 'evictions',
+                         'evictions_reverted'},
+          str(sorted(empty)))
+
+# --------------------------------------------------------------------------
 # A locked incumbent is never evicted -- it is not this tool's to move
 # --------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as wd:

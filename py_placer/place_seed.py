@@ -96,7 +96,14 @@ Examples:
                         "and trades the best pair under the same rule -- at "
                         "most 15 pairs drawn from the nearest 6 candidates, "
                         "so it costs nothing on a part a single lift already "
-                        "solves. Applies to --reseat too. Locked parts and "
+                        "solves. APPLIES TO --reseat TOO, and there it "
+                        "relaxes that pass's contract: --reseat normally "
+                        "holds every part outside its scope fixed, and a "
+                        "depth >= 1 lets it trade one out. Those parts are "
+                        "named in the JSON's `evicted` and in a NOTE, and "
+                        "the pass additionally refuses any trade that raised "
+                        "the board's stack count or overlap area. Locked "
+                        "parts (including --lock) and "
                         "declared edge connectors are never evicted; a "
                         "blocker's own blocker is not chased, at either "
                         "depth, and there is one trade per part. Only fires "
@@ -230,7 +237,10 @@ Examples:
                 refs=(args.reseat or None), group_sources=sources,
                 clearance=args.clearance,
                 board_edge_clearance=args.board_edge_clearance,
-                grid_step=args.grid_step, seed=args.seed)
+                grid_step=args.grid_step, seed=args.seed,
+                # The same flag, not a second one: it was parsed and
+                # silently ignored on this path (#699).
+                evict_depth=args.evict_depth)
             for note in reseat['notes']:
                 print(f"  NOTE: {note}")
             _rmax = 0.0
@@ -243,7 +253,8 @@ Examples:
                   f"{len(reseat['scope'])} in scope, "
                   f"{len(reseat['reseated'])} re-seated "
                   f"(max {_rmax:.2f}mm), {len(reseat['unseated'])} unseated, "
-                  f"{len(reseat['refused'])} refused; "
+                  f"{len(reseat['refused'])} refused, "
+                  f"{len(reseat.get('evicted') or [])} evicted; "
                   f"OFF-OUTLINE PARTS {len(reseat['witnesses_before'])} -> "
                   f"{len(reseat['witnesses_after'])}"
                   + ('' if reseat['accepted'] else '  [GATE REFUSED]'))
@@ -257,6 +268,9 @@ Examples:
                 'unseated': reseat['unseated'],
                 'no_pose_blockers': reseat.get('no_pose_blockers') or {},
                 'no_pose_verdict': reseat.get('no_pose_verdict') or {},
+                # Parts moved OUTSIDE the declared scope by the eviction
+                # rung. Empty at depth 0, which is the default.
+                'evicted': reseat.get('evicted') or [],
                 'no_pose_census': reseat.get('no_pose_census') or {},
                 'evictions': reseat.get('evictions', 0),
                 'evictions_reverted': reseat.get('evictions_reverted', 0),
