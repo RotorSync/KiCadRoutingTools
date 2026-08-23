@@ -61,7 +61,8 @@ _EXPAND_ROUTING = None
 from routing_constants import SOFT_JOINT_MIN_GAP as _SOFT_JOINT_MIN_GAP
 
 # The one endpoint-coincidence radius (same value everywhere: 0.02mm / 20um).
-from connectivity import COINCIDENCE_TOL
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
+                          endpoint_reaches_via)
 
 
 def pad_copper_layers(pad, board_copper) -> set:
@@ -2279,15 +2280,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             continue
         _ep_count[(s.net_id, s.layer, _rk(s.start_x, s.start_y))] += 1
         _ep_count[(s.net_id, s.layer, _rk(s.end_x, s.end_y))] += 1
-    _via_by_net = _dd(list)
+    _vias_by_net = _dd(list)
     for v in pcb_data.vias:
-        _via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
-    def _at_anchor(nid, x, y):
-        for vx, vy, vr in _via_by_net.get(nid, []):
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+        _vias_by_net[v.net_id].append(v)
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    def _at_anchor(nid, x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
+
+        Shared predicate (connectivity.endpoint_reaches_*), so this stays
+        byte-identical to check_weird's soft-joint anchor and to the repair
+        pass. The cap is what physically touches, so the cap radius is the
+        credit -- for the pad exactly as for the via (#722) -- and the pad
+        must actually carry copper on this layer, as check_connected requires.
+        """
+        r = (width or 0.0) / 2.0
+        for v in _vias_by_net.get(nid, []):
+            if endpoint_reaches_via(x, y, r, v, (layer,), _copper):
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
     _dangles = _dd(list)  # (net_id, layer) -> [(x, y, width)]
@@ -2297,17 +2308,25 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if _ep_count[(s.net_id, s.layer, _rk(x, y))] != 1:
                 continue  # shared vertex = clean joint
-            if _at_anchor(s.net_id, x, y):
+            if _at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue  # terminates on a via / own pad = legitimate
-            _dangles[(s.net_id, s.layer)].append((x, y, s.width))
+            # A soft joint is a PAIR: a graphic is carried as a flag so
+            # only an art-MEETS-art pair is dropped, never the actionable
+            # TRACK end paired with art (#337, #722).
+            _dangles[(s.net_id, s.layer)].append(
+                (x, y, s.width, getattr(s, 'graphic', False)))
     for (net_id, layer), ends in _dangles.items():
         for i in range(len(ends)):
-            xi, yi, wi = ends[i]
+            xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
-                xj, yj, wj = ends[j]
+                xj, yj, wj, gj = ends[j]
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
+                if gi and gj:
+                    continue  # art meets art: nothing anyone can act on
                 if _SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
+                    if gi:  # report where the fix goes: the TRACK end
+                        xi, yi, xj, yj = xj, yj, xi, yi
                     net_name = pcb_data.nets.get(net_id, None)
                     net_str = net_name.name if net_name else f"net_{net_id}"
                     violations.append({

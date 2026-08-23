@@ -199,7 +199,8 @@ def prune_dead_end_segments(prunable: List[Segment], anchor_segments: List[Segme
 # is deliberately asymmetric (measure reality physically; refuse to ship
 # fragility). See issue #322 (smartknob +5V: mid-chain removals each passed
 # the overlap gate until 5 pads were genuinely disconnected).
-from connectivity import COINCIDENCE_TOL
+from connectivity import (COINCIDENCE_TOL, endpoint_reaches_pad,
+                          endpoint_reaches_via)
 _STRICT_GATE_WIDTH = COINCIDENCE_TOL  # one constant (#320): strict twin gate width
 
 
@@ -452,6 +453,31 @@ def _duplicate_connector(px: float, py: float, tx: float, ty: float,
     return False
 
 
+def _own_net_npth_hole_dist(pcb_data, net_id, x1, y1, x2, y2) -> float:
+    """Distance from segment (x1,y1)-(x2,y2) to the drill of any SAME-net
+    UNPLATED pad. inf when there is none.
+
+    The foreign-hole scan deliberately skips own-net holes, because a plated
+    own-net barrel IS this net's copper. An unplated one is not copper at all
+    (#328) -- it is a hole, and a track crossing it is a fab defect no
+    clearance check was looking at."""
+    from kicad_parser import pad_drill_circles
+    best = float('inf')
+    for pads in pcb_data.pads_by_net.values():
+        for pad in pads:
+            if getattr(pad, 'pad_type', '') != 'np_thru_hole':
+                continue
+            if getattr(pad, 'net_id', 0) != net_id:
+                continue          # foreign NPTH holes: the foreign scan has them
+            # pad_drill_circles yields (x, y, DIAMETER), and a slot yields
+            # several circles along its axis -- so this follows a slotted
+            # mounting hole rather than treating it as one disc.
+            for (hx, hy, hdia) in pad_drill_circles(pad):
+                best = min(best,
+                           _pt_seg_dist(hx, hy, x1, y1, x2, y2) - hdia / 2.0)
+    return best
+
+
 def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                       clearance: float = None) -> int:
     """Bridge same-net SOFT JOINTS with a TINY coincident segment (#soft-joint).
@@ -499,33 +525,58 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     for s in pcb_data.segments:
         if scope_net_ids is not None and s.net_id not in scope_net_ids:
             continue
-        if getattr(s, 'graphic', False):
-            continue  # #337: immutable art -- its termini are not dangles
+        # Copper-layer GRAPHICS COUNT toward the degree, exactly as they do
+        # in check_drc's detector and check_weird's -- they were skipped here,
+        # so a track end sharing a vertex with copper art was degree 1 in this
+        # pass and degree 2 there: check_drc reported nothing while this pass
+        # wrote a bridge. This function's contract is "check_drc's exact
+        # soft-joint definition, so detection and repair agree"; that only
+        # holds if the degree is counted the same way. Graphics are still not
+        # CANDIDATES (below) -- #337 keeps the art itself untouchable.
         ep_count[(s.net_id, s.layer, rk(s.start_x, s.start_y))] += 1
         ep_count[(s.net_id, s.layer, rk(s.end_x, s.end_y))] += 1
+    vias_by_net = defaultdict(list)
     via_by_net = defaultdict(list)
     for v in pcb_data.vias:
-        via_by_net[v.net_id].append((v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0))
+        vias_by_net[v.net_id].append(v)
+        # (x, y, radius) tuples for the via->pad GRAZE bridge below and the
+        # terminal-web via-terminal skip: those ask a DIFFERENT question (a
+        # graze band, a "is this a via terminal" test), not "does this end's
+        # own copper reach the barrel", so they keep their own geometry.
+        via_by_net[v.net_id].append((v.x, v.y,
+                                     (getattr(v, "size", 0) or 0) / 2.0))
 
-    def at_anchor(nid, x, y):
-        for vx, vy, vr in via_by_net.get(nid, []):
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+    _copper = list(getattr(pcb_data.board_info, 'copper_layers', None) or ())
+    def at_anchor(nid, x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
+
+        Shared predicate (connectivity.endpoint_reaches_*). This function and
+        check_drc's soft-joint detector MUST agree -- this pass repairs what
+        that one reports -- and they did not: a pad was credited by its CENTRE
+        while a via was credited by its RADIUS, so two ordinary stubs landing
+        on one pad were "dangling" and this pass bridged them with a segment
+        laid across copper both ends already touched (#722).
+        """
+        r = (width or 0.0) / 2.0
+        for v in vias_by_net.get(nid, []):
+            if endpoint_reaches_via(x, y, r, v, (layer,), _copper):
                 return True
         for p in pcb_data.pads_by_net.get(nid, []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
 
-    dangles = defaultdict(list)  # (net_id, layer) -> [(x, y, width)]
+    dangles = defaultdict(list)  # (net_id, layer) -> [(x, y, width, graphic)]
     for s in pcb_data.segments:
         if scope_net_ids is not None and s.net_id not in scope_net_ids:
             continue
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if ep_count[(s.net_id, s.layer, rk(x, y))] != 1:
                 continue
-            if at_anchor(s.net_id, x, y):
+            if at_anchor(s.net_id, x, y, s.layer, s.width):
                 continue
-            dangles[(s.net_id, s.layer)].append((x, y, s.width))
+            dangles[(s.net_id, s.layer)].append(
+                (x, y, s.width, getattr(s, 'graphic', False)))
 
     def clears(nid, x1, y1, x2, y2, layer, w):
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
@@ -533,6 +584,14 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
                 _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
         hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
+        # _seg_foreign_hole_dist filters `nid != net_id` ("own-net holes are
+        # excluded"), which is right for a PLATED barrel -- that copper is the
+        # net. It is wrong for an UNPLATED one: an NPTH pad has no copper
+        # whatever net it is tagged with (#328), so a net-tied mounting hole is
+        # a hole this bridge must clear like any other. Without this the gate
+        # was structurally blind to the one hole a same-net bridge is most
+        # likely to cross.
+        hd = min(hd, _own_net_npth_hole_dist(pcb_data, nid, x1, y1, x2, y2))
         return (d >= clr + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4)
 
@@ -542,11 +601,13 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
         for i in range(len(ends)):
             if i in used:
                 continue
-            xi, yi, wi = ends[i]
+            xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
                 if j in used:
                     continue
-                xj, yj, wj = ends[j]
+                xj, yj, wj, gj = ends[j]
+                if gi and gj:
+                    continue  # art meets art: #337 forbids touching either end
                 gap = math.hypot(xi - xj, yi - yj)
                 cap = (wi + wj) / 2.0
                 if SOFT_JOINT_MIN_GAP < gap < cap - 1e-6:
@@ -654,8 +715,9 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 continue  # anchored on a same-net via: a via terminal, not this
             target = None
             for pad in pcb_data.pads_by_net.get(s.net_id, []):
-                if getattr(pad, 'shape', None) not in ('rect', 'roundrect', 'oval'):
-                    continue  # sharp-corner necks: skip circle/custom pads
+                if getattr(pad, 'shape', None) not in ('rect', 'roundrect',
+                                                       'oval', 'circle'):
+                    continue  # custom-polygon pads have no closed-form web
                 if not pad.size_x or not pad.size_y:
                     continue
                 if not (s.layer in pad.layers or any('*' in L for L in pad.layers)):
@@ -667,9 +729,13 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
                 continue
             elx, ely = _to_pad_frame(ex, ey, target)
             nlx, nly = _to_pad_frame(nx, ny, target)
-            is_neck, tloc = terminal_pad_web_shortfall(
-                nlx, nly, elx, ely, target.size_x / 2.0, target.size_y / 2.0,
-                r, e416)
+            if _is_round_pad(target):
+                is_neck, tloc = circular_pad_web_shortfall(
+                    elx, ely, target.size_x / 2.0, r, e416)
+            else:
+                is_neck, tloc = terminal_pad_web_shortfall(
+                    nlx, nly, elx, ely, target.size_x / 2.0,
+                    target.size_y / 2.0, r, e416)
             if not is_neck:
                 continue
             # Confirm the cheap (over-reporting) pre-filter with KiCad's exact
@@ -810,6 +876,53 @@ def _pad_web_polygon(pad):
     if rot:
         shp = aff.rotate(shp, rot, origin=(pad.global_x, pad.global_y))
     return shp
+
+
+def _is_round_pad(pad) -> bool:
+    """A true circle: `circle`, or an `oval` whose axes are equal (KiCad writes
+    a round pad either way). Only these have the rotationally-symmetric web
+    circular_pad_web_shortfall solves; an elongated oval is a stadium and stays
+    on the conservative rectangular pre-filter."""
+    if not pad.size_x or not pad.size_y:
+        return False
+    return (getattr(pad, 'shape', None) in ('circle', 'oval')
+            and abs(pad.size_x - pad.size_y) < 1e-9)
+
+
+def circular_pad_web_shortfall(elx, ely, R, r, e, target_margin=0.0):
+    """The terminal-web pre-filter for a ROUND pad, in the pad's local frame.
+
+    terminal_pad_web_shortfall models the pad as a rectangle, so both callers
+    skipped circle pads entirely -- "a circle has no corner to graze". It has no
+    corner, but it still has a RIM: a cap landing near the edge of a round pad
+    joins it through a lens whose chord can be far thinner than the floor, which
+    is the same connection_width hazard (#416) the rect model catches. The
+    exact confirm (terminal_web_neck_exact -> _pad_web_polygon) has handled
+    circles all along; only this pre-filter and the shape gate did not.
+
+    Two circles, radii R (pad) and r (cap), centres d apart, intersect in a lens
+    whose chord half-width is h = sqrt(R^2 - a^2), a = (d^2 - r^2 + R^2) / 2d.
+    The joint is sub-floor when 2h < 2e. This is exact for the pair, and the
+    caller still confirms with KiCad's own erosion.
+
+    Returns ``(maybe_neck, target_local_or_None)`` like its rectangular twin.
+    """
+    d = math.hypot(elx, ely)
+    if R <= e + 1e-6:
+        return False, None      # pad narrower than the floor: unfixable
+    if d + r <= R + 1e-9:
+        return False, None      # cap fully inside: the web is the full cap
+    if d <= 1e-9 or d >= R + r:
+        return False, None      # concentric, or no contact at all
+    a = (d * d - r * r + R * R) / (2.0 * d)
+    h = math.sqrt(max(0.0, R * R - a * a))
+    if h >= e - 1e-9:
+        return False, None      # the chord already clears the floor
+    reach = R - e - target_margin
+    if reach <= 1e-6:
+        return False, None      # no floor-width band exists inside this pad
+    t = min(d, reach) / d
+    return True, (elx * t, ely * t)
 
 
 def terminal_web_neck_exact(pcb_data, net_id, layer, ex, ey, floor,
@@ -1383,14 +1496,22 @@ def _soft_joint_pairs(segs, vias, pads):
     from routing_constants import SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
 
-    via_pts = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in (vias or [])]
+    def anchored(x, y, layer, width):
+        """Does this end's own COPPER reach a same-net via barrel or pad?
 
-    def anchored(x, y):
-        for vx, vy, vr in via_pts:
-            if math.hypot(x - vx, y - vy) <= vr + 0.01:
+        Shared predicate (connectivity.endpoint_reaches_*). This function and
+        check_drc's soft-joint detector MUST agree -- this pass repairs what
+        that one reports -- and they did not: a pad was credited by its CENTRE
+        while a via was credited by its RADIUS, so two ordinary stubs landing
+        on one pad were "dangling" and this pass bridged them with a segment
+        laid across copper both ends already touched (#722).
+        """
+        r = (width or 0.0) / 2.0
+        for v in (vias or []):
+            if endpoint_reaches_via(x, y, r, v, (layer,)):
                 return True
         for p in (pads or []):
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if endpoint_reaches_pad(x, y, r, (layer,), p):
                 return True
         return False
 
@@ -1398,23 +1519,29 @@ def _soft_joint_pairs(segs, vias, pads):
     for s in segs:
         deg[(s.layer, _rk3(s.start_x, s.start_y))] += 1
         deg[(s.layer, _rk3(s.end_x, s.end_y))] += 1
-    dangles = defaultdict(list)  # layer -> [(key, x, y, width)]
+    dangles = defaultdict(list)  # layer -> [(key, x, y, width, is_graphic)]
     seen = set()
     for s in segs:
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             key = (s.layer, _rk3(x, y))
             if deg[key] != 1 or key in seen:
                 continue
-            if anchored(x, y):
+            if anchored(x, y, s.layer, s.width):
                 continue
             seen.add(key)
-            dangles[s.layer].append((key, x, y, s.width))
+            dangles[s.layer].append((key, x, y, s.width,
+                                     getattr(s, 'graphic', False)))
     pairs = set()
     for layer, ends in dangles.items():
         for i in range(len(ends)):
-            ki, xi, yi, wi = ends[i]
+            ki, xi, yi, wi, gi = ends[i]
             for j in range(i + 1, len(ends)):
-                kj, xj, yj, wj = ends[j]
+                kj, xj, yj, wj, gj = ends[j]
+                if gi and gj:
+                    # Art meets art: nothing anyone can act on (#337 forbids
+                    # touching it), and check_weird/check_drc drop the same
+                    # pair. A MIXED pair is kept -- the track end is real.
+                    continue
                 gap = math.hypot(xi - xj, yi - yj)
                 if SOFT_JOINT_MIN_GAP < gap < (wi + wj) / 2.0 - 1e-6:
                     pairs.add(frozenset((ki, kj)))
