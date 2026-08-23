@@ -3188,7 +3188,8 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
 
 
 def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias,
-                           terminal_pads=None) -> bool:
+                           terminal_pads=None, exclude_segs=None,
+                           exclude_vias=None) -> bool:
     """True only if BOTH halves of the pair connect terminal-to-terminal with the
     new hybrid copper added to the pair's existing (fanout-stub) copper. Used to
     reject a hybrid route that left a terminal orphaned (#215).
@@ -3205,11 +3206,21 @@ def _hybrid_route_connects(pcb_data, p_net_id, n_net_id, new_segs, new_vias,
     board_segs = getattr(pcb_data, 'segments', None) or []
     board_vias = getattr(pcb_data, 'vias', None) or []
     pads_by_net = getattr(pcb_data, 'pads_by_net', None) or {}
+    # The seam re-ask checks a REPLACEMENT leg while the OLD leg's copper is
+    # still on the board. Without excluding it, the old leg's vias/connectors
+    # mask a replacement that lands on the wrong layer at a terminal pad and
+    # leaves the net open (helisync SSTX1_P: the re-ask dropped the F.Cu->B.Cu
+    # via at J2.A2/U26.19 and shipped a B.Cu trace landing on the F.Cu-only
+    # pads). Exclude the replaced copper so the check sees only what survives.
+    _excl_s = set(id(s) for s in (exclude_segs or []))
+    _excl_v = set(id(v) for v in (exclude_vias or []))
     for nid in (p_net_id, n_net_id):
         pads = (terminal_pads.get(nid, []) if terminal_pads is not None
                 else pads_by_net.get(nid, []))
-        segs = [s for s in board_segs if s.net_id == nid] + [s for s in new_segs if s.net_id == nid]
-        vias = [v for v in board_vias if v.net_id == nid] + [v for v in new_vias if v.net_id == nid]
+        segs = ([s for s in board_segs if s.net_id == nid and id(s) not in _excl_s]
+                + [s for s in new_segs if s.net_id == nid])
+        vias = ([v for v in board_vias if v.net_id == nid and id(v) not in _excl_v]
+                + [v for v in new_vias if v.net_id == nid])
         r = check_net_connectivity(nid, segs, vias, pads)
         if not r.get('connected') or r.get('disconnected_pads'):
             return False
@@ -3802,7 +3813,9 @@ def seam_reask_chain_leg(pcb_data, pair, config, leg_obstacles, layer_names,
         if _connector_grazes_foreign_copper(cur_s, pcb_data, p_id, n_id, config):
             continue
         if not _hybrid_route_connects(pcb_data, p_id, n_id, cur_s, cur_v,
-                                      terminal_pads=_leg_pads):
+                                      terminal_pads=_leg_pads,
+                                      exclude_segs=old_segs,
+                                      exclude_vias=old_vias):
             continue
         sc = _score(cur_s, cur_v)
         if best is None or sc < best[0]:
