@@ -24,6 +24,7 @@ from __future__ import annotations
 RUN_ALL_FAST_OK = True
 RUN_ALL_TIMEOUT = 900
 
+import copy
 import json
 import math
 import os
@@ -46,7 +47,7 @@ from copy_board import copy_board
 from synth import make_via
 import placement.legality as L
 from placement.legality import PadClearanceModel
-from placement.fanout_clearance import (_Repair, _pad_pair_shortfall,
+from placement.fanout_clearance import (_Cap, _Repair, _pad_pair_shortfall,
                                         _point_to_rect_dist, _rect_gap,
                                         nudge_vias_for_unresolved,
                                         repair_fanout_clearance)
@@ -197,6 +198,50 @@ class TestSourcesReachTheEngine(unittest.TestCase):
             self.assertIn(ANCHOR_NET, _short(_repair(p, pcb=pcb), ANCHOR_CAP),
                           'the layer rule never reached the shortfall')
     # MUTATION: drop `read_board_layer_clearances` from the model -> empty.
+
+    def test_an_override_on_a_COPPERLESS_pad_is_not_charged(self):
+        """`_Cap`'s pad filter is deliberately loose (`endswith('.Cu')`), which
+        admits an np_thru_hole pad -- it lists *.Cu and carries no copper. A
+        FLOOR must not be that loose: PadClearanceModel.pad_floor reads
+        local_clearance unconditionally, so charging it would move a cap to
+        clear copper that does not exist, and would contradict the model's own
+        inertness rule, which refuses to ACTIVATE for an NPTH-only override."""
+        pcb = parse_kicad_pcb(BOARD)
+        model = PadClearanceModel.for_board(pcb, CLEAR, BOARD)
+        self.assertTrue(model.active)
+        fp = copy.deepcopy(pcb.footprints[ANCHOR_CAP])
+        # the footprint carries paste-only apertures too; take a REAL copper pad
+        real = next(p for p in fp.pads if L._pad_carries_copper(p))
+        real.local_clearance = 0.5                # copper, must be charged
+        hole = copy.deepcopy(real)
+        hole.pad_number = 'H1'
+        hole.pad_type = 'np_thru_hole'
+        hole.drill = 1.0
+        hole.layers = ['*.Cu', '*.Mask']
+        hole.net_id = 0
+        hole.local_clearance = 3.0                # absurd, and must be ignored
+        fp.pads.append(hole)
+        # _Cap directly, not through _Repair: appending a pad would push this
+        # footprint past the `n_copper <= 2` cap test and it would stop being a
+        # mover at all -- the very coupling the loose filter's comment warns
+        # about.
+        cap = _Cap(fp, (-0.5, -0.5, 0.5, 0.5), model)
+        # ON THE BRANCH: the loose GEOMETRY filter must still admit the hole
+        # (it lists *.Cu), or this tests nothing. The footprint also carries
+        # paste-only apertures, which the filter correctly drops.
+        loose = [p for p in fp.pads
+                 if any(str(l).endswith('.Cu') for l in p.layers)]
+        self.assertIn(hole, loose, 'the hole was dropped by the geometry '
+                                   'filter -- this test would pass vacuously')
+        self.assertEqual(len(cap.pads), len(loose))
+        self.assertEqual(len(cap.pad_floors), len(cap.pads))
+        self.assertEqual(cap.pad_floors[-1].lc, 0.0,
+                         'the copper-less pad was given a clearance floor')
+        self.assertAlmostEqual(cap.max_floor, 0.5, places=6,
+                               msg='the NPTH override reached max_floor and '
+                                   'would widen every prune and the prescreen')
+    # MUTATION: drop the `_pad_carries_copper` guard on `model.pad_floor(p)` in
+    # `_Cap.__init__` -> max_floor becomes 3.0.
 
     def test_a_board_declaring_nothing_builds_no_model(self):
         pcb = parse_kicad_pcb(INERT)

@@ -44,8 +44,9 @@ from bga_fanout.grid import analyze_bga_grid
 from placement.parser import extract_courtyard_bboxes, extract_locked_refs
 from placement.utility import compute_footprint_bbox_local, snap_to_grid
 from placement.legality import (BoardOutlineGate, PadClearanceModel, PadFloor,
-                                format_required_clause, point_to_seg_dist,
-                                rect_gap, ring_is_rect, rotate_local_bounds)
+                                _pad_carries_copper, format_required_clause,
+                                point_to_seg_dist, rect_gap, ring_is_rect,
+                                rotate_local_bounds)
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 EPS = 1e-6
@@ -181,7 +182,18 @@ class _Cap:
             half_y = hx * s + hy * c
             self.pads.append((off_x, off_y, half_x, half_y, p.net_id))
             if model is not None:
-                fl = model.pad_floor(p)
+                # The GEOMETRY filter above stays loose on purpose (see the
+                # comment), but a FLOOR must not: PadClearanceModel.pad_floor
+                # reads local_clearance unconditionally, and an np_thru_hole
+                # pad lists *.Cu while carrying no copper at all. Charging its
+                # override would move a cap to clear copper that does not
+                # exist -- and would contradict the model's own inertness
+                # rule, which refuses to ACTIVATE for an NPTH-only override
+                # (legality._pad_carries_copper, the watchy measurement).
+                # Zero floor, appended unconditionally so the index alignment
+                # the loose filter buys is preserved.
+                fl = (model.pad_floor(p) if _pad_carries_copper(p)
+                      else PadFloor(0.0, 0.0, None))
                 self.pad_floors.append(fl)
                 mf = model.max_floor(fl)
                 if mf > self.max_floor:
@@ -303,6 +315,15 @@ class _Repair:
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
         self.board = bounds
+        # Copper-to-EDGE, not a different-net pair requirement, so #725 leaves
+        # it alone: it is KiCad's `min_copper_edge_clearance`, a separate rule
+        # a netclass cannot express. Two caveats worth stating rather than
+        # implying: `board_edge_clearance` is a plain CLI flag (default 0.55)
+        # and is NOT auto-read from the board the way the routing steps read
+        # their edge constraint, and the GUI never passes it, so the plugin
+        # always gets the 0.55 signature default. Separately,
+        # nudge_vias_for_unresolved's own edge tests use bare `clearance`
+        # instead of this margin -- both pre-existing, both filed.
         margin = max(clearance, board_edge_clearance)
         self.usable = (bounds[0] + margin, bounds[1] + margin,
                        bounds[2] - margin, bounds[3] - margin)
@@ -460,6 +481,17 @@ class _Repair:
         # entry gets floor None / mf 0.0: its rect is already inflated to the
         # hole floor, and the copper-to-HOLE rule is net-independent, so the
         # new machinery must never raise it via a neighbouring pad's netclass.
+        # KNOWN GAP, deliberately not closed here: check_drc DOES honour the
+        # hole pad's OWN `local_clearance` on that rule (check_drc.py, the
+        # `max(npth_clr, local_clearance)` in the copper-to-hole pass, #505),
+        # and `lc` is net-independent too -- so this under-blocks by
+        # `lc - max(npth_floor, clearance)` on such a pad. Measured on
+        # kicad_files/ulx3s.kicad_pcb, AUDIO1's two 1.7mm NPTH holes at
+        # lc=0.400: 1.050mm modelled vs 1.250mm required, a 0.200mm
+        # under-block. It is the HOLE rule, not the different-net copper rule
+        # #725 is about, and it interacts with the #617 balance below; filed
+        # separately. (watchy's 8 NPTH overrides are all 0.100, below the 0.20
+        # fab floor, so that board is numerically inert here.)
         self.foreign_pad_floors: List[Optional[PadFloor]] = []
         self.foreign_pad_mf: List[float] = []
         self.caps: Dict[str, _Cap] = {}
@@ -1373,15 +1405,29 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
         if fp is None:
             continue
         for p in fp.pads:
-            if not any(str(l).endswith('.Cu') for l in p.layers):
+            # #725: the copper predicate is the shared one. An np_thru_hole pad
+            # lists *.Cu and carries no copper, so the loose test named it here
+            # as a copper obstacle -- and would have charged its keep-clear
+            # override besides.
+            if not _pad_carries_copper(p):
                 continue
-            rect = (p.global_x - p.size_x / 2, p.global_y - p.size_y / 2,
-                    p.global_x + p.size_x / 2, p.global_y + p.size_y / 2)
-            # #725: graded at the pair's REAL requirement, like everything
-            # else. `keepout` is the prune over-reach, so re-form the pair's
-            # keep-out from the via's radius. A locked fiducial's keep-clear
-            # override is exactly the case this warning exists to surface, and
-            # priced flat it under-reported it.
+            # ...and the RECT gets the same rect_rotation inflation _Cap and
+            # foreign_pads use. This was the one pad-geometry site in the file
+            # built from raw size_x/size_y, so a tilted locked pad under-blocked
+            # by (sqrt(2)-1)*half along the board axes -- 0.14mm on glasgow's
+            # 45-degree R9. Converting the clearance term and leaving the shape
+            # would be exactly the half-conversion this change is about.
+            tilt = math.radians(getattr(p, 'rect_rotation', 0.0) or 0.0)
+            _c, _s = abs(math.cos(tilt)), abs(math.sin(tilt))
+            _hx, _hy = p.size_x / 2.0, p.size_y / 2.0
+            ex, ey = _hx * _c + _hy * _s, _hx * _s + _hy * _c
+            rect = (p.global_x - ex, p.global_y - ey,
+                    p.global_x + ex, p.global_y + ey)
+            # Graded at the pair's REAL requirement, like everything else.
+            # `keepout` is the prune over-reach, so re-form the pair's keep-out
+            # from the via's radius. A locked fiducial's keep-clear override is
+            # exactly the case this warning exists to surface, and priced flat
+            # it under-reported it.
             pfl = st.pad_floor(p)
             for vx, vy, vnet, keepout in st.vias:
                 if vnet == p.net_id:
