@@ -465,11 +465,18 @@ NO_POSE_VERDICTS = (
 )
 
 
-#: Every sub-key present on every entry, so no consumer needs a defaulting
-#: `.get` that quietly reads as a real measurement.
-_EMPTY_CENSUS = {'boxed': 0, 'movable': 0, 'frozen': {}, 'truncated': 0,
-                 'baseline': 0, 'pairs_total': 0, 'pairs_censused': 0,
-                 'pairs_truncated': 0, 'best_pair': None}
+def _empty_census() -> Dict:
+    """A census record with every sub-key present, so no consumer needs a
+    defaulting `.get` that quietly reads as a real measurement.
+
+    A FUNCTION, not a module-level dict copied with `dict()`: that copy is
+    shallow, so every record built from it would share one `frozen` dict and
+    a single write into any of them would corrupt the template for the whole
+    process.
+    """
+    return {'boxed': 0, 'movable': 0, 'frozen': {}, 'truncated': 0,
+            'baseline': 0, 'pairs_total': 0, 'pairs_censused': 0,
+            'pairs_truncated': 0, 'best_pair': None}
 
 
 def _verdict_for(cands: Sequence[str], census: Dict) -> str:
@@ -1585,7 +1592,7 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                 # you cannot act on" the census exists to end, one level down.
                 still.append(ref)
                 no_pose_verdict[ref] = 'no_target_recorded'
-                no_pose_census[ref] = dict(_EMPTY_CENSUS)
+                no_pose_census[ref] = _empty_census()
                 continue
             tx, ty, constraint, tol = unseated_ctx[ref]
             base_excl = unplaced - {ref}
@@ -1603,7 +1610,9 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                                           base_excl | {b}, **zkw)
                      for b in cands}
             no_pose_blockers[ref] = dict(freed)
-            census = dict(_EMPTY_CENSUS)
+            # Stored by reference on purpose: the pair sweep below fills
+            # its `pairs_*` / `best_pair` into this same object.
+            census = _empty_census()
             census.update({'boxed': cinfo.get('boxed', 0),
                            'movable': cinfo.get('movable', 0),
                            'frozen': cinfo.get('frozen') or {},
