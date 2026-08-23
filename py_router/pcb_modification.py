@@ -3697,6 +3697,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         eff = pair_base(net_id, layer)
         pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                    base_clearance=eff, net_clearances=net_clearances)
+        if pd < eff + w / 2.0 - 1e-4:
+            return False
         d = min(pd,
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff,

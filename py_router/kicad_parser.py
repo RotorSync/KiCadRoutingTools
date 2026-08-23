@@ -2816,20 +2816,21 @@ def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
         # dialect still dropping uuid-less vias (the #344/#369 "forgot the
         # KiCad-10 twin" class).
         via_pattern_v10 = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
-        for m in re.finditer(via_pattern_v10, content, re.DOTALL):
-            net_name = m.group(7)
-            via = Via(
-                x=float(m.group(1)),
-                y=float(m.group(2)),
-                size=float(m.group(3)),
-                drill=float(m.group(4)),
-                layers=[m.group(5), m.group(6)],
-                net_id=name_to_id.get(net_name, 0),
-                uuid=m.group(8) or "",
-                free=False,  # Parse free from content if present
-                locked='(locked yes)' in m.group(0)
-            )
-            vias.append(via)
+        if re.search(r"\(via\s.{0,400}?\(net\s+\"", content, re.DOTALL):
+            for m in re.finditer(via_pattern_v10, content, re.DOTALL):
+                net_name = m.group(7)
+                via = Via(
+                    x=float(m.group(1)),
+                    y=float(m.group(2)),
+                    size=float(m.group(3)),
+                    drill=float(m.group(4)),
+                    layers=[m.group(5), m.group(6)],
+                    net_id=name_to_id.get(net_name, 0),
+                    uuid=m.group(8) or "",
+                    free=False,  # Parse free from content if present
+                    locked='(locked yes)' in m.group(0)
+                )
+                vias.append(via)
         # Check for free flag in matched vias. The free_pattern below has two
         # DOTALL `.*?` gaps, so on a board with NO free via it backtracks from
         # every `(via` to EOF looking for a `(free yes)` that isn't there --
