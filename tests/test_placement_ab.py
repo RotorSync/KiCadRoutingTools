@@ -26,12 +26,16 @@ board is how a term with no effect on 3 of 4 boards reads as a clean sweep.
 THE MEASURED NUMBERS LIVE IN `tests/placement_ab_baseline.json`, NOT IN PROSE.
 A row's `why` records the MECHANISM; every number it once carried is in the
 committed baseline, which this script re-measures and compares on every run.
-That is not decoration: the `corridor-ulx3s` row spent weeks rejected on a
-recorded measurement that had silently inverted -- its claimed signal went from
-"62 -> 63" (the recorded claim) to 62 -> 55 (measured) -- while this gate
-printed PASS, because it compared only the SIGN of one number and that sign was
-held up by a criterion the prose never mentioned (#694). Prose cannot be
-re-run.
+
+That is not decoration. `corridor-ulx3s` sat rejected on a recorded measurement
+whose claimed signal had reversed, and this gate printed PASS the whole time
+(#694). The reason is worth stating exactly, because the obvious reading is
+wrong: the gate did NOT compare the signal. `_verdict` collapses three
+criteria -- the signal, the guards, and intent errors -- into ONE categorical
+mark, and only that mark is checked against `expect`. So a reversal in the
+signal was MASKED by a different criterion turning the mark `regress` for its
+own reasons. An aggregate verdict cannot report which of its inputs moved;
+only per-key evidence can, and prose cannot be re-run at all.
 
 Usage:
     python3 -X utf8 tests/test_placement_ab.py            # the default table
@@ -56,8 +60,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOARDS = os.path.join(ROOT, 'kicad_files')
 
-# Six full quenches (3 rows x off/on) on three large boards. Measured ~533 s;
-# declared with headroom so a slower box reports FAIL, not TIME.
+# Six full quenches (3 rows x off/on) on three large boards. Measured 233-340 s
+# of row time across four runs on one box; declared with headroom so a slower
+# box reports FAIL, not TIME.
 RUN_ALL_TIMEOUT = 1200
 
 DEFAULT_BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -75,9 +80,18 @@ BASELINE_INT_KEYS = ('crossings', 'health_bus_foreign_crossings',
 BASELINE_FLOAT_KEYS = ('hpwl', 'health_block_displacement_max_mm')
 BASELINE_DICT_KEYS = ('intent_errors_by_rule',)
 
+# Recorded as EVIDENCE, deliberately not graded: `health_block_displacement_max_mm`
+# is neither a row's `signal` nor a `guard`, and it currently worsens in the ON
+# arm on two of the three boards. Promoting it to a guard would fail the corridor
+# rows for a second reason without anyone having decided that displacing a block
+# further is a cost here -- so it is recorded, visible, and left to whoever makes
+# that call. Recording it is not the same as agreeing with it.
+
 # CLAUDE.md's rule, now enforced here instead of only stated there. Three is
-# also the floor at which the "improve on N-1, regress on none" rule can say
-# anything at all: at N=3 a term with no real effect still passes 1 run in 8.
+# also about the smallest table at which "improve on N-1, regress on none" says
+# anything: a term whose per-board direction is a coin flip passes 1 run in 2^N,
+# so 1 in 8 at N=3. (That is an upper bound on the null rate, not the rate: a
+# term with no effect at all marks `neutral`, which fails the rule outright.)
 MIN_TRIAL_BOARDS = 3
 
 
@@ -123,15 +137,18 @@ ROWS = [
         'rejected': True,
         'why': ('MECHANISM: the term buys its signal with intent-zone '
                 'containment. Both guards improve and the re-derived '
-                'bus_foreign_crossings improves too, but the ON arm walks more '
-                'parts out of the zones the emitted intent recorded, so the '
-                'row marks REGRESS on intent errors rather than on its signal. '
-                'This DIRECTION is decided by the hard pad+drill legality '
-                'layer: run quench(pad_legality=False) on this board and the '
-                'signal goes the other way (the pre-2026-08-22 record), while '
-                'every OFF-arm number is unchanged. See '
-                'docs/placement-optimization.md. Numbers: '
-                'tests/placement_ab_baseline.json.'),
+                'bus_foreign_crossings improves too, but the ON arm leaves '
+                'more members outside their block zone, so the row marks '
+                'REGRESS on intent errors rather than on its signal. AT HEAD '
+                'that direction is decided by the hard pad+drill legality '
+                'layer: quench(pad_legality=False) on this board sends the '
+                'signal the other way -- the direction recorded at 82dbf662 '
+                '(2026-08-03) -- and leaves the OFF arm byte-identical. That '
+                'makes the layer sufficient to decide the direction TODAY; it '
+                'does not establish what changed historically, and this method '
+                'cannot, because corridor_weight does not exist on the branch '
+                'that introduced the layer. See docs/placement-optimization.md. '
+                'Numbers: tests/placement_ab_baseline.json.'),
     },
     {
         'name': 'corridor-orangecrab',
@@ -165,11 +182,13 @@ ROWS = [
         'guard': ('crossings', 'hpwl'),
         'expect': 'improve',
         'rejected': True,
-        'why': ('MECHANISM: signal and both guards improve. Kept in the table '
-                'BECAUSE a board that disagrees with the others is the whole '
-                'evidence -- a term that helps on one board of three is not a '
-                'term, and deleting the row that disagrees is how that gets '
-                'forgotten. Numbers: tests/placement_ab_baseline.json.'),
+        'why': ('MECHANISM: signal and both guards improve. This row was '
+                'kept BECAUSE it was once the only board where the term '
+                'helped -- and it is no longer the dissenter, which is the '
+                'point: a term that helps on one board of three is not a term, '
+                'WHICH board disagrees is not stable, and deleting whichever '
+                'row currently disagrees is how a one-in-three result becomes '
+                'folklore. Numbers: tests/placement_ab_baseline.json.'),
     },
 ]
 
@@ -232,8 +251,13 @@ def _run(board_path, out_path, intent, quench_kw):
     return {
         'seconds': round(time.time() - t0, 1),
         'crossings': after.get('crossings'),
-        'hpwl': round(float(after.get('hpwl') or 0.0), 2),
-        'corridor_cut': round(float(after.get('corridor_cut') or 0.0), 2),
+        # NOT `or 0.0`: a key the optimizer stopped reporting would be recorded
+        # as a real measurement of zero, which defeats record_for's refusal and
+        # reads as an enormous improvement.
+        'hpwl': None if after.get('hpwl') is None
+                else round(float(after['hpwl']), 2),
+        'corridor_cut': None if after.get('corridor_cut') is None
+                        else round(float(after['corridor_cut']), 2),
         'health_bus_foreign_crossings':
             summary.get('health_bus_foreign_crossings'),
         # NOT `health_blocks_displaced`: routability.health only computes
@@ -381,57 +405,99 @@ def record_for(row, mark, off, on):
             'off': keep('OFF', off), 'on': keep('ON', on)}
 
 
-def compare_baseline(current, expected, float_tol=1e-6, scope=None):
+def _num(v):
+    """`v` as a float, or None if it is not a number this can compare."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return float(v)
+
+
+def compare_baseline(current, expected, float_tol=1e-6, scope=None,
+                     known=None):
     """Compare measured records against the committed baseline.
 
-    Returns a list of problem strings. Two classes, both fatal, kept distinct
-    because they mean different things:
+    Returns a list of problem strings. Every class is fatal; they are kept
+    distinct because they mean different things:
 
-      INVERTED -- the DIRECTION of a key reversed, or the row's mark changed.
-                  This is #694: the finding the row records is no longer the
-                  finding the code produces.
-      DRIFT    -- same direction, moved value. Integers compare exactly; floats
-                  at a relative tolerance.
+      INVERTED -- a key's direction REVERSED (both moves non-zero, opposite
+                  ways), or the row's mark changed. This is #694: the finding
+                  the row records is no longer the finding the code produces.
+      DRIFT    -- the value moved without reversing. Integers compare exactly;
+                  floats at a relative tolerance, per arm.
+      ORPHAN   -- the baseline carries a row `ROWS` no longer declares. Never
+                  scoped away: deleting the row that disagrees is the failure
+                  this whole file exists to prevent, and a silent ORPHAN would
+                  let it happen while printing "the baseline matches".
+      MISSING  -- a row this run was asked for but did not measure.
+      NEW ROW  -- a row measured that the baseline has never seen.
+      MALFORMED -- the baseline is not shaped like a baseline. Reported, not
+                  raised: crashing after a nine-minute table is not a verdict.
 
-    `scope` is the set of row names this run actually ran, so `--row X` does
-    not report every other baseline row as missing.
+    `scope` is the set of row names this run was asked to run (`--row` narrows
+    it), so a deliberately narrow run does not report the rest as MISSING.
+    `known` is every name `ROWS` declares; a baseline row outside it is an
+    ORPHAN regardless of scope.
+
+    Direction is classified with NO tolerance, and `float_tol` decides only
+    whether a same-direction value MOVED. Folding the tolerance into the
+    direction test made a reversal inside the band read as DRIFT, and made a
+    flat baseline that started moving read as INVERTED.
     """
     problems = []
+    if not isinstance(expected, dict):
+        return [f"MALFORMED baseline: expected an object of rows, got "
+                f"{type(expected).__name__}"]
     for name in sorted(current):
         cur = current[name]
         exp = expected.get(name)
         if exp is None:
             problems.append(f"NEW ROW {name}: not in the baseline")
             continue
+        if not isinstance(exp, dict):
+            problems.append(f"MALFORMED baseline row {name}: expected an "
+                            f"object, got {type(exp).__name__}")
+            continue
         if cur.get('mark') != exp.get('mark'):
             problems.append(
                 f"INVERTED {name}: mark {exp.get('mark')} -> {cur.get('mark')}")
+        c_off, c_on = cur.get('off') or {}, cur.get('on') or {}
+        e_off, e_on = exp.get('off') or {}, exp.get('on') or {}
         for key in BASELINE_INT_KEYS + BASELINE_FLOAT_KEYS:
             tol = 0.0 if key in BASELINE_INT_KEYS else float_tol
-            ca, cb = cur.get('off', {}).get(key), cur.get('on', {}).get(key)
-            ea, eb = exp.get('off', {}).get(key), exp.get('on', {}).get(key)
-            if ca is None or cb is None or ea is None or eb is None:
-                if (ca is None) != (ea is None) or (cb is None) != (eb is None):
-                    problems.append(f"DRIFT {name}.{key}: baseline "
-                                    f"{ea!r} -> {eb!r}, measured "
-                                    f"{ca!r} -> {cb!r}")
+            raw = ((c_off.get(key), e_off.get(key)),
+                   (c_on.get(key), e_on.get(key)))
+            pairs = [(_num(c), _num(e)) for c, e in raw]
+            # Each ARM is compared on its own. Bailing on the whole key the
+            # moment one arm was None left the other arm's value permanently
+            # uncompared -- a dead evidence column, which is the bug that put
+            # `health_blocks_displaced` at None for months.
+            for arm, (c, e), (rc, re_) in zip(('off', 'on'), pairs, raw):
+                if (c is None) != (e is None):
+                    problems.append(
+                        f"DRIFT {name}.{arm}.{key}: baseline {re_!r}, "
+                        f"measured {rc!r}")
+                elif c is not None and abs(c - e) > max(abs(e), 1.0) * tol:
+                    problems.append(
+                        f"DRIFT {name}.{arm}.{key}: baseline {re_}, "
+                        f"measured {rc}")
+            (ca, ea), (cb, eb) = pairs
+            if None in (ca, cb, ea, eb):
                 continue
-            # Relative for floats: a tolerance on hpwl means "the same number",
-            # not "close enough to ignore a move".
-            scale = max(abs(ea), abs(eb), 1.0) * tol
-            if _sign(ea, eb, scale) != _sign(ca, cb, scale):
+            cd, ed = _sign(ea, eb), _sign(ca, cb)
+            if cd and ed and cd != ed:
                 problems.append(
-                    f"INVERTED {name}.{key}: baseline {ea} -> {eb}, "
-                    f"measured {ca} -> {cb}")
-            elif (abs(ca - ea) > max(abs(ea), 1.0) * tol
-                    or abs(cb - eb) > max(abs(eb), 1.0) * tol):
-                problems.append(
-                    f"DRIFT {name}.{key}: baseline {ea} -> {eb}, "
-                    f"measured {ca} -> {cb}")
+                    f"INVERTED {name}.{key}: baseline {e_off.get(key)} -> "
+                    f"{e_on.get(key)}, measured {c_off.get(key)} -> "
+                    f"{c_on.get(key)}")
         for key in BASELINE_DICT_KEYS:
-            for arm in ('off', 'on'):
-                c = (cur.get(arm) or {}).get(key) or {}
-                e = (exp.get(arm) or {}).get(key) or {}
+            for arm, c_arm, e_arm in (('off', c_off, e_off),
+                                      ('on', c_on, e_on)):
+                c = c_arm.get(key) or {}
+                e = e_arm.get(key) or {}
+                if not isinstance(c, dict) or not isinstance(e, dict):
+                    problems.append(f"MALFORMED {name}.{arm}.{key}: expected "
+                                    f"an object")
+                    continue
                 for rule in sorted(set(c) | set(e)):
                     if c.get(rule, 0) != e.get(rule, 0):
                         problems.append(
@@ -440,7 +506,12 @@ def compare_baseline(current, expected, float_tol=1e-6, scope=None):
     for name in sorted(expected):
         if name in current:
             continue
-        if scope is None or name in scope:
+        if known is not None and name not in known:
+            problems.append(
+                f"ORPHAN {name}: the baseline records this row and ROWS no "
+                f"longer declares it. Deleting a row deletes its evidence -- "
+                f"re-record deliberately, do not let it lapse.")
+        elif scope is None or name in scope:
             problems.append(
                 f"MISSING {name}: in the baseline, not measured in this run")
     return problems
@@ -452,7 +523,10 @@ def gate(rows, marks):
     """The pass rule. Pure: no I/O, so `_self_test` can reach every branch."""
     lines = []
     pinned = {r['name']: r['expect'] for r in rows if r.get('expect')}
-    trial = [r for r in rows if not r.get('expect')]
+    # A `rejected` row is NOT on trial, whatever else it carries. The banner
+    # below says so out loud; leaving such a row in `trial` made the code
+    # contradict its own printed sentence.
+    trial = [r for r in rows if not r.get('expect') and not r.get('rejected')]
     mismatched = [n for n, e in pinned.items() if marks.get(n) != e]
     rejected = [r['name'] for r in rows if r.get('rejected')]
 
@@ -488,8 +562,8 @@ def gate(rows, marks):
         lines.append(f"on trial: improved {len(b_imp)}/{n} board(s), "
                      f"regressed {len(b_reg)} "
                      f"(rule: improve >= N-1, regress == 0)")
-        lines.append(f"          N={n}: a term with no real effect still "
-                     f"passes that rule 1 run in {2 ** n} by chance")
+        lines.append(f"          N={n}: a term whose per-board direction is a "
+                     f"coin flip passes that rule 1 run in {2 ** n}")
     if pinned:
         lines.append(
             f"pinned:   {len(pinned) - len(mismatched)}/{len(pinned)} rows "
@@ -569,7 +643,6 @@ def _self_test():
     inv['r']['on']['crossings'] = 110
     probs = compare_baseline(inv, base)
     assert any(p.startswith('INVERTED r.crossings') for p in probs), probs
-    assert not any(p.startswith('DRIFT r.crossings') for p in probs), probs
 
     # 8. a changed mark is INVERTED.
     m = json.loads(json.dumps(base))
@@ -580,14 +653,15 @@ def _self_test():
     d = json.loads(json.dumps(base))
     d['r']['on']['crossings'] = 91
     probs = compare_baseline(d, base)
-    assert any(p.startswith('DRIFT r.crossings') for p in probs), probs
+    assert any(p.startswith('DRIFT r.on.crossings') for p in probs), probs
+    assert not any('INVERTED r.crossings' in p for p in probs), probs
 
     # 10. floats: inside the tolerance is silence, outside it is DRIFT.
     f = json.loads(json.dumps(base))
     f['r']['on']['hpwl'] = 9.0 + 1e-9
     assert compare_baseline(f, base, float_tol=1e-6) == []
     f['r']['on']['hpwl'] = 9.05
-    assert any(p.startswith('DRIFT r.hpwl')
+    assert any(p.startswith('DRIFT r.on.hpwl')
                for p in compare_baseline(f, base, float_tol=1e-6))
 
     # 10b. --float-tol is for floats ONLY. A loose tolerance must not start
@@ -598,7 +672,7 @@ def _self_test():
     t['r']['on']['crossings'] = 94
     probs = compare_baseline(t, base, float_tol=0.05)
     assert not any('r.hpwl' in p for p in probs), probs
-    assert any(p.startswith('DRIFT r.crossings') for p in probs), probs
+    assert any(p.startswith('DRIFT r.on.crossings') for p in probs), probs
 
     # 11. an error rule whose count moved is named BY RULE.
     r = json.loads(json.dumps(base))
@@ -665,14 +739,111 @@ def _self_test():
     assert compare_baseline({'v': rec}, {'v': rec}) == []
 
     # 18. a measurement that has LOST a compared key refuses, instead of
-    #     recording a baseline with a hole in it.
-    try:
-        record_for(vrow, 'regress', {k: v for k, v in voff.items()
-                                     if k != 'intent_errors'}, von)
-    except AssertionError as exc:
-        assert 'intent_errors' in str(exc), exc
-    else:
-        raise AssertionError('a missing compared key must refuse')
+    #     recording a baseline with a hole in it. Both an int key and a dict
+    #     key, and both arms.
+    for drop, arm in (('intent_errors', voff), ('intent_errors_by_rule', voff),
+                      ('hpwl', von)):
+        thin = {k: v for k, v in arm.items() if k != drop}
+        a, b = (thin, von) if arm is voff else (voff, thin)
+        try:
+            record_for(vrow, 'regress', a, b)
+        except AssertionError as exc:
+            assert drop in str(exc), (drop, exc)
+        else:
+            raise AssertionError(f'a missing {drop} must refuse')
+
+    # 19. the record must say what it was GIVEN. Comparing a record against
+    #     itself (case 17) passes for any consistent corruption -- swapped
+    #     arms, a hardcoded mark -- which is #694 in its purest form.
+    assert rec['mark'] == 'regress' and rec['board'] == vrow['board'], rec
+    assert rec['off']['crossings'] == voff['crossings'], rec
+    assert rec['on']['crossings'] == von['crossings'], rec
+    assert rec['off'] != rec['on'], 'the arms must not collapse'
+
+    # 20. INVERTED must be pinned on a FLOAT key too, not only on ints. hpwl is
+    #     the key whose inversion #694 recorded.
+    fi = json.loads(json.dumps(base))
+    fi['r']['on']['hpwl'] = 11.0                       # baseline fell, this rose
+    probs = compare_baseline(fi, base)
+    assert any(p.startswith('INVERTED r.hpwl') for p in probs), probs
+
+    # 21. direction is classified with NO tolerance, so a reversal INSIDE the
+    #     float band is still INVERTED, and a FLAT baseline that starts moving
+    #     is DRIFT -- not "inverted", because nothing reversed. corridor-
+    #     coldfire's recorded intent_errors is flat today, so this is live.
+    flat = {'r': {'board': 'b', 'mark': 'improve',
+                  'off': {'intent_errors': 2}, 'on': {'intent_errors': 2}}}
+    moved = json.loads(json.dumps(flat))
+    moved['r']['on']['intent_errors'] = 3
+    probs = compare_baseline(moved, flat)
+    assert any(p.startswith('DRIFT r.on.intent_errors') for p in probs), probs
+    assert not any('INVERTED r.intent_errors' in p for p in probs), probs
+
+    # 22. one arm None must NOT stop the other arm being compared. Bailing on
+    #     the whole key is how a dead evidence column stays invisible.
+    half = {'r': {'board': 'b', 'mark': 'improve',
+                  'off': {'hpwl': None}, 'on': {'hpwl': 18.09}}}
+    moved = json.loads(json.dumps(half))
+    moved['r']['on']['hpwl'] = 999.0
+    probs = compare_baseline(moved, half)
+    assert any(p.startswith('DRIFT r.on.hpwl') for p in probs), probs
+    # and a key that appears or disappears is named, per arm
+    gone = json.loads(json.dumps(half))
+    gone['r']['on']['hpwl'] = None
+    assert any(p.startswith('DRIFT r.on.hpwl')
+               for p in compare_baseline(gone, half))
+    assert compare_baseline(half, half) == []
+
+    # 23. a rule the baseline HAD and the run lost is a problem, not only a
+    #     rule the run added.
+    lost = json.loads(json.dumps(base))
+    lost['r']['on']['intent_errors_by_rule'] = {}
+    probs = compare_baseline(lost, base)
+    assert any('intent_errors_by_rule[zone_containment]' in p
+               for p in probs), probs
+
+    # 24. ORPHAN: a baseline row that ROWS no longer declares is reported even
+    #     when the run was narrowed, because deleting the row that disagrees is
+    #     the failure this file exists to prevent.
+    assert any(p.startswith('ORPHAN r')
+               for p in compare_baseline({}, base, scope=set(), known=set()))
+    assert compare_baseline({}, base, scope=set(), known={'r'}) == []
+
+    # 25. a malformed baseline is REPORTED, not raised: crashing after a
+    #     nine-minute table is not a verdict.
+    for bad in ([], {'r': []}, {'r': {'mark': 'regress', 'off': None,
+                                      'on': None}},
+                {'r': {'mark': 'regress', 'off': {'crossings': 'x'},
+                       'on': {'crossings': 'y'}}}):
+        compare_baseline(json.loads(json.dumps(base)), bad)
+
+    # 26. an UNCHANGED guard is not a regression (>= vs >).
+    same_guard = dict(von, intent_errors=14,
+                      intent_errors_by_rule=dict(voff['intent_errors_by_rule']),
+                      crossings=voff['crossings'], hpwl=voff['hpwl'])
+    assert _verdict(voff, same_guard, vrow)[0] == 'improve'
+
+    # 27. a signal the board did not measure SKIPs; it must not raise.
+    assert _verdict(voff, dict(von, health_bus_foreign_crossings=None),
+                    vrow)[0] == 'skip'
+    assert _verdict(dict(voff, health_bus_foreign_crossings=None), von,
+                    vrow)[0] == 'skip'
+
+    # 28. a rule present only in the ON arm is named -- the case that matters
+    #     most for "NAME the rules that moved".
+    only_on = dict(von, intent_errors=15,
+                   intent_errors_by_rule={'block_unresolved': 10,
+                                          'zone_containment': 4, 'keepout': 1})
+    assert any('keepout 0 -> 1' in n
+               for n in _verdict(voff, only_on, vrow)[1]), only_on
+
+    # 29. a `rejected` row is never on trial, whatever else it carries -- the
+    #     banner says so, and the code must agree.
+    rej = [row(n, f'b{i}.kicad_pcb', rejected=True)
+           for i, n in enumerate(('a', 'b', 'c'))]
+    ok, lines = gate(rej, {'a': 'regress', 'b': 'regress', 'c': 'regress'})
+    assert ok, lines
+    assert not any('on trial' in x for x in lines), lines
 
 
 def main(argv=None):
@@ -711,9 +882,30 @@ def main(argv=None):
                   f"{r['quench_on']} -> {r['signal']}")
         return 0
 
+    names = [r['name'] for r in ROWS]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        # marks/records/pinned are all keyed by name, so a duplicate silently
+        # overwrites the other row's evidence.
+        print(f"duplicate row name(s) in ROWS: {', '.join(dupes)}",
+              file=sys.stderr)
+        return 2
+    # A typo'd --row used to be dropped in silence, and the run then reported
+    # PASS over whatever survived the filter -- with --write-baseline, over a
+    # baseline it had just truncated.
+    unknown = [n for n in (args.row or ()) if n not in names]
+    if unknown:
+        print(f"no such row: {', '.join(unknown)}; try --list", file=sys.stderr)
+        return 2
     rows = [r for r in ROWS if not args.row or r['name'] in args.row]
     if not rows:
         print("no such row; try --list", file=sys.stderr)
+        return 2
+    if not 0.0 <= args.float_tol < 1.0:
+        # Negative flagged identical values as DRIFT; large silenced real
+        # reversals. Neither is a tolerance.
+        print(f"--float-tol must be in [0, 1); got {args.float_tol}",
+              file=sys.stderr)
         return 2
 
     workdir = args.workdir or tempfile.mkdtemp(prefix='placement_ab_')
@@ -736,14 +928,20 @@ def main(argv=None):
         if tally[m]:
             print(f"{m:<9} {len(tally[m])}: {', '.join(tally[m])}")
 
-    if args.json:
-        with open(args.json, 'w') as fh:
-            json.dump({'rows': records, 'marks': marks}, fh, indent=1,
-                      sort_keys=True)
-        print(f"wrote report: {args.json}")
-
     if args.write_baseline:
         target = args.baseline or DEFAULT_BASELINE
+        # The baseline is written WHOLE, so a partial run would delete the rows
+        # it did not measure -- and `--row` is the cheap path, which makes that
+        # a live footgun rather than a theoretical one. Refuse instead: mixing
+        # numbers from two engine states is not a measurement of either.
+        unmeasured = [n for n in names if n not in records]
+        if unmeasured:
+            print(f"\nREFUSED to write {target}: this run measured "
+                  f"{len(records)} of {len(names)} row(s); "
+                  f"{', '.join(unmeasured)} did not run. Writing now would "
+                  f"drop their evidence. Re-record from a full run.",
+                  file=sys.stderr)
+            return 2
         with open(target, 'w') as fh:
             json.dump(records, fh, indent=1, sort_keys=True)
         print(f"\nwrote baseline: {target} ({len(records)} row(s)). Read the "
@@ -763,13 +961,19 @@ def main(argv=None):
         except Exception as exc:                       # noqa: BLE001
             print(f"baseline unreadable: {exc}")
         if expected is None:
-            print("no baseline recorded. Read the table above, then "
-                  "--write-baseline.")
+            # NOT a pass. Deleting, renaming or truncating the baseline would
+            # otherwise remove the entire #694 protection behind exit 0.
+            # `--baseline ""` is the deliberate way to run without it.
+            ok = False
+            print(f"no usable baseline at {args.baseline}. Read the table "
+                  f"above, then --write-baseline -- or --baseline \"\" to run "
+                  f"without the comparison on purpose.")
         else:
             compared = True
             problems = compare_baseline(records, expected,
                                         float_tol=args.float_tol,
-                                        scope={r['name'] for r in rows})
+                                        scope={r['name'] for r in rows},
+                                        known=set(names))
     else:
         print('baseline comparison SKIPPED (--baseline "")')
 
@@ -786,6 +990,14 @@ def main(argv=None):
     elif compared:
         print(f"baseline: {len(records)} row(s) match "
               f"{os.path.basename(args.baseline)}")
+
+    # Written LAST, so the report carries the verdict rather than only the
+    # numbers that led to it.
+    if args.json:
+        with open(args.json, 'w') as fh:
+            json.dump({'rows': records, 'marks': marks, 'problems': problems,
+                       'pass': bool(ok)}, fh, indent=1, sort_keys=True)
+        print(f"wrote report: {args.json}")
 
     print(f"\n{'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
