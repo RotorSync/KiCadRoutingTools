@@ -376,6 +376,66 @@ class TestRealBoards(unittest.TestCase):
         self.assertEqual(g['pad_conflicts'], 1, g)
         self.assertEqual(g['required'], [['A', 'B', 0.4, 'netclass']])
 
+    def test_default_netclass_is_not_dropped(self):
+        """A Default class ABOVE an explicit --clearance must still raise.
+
+        `net_clearance_map_by_id` (the ROUTER's map) omits every net that
+        resolves only to Default, because a Default net routes at
+        config.clearance. Using it here re-created this whole issue on any
+        board graded below its own Default class -- which check_assembly
+        explicitly tells users they may do. check_drc reads `net_clearance_map`
+        (Default included, admitted when it exceeds the floor), so this must.
+        """
+        if not os.path.exists(FLAT_HIER):
+            self.skipTest('flat_hierarchy fixture not present')
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(FLAT_HIER)
+        gnd = [nid for nid, n in pcb.nets.items() if n.name == 'GND']
+        self.assertTrue(gnd, 'fixture drifted: no GND net')
+        # graded BELOW the 0.2 Default class -> the class is the requirement
+        m_lo = PadClearanceModel.for_board(pcb, 0.1, FLAT_HIER)
+        # MUTATION: read net_clearance_map_by_id instead -> None.
+        self.assertAlmostEqual(m_lo.net_floor.get(gnd[0]), 0.2)
+        fa = m_lo.pad_floor(pad(0, 0, net=gnd[0]))
+        fb = m_lo.pad_floor(pad(5, 0, net=0))
+        self.assertEqual(m_lo.pair_with_source(fa, fb), (0.2, 'netclass'))
+        # graded AT or ABOVE it -> inert, exactly check_drc's `c > clearance`
+        for cl in (0.2, 0.3):
+            m = PadClearanceModel.for_board(pcb, cl, FLAT_HIER)
+            self.assertIsNone(m.net_floor.get(gnd[0]), cl)
+
+    def test_unreadable_source_is_not_silent(self):
+        """A source that FAILS to resolve must be NAMED, not swallowed.
+
+        Silence drops the census back to the flat scalar and reports 0
+        conflicts -- the exact silence this issue was filed for. Forced here by
+        making the netclass read raise, because a merely absent or malformed
+        sibling is handled gracefully upstream (an absent .kicad_dru is a
+        legitimate no-op, and a truncated one parses to an empty map).
+        """
+        if not os.path.exists(FLAT_HIER):
+            self.skipTest('flat_hierarchy fixture not present')
+        import list_nets
+        from kicad_parser import parse_kicad_pcb
+        pcb = parse_kicad_pcb(FLAT_HIER)
+        real = list_nets.net_clearance_map
+
+        def boom(*a, **kw):
+            raise OSError('permission denied')
+
+        list_nets.net_clearance_map = boom
+        try:
+            model = PadClearanceModel.for_board(pcb, 0.1, FLAT_HIER)
+            g = grade_pad_legality(pcb, 0.1, worst_n=0, pcb_file=FLAT_HIER)
+        finally:
+            list_nets.net_clearance_map = real
+        # MUTATION: restore the bare `except Exception: net_floor = {}` -> the
+        # failure is invisible and the board silently grades at the flat scalar.
+        self.assertTrue(model.notes, 'the failure was swallowed')
+        self.assertIn('permission denied', ' '.join(model.notes))
+        # ... and it must REACH the report, not just the model
+        self.assertTrue(g['clearance_notes'], g)
+
     def test_dru_half_end_to_end(self):
         """A sibling .kicad_dru must reach the census. No board in the repo
         ships one, so write one next to a staged copy -- the same one-line

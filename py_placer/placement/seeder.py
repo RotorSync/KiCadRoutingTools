@@ -1645,24 +1645,31 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         centre off the outline, which a shipped board cannot have -- is KNOWN
         to be misplaced, so it sorts first whatever its size.
 
-        A MARKER (fiducial / mount hole / test point) or a board-sized
-        CONTAINER sorts LAST, below pin count. Pin count alone points the
-        repair straight at the fiducial: a keep-clear conflict is
-        characteristically a 1-pad fiducial against a many-pad connector, so
-        the cheapest-looking mover is the one part whose position is a
-        mechanical fact. This is the same set, and the same argument,
+        On a board with no witnesses this changes nothing, and that is every
+        healthy board in the corpus: measured zero witnesses on all 33.
+        """
+        return (0 if r in witnesses else 1, state.parts[r].pin_count, r)
+
+    def _keepclear_mover_key(r):
+        """`_mover_key` for a pair a KEEP-CLEAR raised (#697), where a MARKER
+        (fiducial / mount hole / test point) or a board-sized CONTAINER sorts
+        LAST instead of first.
+
+        Such a pair is characteristically a 1-pad fiducial against a many-pad
+        connector, so pin count points the repair straight at the one part
+        whose position is a mechanical fact. This is the set, and the argument,
         `reconstruct._body_exempt_refs` already makes for the body channel --
-        "a displaced fiducial could never come home under a connector". It
-        became reachable when #697 taught the pad census to see keep-clear
-        overrides at all; before that these pairs were never counted.
+        "a displaced fiducial could never come home under a connector".
 
-        The witness term still outranks it, so a marker that IS known to be
-        misplaced keeps moving first. A marker that is the only unlocked member
-        of a pair still moves -- this orders candidates, it does not veto one.
+        Deliberately NOT the blanket ordering: as a term above pin count it is
+        not inert. Measured on an undamaged orangecrab_ext_pll it flipped two
+        PRE-EXISTING pairs (C67<->TP30, TP28<->U8) from moving a 1-pad test
+        point to moving a 2-pad cap and a 14-pin IC -- pairs this issue did not
+        surface and whose ordering it has no business changing.
 
-        On a board with no witnesses and no markers this changes nothing, and
-        that is every healthy board in the corpus: measured zero witnesses on
-        all 33.
+        The witness term still outranks it, so a marker KNOWN to be misplaced
+        keeps moving first, and a marker that is the only unlocked member of a
+        pair still moves: this orders candidates, it does not veto one.
         """
         return (0 if r in witnesses else 1,
                 1 if _marker_or_container(r) else 0,
@@ -1692,6 +1699,12 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
     _rq = _leg.format_required_clause(pads)
     if _rq:
         print(f"    above the {clearance}mm floor: {_rq}")
+    for _n in (pads.get('clearance_notes') or ()):
+        notes.append(f"pad clearance: {_n}")
+    # Pairs a pad keep-clear / net class / dru rule raised above `clearance`.
+    # Only these get the marker-last mover rule; see _keepclear_mover_key.
+    _raised = {tuple(sorted((r[0], r[1])))
+               for r in (pads.get('required') or ())}
     for (ra, rb, mm) in pads['worst']:
         free = [r for r in (ra, rb)
                 if r in state.parts and not state.parts[r].locked]
@@ -1705,7 +1718,9 @@ def repair_placement(pcb_data, pcb_file: str, intent, *,
         # one available -- the partner was never tried, and the pair was
         # reported unrepairable. Both are candidates now; the weights keep the
         # preferred one first in the worst-first order.
-        ordered = sorted(free, key=_mover_key)
+        ordered = sorted(free, key=(_keepclear_mover_key
+                                    if tuple(sorted((ra, rb))) in _raised
+                                    else _mover_key))
         _charge(ordered[0], mm)
         for partner in ordered[1:]:
             partner_of.setdefault(ordered[0], []).append(partner)

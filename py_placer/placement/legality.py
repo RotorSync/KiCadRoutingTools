@@ -1353,6 +1353,20 @@ class PairShortfall(NamedTuple):
 ZERO_SHORTFALL = PairShortfall(0.0, False, 0.0, False)
 
 
+# Local import at module scope would drag the whole DRC stack in at import
+# time (see the BoardOutlineGate note); bound once on first use instead of once
+# per pad, which is where the old inline copy had it.
+def _pad_has_no_copper(p):
+    global _PAD_HAS_NO_COPPER
+    if _PAD_HAS_NO_COPPER is None:
+        from check_drc import _pad_has_no_copper as _f
+        _PAD_HAS_NO_COPPER = _f
+    return _PAD_HAS_NO_COPPER(p)
+
+
+_PAD_HAS_NO_COPPER = None
+
+
 def _pad_carries_copper(p) -> bool:
     """Does this pad put copper on a copper layer?
 
@@ -1364,7 +1378,6 @@ def _pad_carries_copper(p) -> bool:
     scan of `fp.pads` reported the board as having overrides while its parts'
     `max_floor` was 0.0 -- the board lost its inertness for nothing.
     """
-    from check_drc import _pad_has_no_copper
     if _pad_has_no_copper(p):
         return False
     return any(str(l).endswith('.Cu') for l in (getattr(p, 'layers', None) or ()))
@@ -1381,9 +1394,6 @@ class PadFloor(NamedTuple):
     ncl: float
     lc: float
     layers: object = None
-
-
-ZERO_FLOOR = PadFloor(0.0, 0.0, None)
 
 
 class PadClearanceModel:
@@ -1413,7 +1423,7 @@ class PadClearanceModel:
     """
 
     __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
-                 'rule_max', 'active', '_pair_cache')
+                 'active', 'notes', '_pair_cache')
 
     def __init__(self, base: float, net_floor=None, layer_rules=None,
                  board_copper=(), has_overrides: bool = False):
@@ -1421,8 +1431,8 @@ class PadClearanceModel:
         self.net_floor = dict(net_floor or {})
         self.layer_rules = dict(layer_rules or {})
         self.board_copper = list(board_copper or [])
-        self.rule_max = max(self.layer_rules.values()) if self.layer_rules else 0.0
         self.active = bool(self.net_floor or self.layer_rules or has_overrides)
+        self.notes = []
         self._pair_cache = {}
 
     # -- construction ---------------------------------------------------------
@@ -1447,23 +1457,47 @@ class PadClearanceModel:
             or [])
         net_floor = {}
         layer_rules = {}
+        notes = []
         if path:
+            nets = getattr(pcb_data, 'nets', None) or {}
             try:
-                from list_nets import net_clearance_map_by_id
-                nets = getattr(pcb_data, 'nets', None) or {}
-                net_floor = net_clearance_map_by_id(
-                    path, {nid: n.name for nid, n in nets.items()
-                           if getattr(n, 'name', None)}) or {}
-            except Exception:                                   # noqa: BLE001
+                # check_drc's map, NOT the router's `net_clearance_map_by_id`.
+                # That one omits every net resolving only to Default and takes
+                # the MAX over all matching classes -- both correct for a
+                # router (a Default net routes at config.clearance;
+                # over-blocking is safe) and both wrong for a grader, which has
+                # to agree with check_drc pair for pair. Dropping Default
+                # re-created this very issue whenever an explicit --clearance
+                # sits BELOW the board's Default class, which check_assembly
+                # tells users they may pass; taking the max over glob
+                # memberships invented requirements check_drc grades clean.
+                from list_nets import net_clearance_map
+                by_name = net_clearance_map(
+                    path, [n.name for n in nets.values()
+                           if getattr(n, 'name', None)]) or {}
+                # Same admission rule as check_drc: a class at or below the
+                # board-wide floor cannot raise anything, so it never enters.
+                net_floor = {nid: by_name[n.name]
+                             for nid, n in nets.items()
+                             if getattr(n, 'name', None) in by_name
+                             and by_name[n.name] > clearance}
+            except Exception as exc:                            # noqa: BLE001
                 net_floor = {}
+                notes.append('net classes unread (%s: %s)'
+                             % (type(exc).__name__, exc))
             try:
                 from kicad_dru import read_board_layer_clearances
-                layer_rules, _notes = read_board_layer_clearances(
+                layer_rules, dru_notes = read_board_layer_clearances(
                     path, board_copper)
-            except Exception:                                   # noqa: BLE001
+                notes.extend('.kicad_dru: ' + n for n in dru_notes)
+            except Exception as exc:                            # noqa: BLE001
                 layer_rules = {}
-        return cls(clearance, net_floor, layer_rules, board_copper,
-                   has_overrides=has_overrides)
+                notes.append('.kicad_dru unread (%s: %s)'
+                             % (type(exc).__name__, exc))
+        model = cls(clearance, net_floor, layer_rules, board_copper,
+                    has_overrides=has_overrides)
+        model.notes = notes
+        return model
 
     # -- per-pad --------------------------------------------------------------
     def pad_floor(self, pad):
@@ -1535,7 +1569,10 @@ class PadClearanceModel:
             eff, src = fa.lc, 'pad override'
         if fb.lc > eff:
             eff, src = fb.lc, 'pad override'
-        if eff <= self.base + EPS:
+        if eff <= self.base + 1e-9:
+            # check_drc's `_mark_required` threshold exactly, not legality's
+            # 1e-6 EPS: a requirement between the two would be disclosed by one
+            # grader and not the other.
             src = ''
         return eff, src
 
@@ -1570,7 +1607,6 @@ class PartPads:
         # Local imports: check_drc pulls the whole DRC stack (see the
         # BoardOutlineGate note); kicad_parser is cheap but keeps the module's
         # import surface unchanged for existing consumers.
-        from check_drc import _pad_has_no_copper
         from kicad_parser import pad_drill_circles
         import routing_defaults as defaults
 
@@ -1584,20 +1620,18 @@ class PartPads:
         self.max_floor = 0.0    # upper bound on this part's pad requirements
         npth_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE - clearance)
         for p in fp.pads:
-            if _pad_has_no_copper(p):
+            if not _pad_carries_copper(p):
                 # Copper-less drilled pad (NPTH mounting hole): the DRILL still
                 # removes copper closer than the NPTH-to-track floor. Inflation
-                # matches fanout_clearance's foreign-pad keepouts.
-                if (p.drill or 0) > 0:
+                # matches fanout_clearance's foreign-pad keepouts. A
+                # paste/mask-only aperture has neither copper nor a hole and
+                # simply drops out.
+                if _pad_has_no_copper(p) and (p.drill or 0) > 0:
                     for hx, hy, hd in pad_drill_circles(p):
                         self.holes_local.append(
                             (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))
                 continue
             copper = [l for l in p.layers if str(l).endswith('.Cu')]
-            if not copper:
-                continue    # paste/mask-only aperture
-            # The two skips above ARE `_pad_carries_copper`; keep them in step
-            # with it (see that function -- the index contract depends on it).
             through = (p.drill or 0) > 0
             pside = None if through else (
                 'B' if any(str(l).startswith('B') for l in copper) else 'F')
@@ -1966,6 +2000,10 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     fps = pcb_data.footprints
     pads_by_ref = {ref: [p for p in fp.pads] for ref, fp in fps.items()}
     model = PadClearanceModel.for_board(pcb_data, clearance, pcb_file)
+    # Keep the notes even when the model is dropped: a source that FAILED to
+    # read is exactly what makes the model look inert, so reading them off the
+    # dropped object loses them in the one case they matter.
+    clearance_notes = list(model.notes)
     if not model.active:
         model = None
     parts = build_part_pads(fps, clearance, model)
@@ -2147,6 +2185,11 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             # unexplained number. Empty on a board that declares no netclass,
             # no .kicad_dru rule and no pad override.
             'required': sorted(required, key=lambda r: (-r[2], r[0], r[1])),
+            # #697: anything that went WRONG resolving the requirement (an
+            # unreadable .kicad_pro / .kicad_dru, a dru note). Silence there
+            # drops the census back to the flat scalar and reports 0 conflicts
+            # -- the exact silence this issue was filed for.
+            'clearance_notes': clearance_notes,
             'exact': check_exact is not None}
 
 

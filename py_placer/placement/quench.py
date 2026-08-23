@@ -508,7 +508,6 @@ class QuenchState:
         # every apply_move with no invalidation; baselines key off SEED poses.
         self.pad_legality = bool(pad_legality)
         self.legality_ctx = None
-        self.pad_model = None
         if self.pad_legality:
             # #697: the per-pair required clearance (pad overrides, net
             # classes, .kicad_dru layer rules), resolved from the board's own
@@ -516,17 +515,17 @@ class QuenchState:
             # then behaves as it did -- on a board that declares none of them.
             pad_model = legality.PadClearanceModel.for_board(
                 pcb_data, clearance, pcb_file)
-            self.pad_model = pad_model if pad_model.active else None
+            pad_model = pad_model if pad_model.active else None
             part_pads = legality.build_part_pads(
                 {ref: pcb_data.footprints[ref] for ref in self.parts
-                 if ref in pcb_data.footprints}, clearance, self.pad_model)
+                 if ref in pcb_data.footprints}, clearance, pad_model)
             self.legality_ctx = legality.LegalityContext(
                 part_pads, self.edge_gate, clearance,
                 pose_of=lambda r: (self.parts[r].x, self.parts[r].y,
                                    self.parts[r].rot),
                 seed_of=lambda r: (self.parts[r].seed_x, self.parts[r].seed_y,
                                    self.parts[r].orig_rot),
-                model=self.pad_model)
+                model=pad_model)
 
         # net -> refs touching it, as a SORTED LIST, not a set (#457).
         #

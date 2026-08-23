@@ -146,6 +146,11 @@ def main():
     g = grade_body_overlap(pcb, clearance, intent_waivers=waivers,
                            pcb_file=args.board)
     leg = grade_pad_legality(pcb, clearance, worst_n=0, pcb_file=args.board)
+    # #697: name any pair graded ABOVE `clearance` and what raised it, or the
+    # echo below reports a count the announced floor cannot explain.
+    from placement.legality import format_required_clause as _req_clause
+    _leg_required = _req_clause(leg)
+    _leg_notes = list(leg.get('clearance_notes') or ())
 
     # COINCIDENT ORIGINS (run-19, measured twice): SW17+SW34+REF_PUCK_R all at
     # one point graded `buildable (blocking 0)` -- the pair currency counts pad
@@ -283,6 +288,10 @@ def main():
               "waiver class chosen for unlocked parts does not apply here.")
     from placement.legality import format_oob_clause
     _clause = format_oob_clause(leg)
+    if _leg_required:
+        print(f"  above the {clearance}mm floor: {_leg_required}")
+    for _n in _leg_notes:
+        print(f"  pad clearance: {_n}")
     print(f"  pad/hole/oob echo: {leg['pad_conflicts']} pad pair(s), "
           f"{leg['hole_conflicts']} hole conflict(s), "
           f"{leg['oob_pad_count']} part(s) with pad copper off-board"
@@ -438,6 +447,7 @@ def main():
             'blocking_pairs': [q._asdict() for q in g['blocking_pairs']],
             'advisory_pairs': [q._asdict() for q in g['advisory_pairs']],
             'pad_conflicts': leg['pad_conflicts'],
+            'pad_clearance_required': leg.get('required') or [],
             'hole_conflicts': leg['hole_conflicts'],
             'oob_pad_count': leg['oob_pad_count'],
             'oob_pad_amount': leg['oob_pad_amount'],

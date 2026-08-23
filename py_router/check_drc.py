@@ -2032,6 +2032,8 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
         # is the exact requirement. The body lives at module level
         # (pads_shared_layer_clearance) so placement/legality.py resolves the
         # same rule rather than a hand-mirrored copy -- #697.
+        if not _lcl:
+            return eff          # strict no-op: expand nothing (see the helper)
         return pads_shared_layer_clearance(
             eff, _lcl, _pad_copper(pad),
             _pad_copper(other_pad) if other_pad is not None else None)
