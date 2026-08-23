@@ -622,8 +622,11 @@ class _Repair:
                 if _f is not None:
                     self._fp_floor_by_id[id(_t)] = _f
         # Per-(cap, neighbour) REQUIRED-clearance memos. model.pair() is
-        # pose-independent, so it is resolved ONCE per pair here and never
-        # inside the candidate sweep. Each memo is (source_list, rows) and is
+        # pose-independent, so it is resolved ONCE per (cap, neighbour) pair
+        # and reused for every candidate pose. The memos are filled lazily, so
+        # the first fill for a pair does happen inside cost() -- measured on a
+        # 0.5-class board: 572 of 62,565 pair_with_source calls, against
+        # 251,477 cost() calls. Each memo is (source_list, rows) and is
         # rebuilt when the source list identity changes -- which makes
         # repair_fanout_clearance's wholesale `st.cap_vias = {...}` reassignment
         # self-heal, and makes a test that injects into cap_foreign_pads grade
@@ -770,10 +773,15 @@ class _Repair:
                 if key not in self.base_cap_pad:
                     # #725: the baseline must be in the SAME currency as the
                     # candidate it gates. Priced flat while candidates are
-                    # priced at the requirement, _worsens_any_net fires on
-                    # every pose and the pass silently stops moving anything --
-                    # a failure whose symptom is FEWER placements, which reads
-                    # as conservative rather than broken.
+                    # priced at the requirement, _worsens_any_net compares two
+                    # different units, so the accept gate reads a pose as
+                    # worse-than-seed on a pair that did not change.
+                    # Measured by reverting exactly this line at HEAD: the
+                    # placement count moves in a CLASS-DEPENDENT direction and
+                    # not by much (0.4 identical, 0.5 gives 50 vs 48 and one
+                    # more unresolved, 1.0 gives 31 vs 34) -- so the symptom is
+                    # a quietly wrong answer, not a visible seizure, which is
+                    # why the test asserts the CURRENCY and not a count.
                     self.base_cap_pad[key] = _pad_pair_shortfall(
                         seed_pads, self.caps[oref].pad_rects(), self.clearance,
                         self._pair_effs(ref, cap, oref, self.caps[oref]))
@@ -911,10 +919,17 @@ class _Repair:
         return self._floors.pair(fa, fb)
 
     def _cap_pad_layers(self, cap):
-        """This cap's per-pad copper layer sets, or None when unavailable (a
-        duck-typed cap, or a board that declares no copper layers at all -- in
-        which case NO pair may be scoped by layer, or every one of them would
-        fall back to the flat scalar and under-block)."""
+        """This cap's per-pad copper layer sets, or None when unavailable.
+
+        None for a duck-typed cap, and for a board that declares no copper
+        layers at all: `pad_copper_layers(p, [])` resolves nothing for a `*.Cu`
+        pad, so every such pad would read as copper-less and take the
+        off-layer fallback -- an UNDER-block. It hits only `*.Cu` pads (an
+        `F.Cu` / `B.Cu` / `F&B.Cu` pad still resolves), which is 0 of 308 cap
+        pads on orangecrab but 468 of 2186 across the tracked corpus, all
+        through-hole. Scoping switches off entirely rather than per-pad,
+        because a board with no copper layers has no layer question to answer.
+        """
         pl = getattr(cap, 'pad_layers', None)
         if pl is None or len(pl) != len(getattr(cap, 'pad_floors', ())):
             return None
@@ -1939,7 +1954,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # The connector is a TRACK on `layer`, so it resolves like one. Note
         # this honours netclasses and .kicad_dru LAYER rules, but not #549
         # track-scoped rules, which live in a channel PadClearanceModel does
-        # not carry (check_drc.read_board_track_clearances); under-blocking a
+        # not carry (kicad_dru.read_board_track_clearances); under-blocking a
         # geometric connector that is separately DRC'd is the safe direction.
         cfl = seg_fl(net_id, layer)
         # board edge / cutouts + NPTH drill holes at their floor (#370 B3):

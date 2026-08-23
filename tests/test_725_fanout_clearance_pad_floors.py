@@ -620,9 +620,11 @@ class TestPruneRadiiStayExact(unittest.TestCase):
 
     def test_the_seed_baseline_is_in_the_SAME_currency(self):
         """A baseline priced flat while candidates price at the requirement
-        makes `_worsens_any_net` fire on every pose and the pass stops moving
-        anything -- a failure whose symptom is FEWER placements, which reads as
-        conservative rather than broken."""
+        makes `_worsens_any_net` compare two different units, so the accept
+        gate reads a pose as worse-than-seed on a pair that did not change.
+        Measured by reverting that line at HEAD, the placement count moves in a
+        CLASS-DEPENDENT direction and not by much -- which is exactly why this
+        asserts the CURRENCY rather than a placement count."""
         raised = [k for k, v in self.st.base_cap_pad.items() if v > 0.0]
         self.assertTrue(raised, 'no mover pair has a non-zero seed baseline')
         for key in raised:
