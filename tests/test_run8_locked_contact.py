@@ -42,6 +42,10 @@ sys.path.insert(0, os.path.join(ROOT, 'py_placer'))  # #522/py_placer layout
 sys.path.insert(0, os.path.join(ROOT, 'py_tools'))  # #522/py_placer layout
 os.environ.setdefault('KRT_NO_BANNER', '1')
 
+# Fast (~4 s) despite importing run_utils for corpus_boards, which makes one
+# cheap `git ls-files` call. Without this, --fast silently stops running it.
+RUN_ALL_FAST_OK = True
+
 from kicad_parser import parse_kicad_pcb                       # noqa: E402
 from placement.legality import grade_body_overlap              # noqa: E402
 from run_utils import corpus_boards                            # noqa: E402

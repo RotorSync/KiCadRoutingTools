@@ -35,6 +35,23 @@ _EXCLUDE = {'run_all.py', 'run_utils.py', 'run_doc_examples.py', 'conftest.py', 
 
 _INTEGRATION_MARKERS = ('import run_utils', 'from run_utils', 'subprocess')
 
+#: A test may declare a module-level `RUN_ALL_FAST_OK = True` to opt OUT of the
+#: auto-classification above. Read from the SOURCE, not by importing (importing
+#: a test runs it) -- same convention as RUN_ALL_TIMEOUT below.
+#:
+#: The markers are a PROXY for "slow because it shells out", and the proxy has
+#: a false-positive class: a fast unit test that makes one cheap `git ls-files`
+#: call to identify the TRACKED board corpus (run_utils.corpus_boards). That is
+#: milliseconds, not a CLI/board integration run. Without an override, adopting
+#: that helper silently drops a test out of `--fast` -- which is exactly what
+#: happened to test_run8_locked_contact.py: it went from RUNNING under --fast
+#: to being skipped, so a red appeared to have been fixed partly by the test no
+#: longer running there. Measured: both opt-out users take ~4 s.
+#:
+#: Use it only when the shelling-out really is cheap; a test that drives a
+#: routing chain belongs in the integration bucket whatever it imports.
+_FAST_OK_MARKER = re.compile(r'^RUN_ALL_FAST_OK\s*=\s*True\s*$', re.M)
+
 # A test exits with this when it CANNOT run -- a fixture it needs is absent --
 # as distinct from passing. 77 is the autotools convention. Before this, a test
 # that printed "SKIP: ..." and exited 0 was indistinguishable from a green one,
@@ -74,6 +91,8 @@ def is_integration(path: str) -> bool:
         src = open(path, encoding='utf-8').read()
     except OSError:
         return False
+    if _FAST_OK_MARKER.search(src):
+        return False       # declared fast despite a marker; see _FAST_OK_MARKER
     return any(m in src for m in _INTEGRATION_MARKERS)
 
 
