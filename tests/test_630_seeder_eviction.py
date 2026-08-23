@@ -1030,6 +1030,14 @@ with tempfile.TemporaryDirectory() as wd:
           "board does not ride through on its own oob improvement",
           faulty['accepted'] is False and faulty['moves'] == [],
           f"accepted {faulty['accepted']} moves {faulty['moves']}")
+    check("#699: the trade was ACCEPTED by the seeder but the pass was "
+          "refused, and `evicted` describes the WRITTEN board -- so it is "
+          "empty here, while the attempt stays visible in `evictions`",
+          faulty.get('evicted') == [] and faulty.get('evictions') == 1
+          and any('nothing was written' in n for n in faulty['notes']),
+          f"evicted {faulty.get('evicted')} evictions "
+          f"{faulty.get('evictions')} "
+          f"{[n for n in faulty['notes'] if 'eviction rung' in n]}")
     check("#699: prune_assignment is the conjunct that caught it, which is "
           "WHY the licence check below is tested directly and not through a "
           "fixture: a fixture would have to defeat prune first",
