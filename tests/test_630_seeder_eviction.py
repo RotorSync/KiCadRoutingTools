@@ -108,6 +108,37 @@ def pile_board(path):
                  _part('SMALL', 8, 7, 0.5, 0.5, 4)])
 
 
+def pair_block_board(path):
+    """#699: TWO blockers, neither of which is in the way BY ITSELF.
+
+    The block is a THEOREM again. On the same 16 x 14 board at 0.5mm edge
+    clearance, BIG's 10x10 courtyard confines its centre to x in [5.5, 10.5],
+    y in [5.5, 8.5]. For every centre in that range |cx - 7| and |cx - 9| are
+    both <= 5.5, so the x-gap to either small is <= 0 and legality reduces to
+    the y axis: |cy - 7| >= 5.7, i.e. cy <= 1.3 or cy >= 12.7, which the range
+    excludes. So S1 ALONE blocks every pose, and so does S2 -- lifting either
+    one frees exactly zero, which is the verdict issue #699 reports as
+    "immovable". Lifting BOTH frees the whole rim.
+
+    (`rect_gap` is euclidean when both axes separate, so "|dx| >= 5.7 or
+    |dy| >= 5.7" is SUFFICIENT for legality, not necessary -- the corner case
+    |dx| = |dy| = 5.642 is legal too. It does not arise here because the x
+    condition is already unreachable, but the lemma is one-directional and
+    must not be copied into a tighter fixture.)
+
+    With BIG seated at (8, 7) its courtyard is [3,13] x [2,12], so the smalls
+    have the whole left and right strips to return to (centre x <= 2.3 or
+    >= 13.7). The pair trade is therefore ACCEPTED, and the fixture tests the
+    accepting path rather than a revert dressed up as one.
+
+    BIG is 100mm2 of a 224mm2 board = 44.6%, under CONTAINER_RATIO, so it
+    stays a real obstacle rather than being skipped as a frame.
+    """
+    board(path, [_part('BIG', 8, 7, 5.0, 5.0, 2),
+                 _part('S1', 7, 7, 0.5, 0.5, 4),
+                 _part('S2', 9, 7, 0.5, 0.5, 4)])
+
+
 def two_bigs_board(path):
     """Two 10x10 courtyards on a 16x14 board: whichever seats first leaves
     the other no pose, and lifting it frees plenty -- but there is no pose
@@ -300,10 +331,98 @@ with tempfile.TemporaryDirectory() as wd:
           s2 and s2['unseated'] == 1 and poses(out2) == poses(out),
           f"{s2 and s2['unseated']} {poses(out2)} vs {poses(out)}")
     proc3, s3, out3 = run(wd, pile_board, intent_for(['BIG', 'SMALL']),
-                          '--evict-depth', '2', tag='d2')
-    check("--evict-depth 2 is refused (nothing deeper is defined)",
+                          '--evict-depth', '3', tag='d3')
+    check("--evict-depth 3 is refused (nothing deeper is defined)",
           proc3.returncode == 2 and s3 is None,
           f"rc={proc3.returncode}")
+    # #699: depth 2 is ACCEPTED now, and on a board a SINGLE lift already
+    # solves it must behave exactly like depth 1 -- the pair sweep only runs
+    # when no single lift frees a pose, so it never fires here.
+    proc4, s4, out4 = run(wd, pile_board, intent_for(['BIG', 'SMALL']),
+                          '--evict-depth', '2', tag='d2')
+    proc5, s5, out5 = run(wd, pile_board, intent_for(['BIG', 'SMALL']),
+                          '--evict-depth', '1', tag='d1')
+    check("#699: --evict-depth 2 is accepted, not refused",
+          proc4.returncode == 0 and s4 is not None,
+          f"rc={proc4.returncode}")
+    check("#699: depth 2 on a single-blocker board is depth 1 exactly "
+          "(the pair sweep does not run when one lift is enough)",
+          s4 and s5 and poses(out4) == poses(out5)
+          and s4.get('evictions') == 1 and s5.get('evictions') == 1,
+          f"{poses(out4)} vs {poses(out5)}")
+
+# --------------------------------------------------------------------------
+# #699 THE PAIR PIN TEST (depth 2). A part two neighbours JOINTLY block is
+# reported immovable by a rung that only ever lifts one of them -- and that
+# verdict is true only of the basin the board happens to be in.
+#
+# Driven at the library level, and that is forced, not a shortcut: the
+# fixture needs S1/S2 at KNOWN coordinates with only BIG to seat, which is
+# `seed_refs`, and `place_seed` has no --seed-refs (it derives the scope from
+# pile detection, and three parts at three distinct coordinates is not a
+# pile). The written board is still what the accepting case is graded on.
+# --------------------------------------------------------------------------
+with tempfile.TemporaryDirectory() as wd:
+    import random as _rnd
+    from placement import floorplan as _fp
+    from placement.writer import write_placed_output as _wpo
+    bpath = os.path.join(wd, 'pair.kicad_pcb')
+    ipath = os.path.join(wd, 'pair-fp.json')
+    pair_block_board(bpath)
+    with open(ipath, 'w', encoding='utf-8') as f:
+        json.dump(intent_for(['BIG', 'S1', 'S2']), f)
+    pintent = _fp.load_intent(ipath)
+
+    def _seed(depth):
+        return seeder.seed_from_intent(
+            parse_kicad_pcb(bpath), bpath, pintent, _rnd.Random("0"),
+            clearance=0.2, board_edge_clearance=0.5, grid_step=0.1,
+            seed_refs={'BIG'}, evict_depth=depth)
+
+    r1 = _seed(1)
+    # THE CONTROL, and without it the depth-2 row below proves nothing: it is
+    # what says the pair sweep did the work rather than a single lift.
+    check("#699: the fixture reproduces the issue -- at depth 1 BIG is "
+          "unseated and NEITHER neighbour frees a pose on its own",
+          r1['unseated'] == ['BIG']
+          and r1['no_pose_blockers'].get('BIG') == {'S1': 0, 'S2': 0}
+          and not r1['evictions'],
+          f"unseated {r1['unseated']} blockers {r1['no_pose_blockers']} "
+          f"evictions {r1['evictions']}")
+    check("#699: and the depth-1 note claims only what a k=1 sweep measured "
+          "(not 'they are not what is in the way')",
+          any('lifting any ONE of them frees no pose' in n
+              for n in r1['notes'])
+          and not any('not what is in the way' in n for n in r1['notes']),
+          str([n for n in r1['notes'] if 'censused' in n]))
+
+    r2 = _seed(2)
+    ev = r2['evictions']
+    check("#699: at depth 2 BIG is seated", r2['unseated'] == [],
+          f"unseated {r2['unseated']}")
+    check("#699: by ONE trade that lifted the PAIR, recorded as depth 2",
+          len(ev) == 1 and ev[0]['accepted'] is True
+          and sorted(ev[0]['blockers']) == ['S1', 'S2']
+          and ev[0]['depth'] == 2,
+          str(ev))
+    check("#699: the record names what the trade COST each evicted part",
+          len(ev) == 1 and sorted(ev[0].get('moved') or {}) == ['S1', 'S2']
+          and all(d > 0 for d in (ev[0].get('moved') or {}).values()),
+          str(ev and ev[0].get('moved')))
+    check("#699: and the run SAYS it evicted a pair",
+          any('seated after evicting S1, S2' in n for n in r2['notes']),
+          str([n for n in r2['notes'] if 'evicting' in n]))
+    # THE BOARD. A count of seated parts is not a board -- the same rule the
+    # depth-1 pin test above is written to.
+    pout = os.path.join(wd, 'pair-out.kicad_pcb')
+    _wpo(bpath, pout, r2['placements'])
+    ok, detail = pairwise_legal(pout)
+    check("#699 THE BOARD: every pair of the written depth-2 output is "
+          "legal (BIG seated, both blockers re-seated clear of it)",
+          ok, detail)
+    check("#699: and all three parts really are on the board",
+          len(r2['placements']) == 3,
+          str([p['reference'] for p in r2['placements']]))
 
 # --------------------------------------------------------------------------
 # A trade that cannot be completed REVERTS, says so, and leaves the board as
@@ -538,10 +657,10 @@ with tempfile.TemporaryDirectory() as wd:
 # --------------------------------------------------------------------------
 try:
     seeder.seed_from_intent(pcb, bpath, intent, random.Random("0"),
-                            evict_depth=2)
-    check("seed_from_intent(evict_depth=2) raises", False, "no error")
+                            evict_depth=3)
+    check("seed_from_intent(evict_depth=3) raises", False, "no error")
 except ValueError as exc:
-    check("seed_from_intent(evict_depth=2) raises", 'evict_depth' in str(exc),
+    check("seed_from_intent(evict_depth=3) raises", 'evict_depth' in str(exc),
           str(exc))
 
 print(f"\n{passed} passed, {failed} failed")

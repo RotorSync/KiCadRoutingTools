@@ -39,6 +39,7 @@ byte for byte. Everything else iterates sorted (#457).
 from __future__ import annotations
 
 import fnmatch
+import itertools
 import math
 import random
 import re
@@ -277,6 +278,25 @@ def zone_census_offsets(part, constraint, tol, tx, ty, grid_step=0.1,
 # the geometry below proves it rather than assuming it.
 EVICT_MAX_BLOCKERS = 8
 
+# Depth 2 lifts a PAIR (#699). A rung that only ever lifts ONE neighbour
+# records "immovable" for a part two neighbours jointly block, and that
+# verdict is true only of the basin the board happens to be in: the reporter's
+# connector censused 8 neighbours, none of which frees a pose alone, while the
+# truth arrangement of the same board seats it by moving two of them together.
+#
+# The bound is a COUNT, deliberately -- a wall-clock budget would make the
+# same board place differently on a slow machine and a fast one (#621, the
+# reason `--deadline` was deleted repo-wide). ONE live bound, not two: a
+# second "only pair up the nearest K" cap set to C(K,2) can never bite, and a
+# bound that cannot bite is a comment pretending to be a limit.
+#
+# 16 of the C(8,2)=28 pairs, in "both blockers close to the contested region"
+# order -- by (i+j) over the nearest-first candidate list, so the truncation
+# drops the far-far pairs rather than starving one candidate of partners.
+# Plain `combinations` order would spend the whole budget pairing the single
+# nearest blocker with everything. What is dropped is REPORTED, never silent.
+EVICT_MAX_PAIRS = 16
+
 
 def _evict_candidates(state, ref: str, tx: float, ty: float,
                       placed: Set[str], immovable: Set[str],
@@ -458,24 +478,34 @@ def _seated_violations(state, seated: Set[str]) -> Tuple[int, float]:
     return count, round(area, 4)
 
 
-def _evict_trade(state, ref: str, best: str, tx: float, ty: float,
-                 constraint, tol: float, best_constraint, best_tol: float,
+def _evict_trade(state, ref: str, blockers: Sequence[str],
+                 tx: float, ty: float, constraint, tol: float,
+                 blocker_zones: Sequence[Tuple[Any, float]],
                  placed: Set[str], unplaced: Set[str]) -> Dict:
-    """Lift `best`, seat `ref` at the target it was refused at, put `best`
-    back; keep the trade only under the rule below, else restore both.
+    """Lift every ref in `blockers`, seat `ref` at the target it was refused
+    at, put the blockers back; keep the trade only under the rule below, else
+    restore all of them.
+
+    `blockers` is ONE ref at depth 1 and TWO at depth 2 (#699). Nothing in
+    the rule below is per-blocker-count: the same three conjuncts decide a
+    pair, over a bigger snapshot. `blocker_zones` is the matching
+    `(constraint_rect, tol)` for each blocker, in the same order.
 
     THE ACCEPTANCE RULE, in this order, every conjunct required:
 
-      1. both seats were found -- `_try_place` seated `ref` (under its own
-         zone) against the board with `best` lifted, then seated `best`
-         (under ITS own zone, searching out from its old pose) against the
-         board with `ref` in it;
-      2. both are legal against the FULL seated set, re-checked here with
-         `pose_ok` at the clearance the seats were found at. The only parts
-         excluded are the ones still in the pile, so `ref` and `best` are
-         obstacles to each other. This is the conjunct that does not trust
-         the bookkeeping: the first version of this rung re-seated the
-         blocker with `ref` still in its exclude set and landed it on top
+      1. every seat was found -- `_try_place` seated `ref` (under its own
+         zone) against the board with the blockers lifted, then seated each
+         blocker (under ITS own zone, searching out from its old pose)
+         against the board with `ref` in it. The blockers go back HARDEST
+         FIRST (descending courtyard extent, then name), so the part with
+         the least choice picks while the board is emptiest, and each one
+         that lands is an obstacle to the next;
+      2. all of them are legal against the FULL seated set, re-checked here
+         with `pose_ok` at the clearance the seats were found at. The only
+         parts excluded are the ones still in the pile, so `ref` and every
+         blocker are obstacles to each other. This is the conjunct that does
+         not trust the bookkeeping: the first version of this rung re-seated
+         the blocker with `ref` still in its exclude set and landed it on top
          of `ref`, 100% inside its courtyard, and reported `unseated 0`;
       3. `_seated_violations` over the seated parts, `ref` now among them,
          has not increased against the board before the trade. This is the
@@ -492,37 +522,63 @@ def _evict_trade(state, ref: str, best: str, tx: float, ty: float,
     unseated pile (see `_seated_violations`).
 
     Returns the eviction record. `accepted` says which branch ran; on the
-    reverted branch both parts are back at their snapshot poses and `reason`
-    names the conjunct that failed. The caller owns `placed`/`unplaced`; this
-    function reads them and restores `best` to `placed` either way.
+    reverted branch every part is back at its snapshot pose and `reason`
+    names the conjunct that failed. `blocker` is the single blocker's ref at
+    depth 1 and None for a pair; `blockers` always lists them all. The caller
+    owns `placed`/`unplaced`; this function reads them and restores every
+    blocker to `placed` either way.
     """
+    from placement.reconstruct import part_extent_mm
+    blockers = list(blockers)
+    zones = dict(zip(blockers, blocker_zones))
     snapshot = {r: (state.parts[r].x, state.parts[r].y, state.parts[r].rot)
-                for r in (ref, best)}
+                for r in [ref] + blockers}
     seated_before = set(placed) - {ref}
     viol_before = _seated_violations(state, seated_before)
     hpwl_before = round(state.hpwl(), 3)
-    pile = set(unplaced) - {ref, best}
-    # 1. lift, seat the blocked part, put the blocker back with it in place.
-    unplaced.add(best)
-    placed.discard(best)
-    clr_ref = _try_place(state, ref, tx, ty, pile | {best},
+    pile = set(unplaced) - {ref} - set(blockers)
+    # 1. lift, seat the blocked part, put the blockers back with it in place.
+    for b in blockers:
+        unplaced.add(b)
+        placed.discard(b)
+    lifted = set(blockers)
+    clr_ref = _try_place(state, ref, tx, ty, pile | lifted,
                          constraint=constraint, tol=tol)
-    clr_best = None
+    clr_back: Dict[str, Optional[float]] = {b: None for b in blockers}
     if clr_ref is not None:
-        bx, by, _brot = snapshot[best]
-        clr_best = _try_place(state, best, bx, by, pile,
-                              constraint=best_constraint, tol=best_tol)
-    ok = clr_ref is not None and clr_best is not None
+        # Hardest first: the biggest courtyard has the fewest pockets left
+        # once `ref` is in, and a small part squeezed in first can leave the
+        # big one nowhere to go. Same ordering the anchor rounds use.
+        for b in sorted(blockers, key=lambda r: (-part_extent_mm(state, r), r)):
+            lifted.discard(b)
+            bx, by, _brot = snapshot[b]
+            bz, btol = zones.get(b, (None, 0.5))
+            clr_back[b] = _try_place(state, b, bx, by, pile | lifted,
+                                     constraint=bz, tol=btol)
+            if clr_back[b] is None:
+                break
+    ok = clr_ref is not None and all(c is not None
+                                     for c in clr_back.values())
     # 2. legal against the full seated set, independently of (1).
+    #
+    # The re-check clearance is the MINIMUM over every seat found, which gets
+    # weaker as the trade grows: one part seated on `_try_place`'s 0.02mm
+    # floor drags the re-check for all the others down to that floor. Keeping
+    # `min` for every N is deliberate -- a per-part clearance here would be a
+    # SECOND rule, and it would silently change which depth-1 trades are
+    # accepted -- but a relaxed re-check is now reported (`relaxed`) instead
+    # of being invisible.
     legal = False
+    relaxed = False
     if ok:
         full = state.clearance
         try:
-            state.clearance = min(clr_ref, clr_best)
+            state.clearance = min([clr_ref] + list(clr_back.values()))
+            relaxed = state.clearance < full - 1e-9
             state._inc_violation.clear()
-            pr, pb = state.parts[ref], state.parts[best]
-            legal = (pose_ok(state, ref, pr.x, pr.y, pr.rot, pile)
-                     and pose_ok(state, best, pb.x, pb.y, pb.rot, pile))
+            legal = all(pose_ok(state, r, state.parts[r].x, state.parts[r].y,
+                                state.parts[r].rot, pile)
+                        for r in [ref] + blockers)
         finally:
             state.clearance = full
             state._inc_violation.clear()
@@ -533,13 +589,23 @@ def _evict_trade(state, ref: str, best: str, tx: float, ty: float,
     if not accepted:
         for r, pose in snapshot.items():
             state.apply_move(r, *pose)
-    placed.add(best)
-    unplaced.discard(best)
+    for b in blockers:
+        placed.add(b)
+        unplaced.discard(b)
+    # Singular wording is kept verbatim for the one-blocker case: it is what
+    # the depth-1 notes and their tests read.
+    one = len(blockers) == 1
     if not ok:
-        reason = ('the blocked part still had no legal pose with the blocker '
-                  'lifted' if clr_ref is None else
-                  'the blocker had no legal pose to return to with the part '
-                  'in place')
+        if clr_ref is None:
+            reason = ('the blocked part still had no legal pose with the '
+                      + ('blocker lifted' if one else 'blockers lifted'))
+        elif one:
+            reason = ('the blocker had no legal pose to return to with the '
+                      'part in place')
+        else:
+            stuck = [b for b in blockers if clr_back[b] is None]
+            reason = (f"{', '.join(sorted(stuck))} had no legal pose to "
+                      f"return to with the part in place")
     elif not legal:
         reason = 'a seat was not legal against the full seated set'
     elif not accepted:
@@ -547,13 +613,32 @@ def _evict_trade(state, ref: str, best: str, tx: float, ty: float,
                   f'{list(viol_after)}')
     else:
         reason = ''
-    return {'ref': ref, 'blocker': best, 'accepted': accepted,
-            'clearance': [clr_ref, clr_best],
+    return {'ref': ref,
+            # The FIRST blocker, never None: consumers union these into ref
+            # sets and a None there is a landmine. `blockers` is the
+            # authoritative list at every depth.
+            'blocker': blockers[0],
+            'blockers': list(blockers),
+            'accepted': accepted,
+            'clearance': [clr_ref] + [clr_back[b] for b in blockers],
             'violations_before': list(viol_before),
             'violations_after': (None if viol_after is None
                                  else list(viol_after)),
             'hpwl_before': hpwl_before,
             'hpwl_after': round(state.hpwl(), 3),
+            # What the trade actually COST, per evicted part: how far it was
+            # pushed and whether it came back turned. HPWL is not a conjunct
+            # (see above) and one trade may now displace two parts, so the
+            # bet has to be visible rather than merely bounded.
+            'moved': {b: round(math.hypot(state.parts[b].x - snapshot[b][0],
+                                          state.parts[b].y - snapshot[b][1]),
+                               3) for b in blockers} if accepted else {},
+            'rotated': {b: [snapshot[b][2], state.parts[b].rot]
+                        for b in blockers
+                        if accepted
+                        and abs(state.parts[b].rot - snapshot[b][2]) > 1e-9},
+            # The conjunct-2 re-check ran below the board's clearance.
+            'relaxed': relaxed,
             'reason': reason}
 
 
@@ -929,12 +1014,15 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
 
     `evict_depth` arms the eviction rung (stage 3c, #630): 0 (the default)
     censuses the blockers of every unseated part and moves nothing; 1 also
-    trades the best blocker out and back under `_evict_trade`'s acceptance
-    rule. Opt-in until an A/B row on three boards exists (CLAUDE.md, "A new
-    PLACEMENT objective term"). Nothing deeper is defined.
+    trades the best SINGLE blocker out and back under `_evict_trade`'s
+    acceptance rule; 2 additionally censuses PAIRS when no single lift frees
+    a pose, and trades the best pair (#699). Opt-in until an A/B row on three
+    boards exists (CLAUDE.md, "A new PLACEMENT objective term"). Nothing
+    deeper is defined -- depth 3 raises rather than silently meaning 2.
     """
-    if evict_depth not in (0, 1):
-        raise ValueError(f"evict_depth must be 0 or 1, got {evict_depth!r}")
+    if evict_depth not in (0, 1, 2):
+        raise ValueError(
+            f"evict_depth must be 0, 1 or 2, got {evict_depth!r}")
     import pose_score
     from placement import floorplan
 
@@ -1341,9 +1429,18 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
     # they block. The trade itself, and the rule that accepts or reverts
     # it, is `_evict_trade`.
     #
-    # Bounded on every axis: depth 1 (a blocker's own blocker is not
-    # chased), at most EVICT_MAX_BLOCKERS candidates per part, one trade per
-    # part, and the census counts to a cap.
+    # At depth 2 the same question is asked of PAIRS (#699), but ONLY for a
+    # part no single lift helped: a rung that lifts one neighbour at a time
+    # writes down "immovable" for a part two neighbours jointly block, and
+    # that verdict is true only of the basin the board is in. The pair sweep
+    # cannot be pruned to the candidates that scored well singly -- in the
+    # case it exists for, every single lift frees exactly zero.
+    #
+    # Bounded on every axis: no recursion at either depth (a blocker's own
+    # blocker is not chased), at most EVICT_MAX_BLOCKERS candidates per part,
+    # at most EVICT_MAX_PAIRS pairs from the nearest EVICT_PAIR_CANDIDATES of
+    # them, ONE trade per part (a single lift that was useful but whose trade
+    # reverted does NOT fall back to a pair), and the census counts to a cap.
     if unseated:
         # Not this rung's to lift: the intent's locks, and its declared edge
         # connectors (see `_evict_candidates`). An edge_connector entry with
@@ -1392,36 +1489,91 @@ def seed_from_intent(pcb_data, pcb_file: str, intent, rng: random.Random, *,
                         f"would free {useful[-1][0]} -- not evicted "
                         f"(--evict-depth 0)")
                 continue
-            if not useful:
+            # Depth 2 (#699): when NO single lift frees a pose, ask the same
+            # question of pairs. Enumerated over `cands` as it comes -- that
+            # is nearest-first -- so the choice is deterministic, and NOT
+            # ranked by the single-lift counts, which are all zero in exactly
+            # the case this exists for.
+            chosen: List[str] = [useful[-1][1]] if useful else []
+            chosen_freed = useful[-1][0] if useful else 0
+            pairs_censused = pairs_dropped = 0
+            if not useful and evict_depth >= 2 and len(cands) >= 2:
+                pairs = sorted(
+                    itertools.combinations(range(len(cands)), 2),
+                    key=lambda ij: (ij[0] + ij[1], ij[1]))
+                pairs = [(cands[i], cands[j]) for i, j in pairs]
+                pairs_dropped = max(0, len(pairs) - EVICT_MAX_PAIRS)
+                pairs = pairs[:EVICT_MAX_PAIRS]
+                pairs_censused = len(pairs)
+                freed2 = {pr: count_legal_poses(state, ref, tx, ty,
+                                                base_excl | set(pr), **zkw)
+                          for pr in pairs}
+                useful2 = sorted((n, pr) for pr, n in freed2.items()
+                                 if n > baseline)
+                if useful2:
+                    chosen = list(useful2[-1][1])
+                    chosen_freed = useful2[-1][0]
+            if not chosen:
                 still.append(ref)
-                if cands:
+                if cands and pairs_censused:
+                    notes.append(
+                        f"{ref}: censused {len(cands)} neighbour(s) and "
+                        f"{pairs_censused} pair(s); lifting no one or two of "
+                        f"them frees a pose, so they are not what is in the "
+                        f"way"
+                        + (f" ({pairs_dropped} further pair(s) not "
+                           f"censused, cap "
+                           f"EVICT_MAX_PAIRS={EVICT_MAX_PAIRS})"
+                           if pairs_dropped else ""))
+                elif cands:
+                    # NOT "they are not what is in the way": that is a
+                    # universal claim from a sweep that only ever lifted ONE
+                    # of them, and it is false for a part two neighbours
+                    # jointly block (#699). Say what was actually measured.
                     notes.append(
                         f"{ref}: censused {len(cands)} neighbour(s); lifting "
-                        f"none of them frees a pose, so they are not what is "
-                        f"in the way")
+                        f"any ONE of them frees no pose"
+                        + ("; --evict-depth 2 also tries pairs"
+                           if evict_depth < 2 else ""))
                 continue
-            best = useful[-1][1]
-            bz = ref_zone.get(best)
-            rec = _evict_trade(
-                state, ref, best, tx, ty, constraint, tol,
-                bz.rect if bz is not None else None,
-                intent.zone_tolerance(bz) if bz is not None else 0.5,
-                placed, unplaced)
-            rec.update({'poses_freed': freed[best], 'poses_before': baseline,
-                        'depth': 1})
+            zinfo = []
+            for b in chosen:
+                bz = ref_zone.get(b)
+                zinfo.append(
+                    (bz.rect if bz is not None else None,
+                     intent.zone_tolerance(bz) if bz is not None else 0.5))
+            rec = _evict_trade(state, ref, chosen, tx, ty, constraint, tol,
+                               zinfo, placed, unplaced)
+            rec.update({'poses_freed': chosen_freed, 'poses_before': baseline,
+                        'depth': len(chosen)})
             evictions.append(rec)
+            names = ', '.join(chosen)
             if rec['accepted']:
                 placed.add(ref)
                 unplaced.discard(ref)
+                extra = ''
+                if rec.get('moved'):
+                    extra += ('; moved ' + ', '.join(
+                        f"{b} {d:g}mm" for b, d in
+                        sorted(rec['moved'].items())))
+                if rec.get('rotated'):
+                    extra += ('; ROTATED ' + ', '.join(
+                        f"{b} {a:g}->{c:g}" for b, (a, c) in
+                        sorted(rec['rotated'].items())))
+                if rec.get('relaxed'):
+                    extra += ('; the legality re-check ran at a reduced '
+                              'clearance (a seat was found below the board '
+                              'floor)')
                 notes.append(
-                    f"{ref}: seated after evicting {best} (poses at its "
-                    f"target: {baseline} before, {freed[best]} with {best} "
-                    f"lifted); violations {rec['violations_before']} -> "
+                    f"{ref}: seated after evicting {names} (poses at its "
+                    f"target: {baseline} before, {chosen_freed} with "
+                    f"{' + '.join(chosen)} lifted); violations "
+                    f"{rec['violations_before']} -> "
                     f"{rec['violations_after']}, hpwl {rec['hpwl_before']} "
-                    f"-> {rec['hpwl_after']}")
+                    f"-> {rec['hpwl_after']}" + extra)
             else:
                 still.append(ref)
-                notes.append(f"{ref}: evicting {best} REVERTED -- "
+                notes.append(f"{ref}: evicting {names} REVERTED -- "
                              f"{rec['reason']}")
         unseated = still
 
