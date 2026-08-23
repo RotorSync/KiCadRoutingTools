@@ -203,12 +203,20 @@ class _Cap:
                 # (legality._pad_carries_copper, the watchy measurement).
                 # Zero floor, appended unconditionally so the index alignment
                 # the loose filter buys is preserved.
-                fl = (model.pad_floor(p) if _pad_carries_copper(p)
-                      else PadFloor(0.0, 0.0, None))
+                # A pad that carries no copper is graded FLAT, whole stop --
+                # not merely stripped of its own override. check_drc does not
+                # grade such a pad at all, so letting the PARTNER's netclass
+                # through pair() would charge a keep-out that does not exist,
+                # which is the same defect as the off-layer phantom below.
+                # The empty layer set is the marker the eff builders key on;
+                # a real copper pad always resolves at least one layer.
+                carries = _pad_carries_copper(p)
+                fl = model.pad_floor(p) if carries else PadFloor(0.0, 0.0, None)
                 self.pad_floors.append(fl)
                 from check_drc import pad_copper_layers
                 self.pad_layers.append(
-                    frozenset(pad_copper_layers(p, model.board_copper)))
+                    frozenset(pad_copper_layers(p, model.board_copper))
+                    if carries else frozenset())
                 mf = model.max_floor(fl)
                 if mf > self.max_floor:
                     self.max_floor = mf
@@ -469,7 +477,8 @@ class _Repair:
             t = (s.start_x, s.start_y, s.end_x, s.end_y, s.net_id,
                  s.width / 2.0 + self._item_reach(fl), side)
             self.segments.append(t)
-            self._seg_layer_by_id[id(t)] = s.layer
+            if self._floors is not None:
+                self._seg_layer_by_id[id(t)] = s.layer
             if fl is not None:
                 self._seg_floor_by_id[id(t)] = fl
 
@@ -901,6 +910,21 @@ class _Repair:
             return self.clearance
         return self._floors.pair(fa, fb)
 
+    def _cap_pad_layers(self, cap):
+        """This cap's per-pad copper layer sets, or None when unavailable (a
+        duck-typed cap, or a board that declares no copper layers at all -- in
+        which case NO pair may be scoped by layer, or every one of them would
+        fall back to the flat scalar and under-block)."""
+        pl = getattr(cap, 'pad_layers', None)
+        if pl is None or len(pl) != len(getattr(cap, 'pad_floors', ())):
+            return None
+        return pl if self._all_cu else None
+
+    @staticmethod
+    def _flat_pad(cap_layers, i):
+        """True when cap pad `i` carries no copper and must be graded flat."""
+        return cap_layers is not None and not cap_layers[i]
+
     def _cap_floors_ok(self, cap):
         """True when this cap carries a usable, index-aligned floor list. A
         _Cap built without the model (or by a test) grades flat."""
@@ -918,8 +942,10 @@ class _Repair:
         if rec is not None and rec[0] is src:
             return rec[1]
         by_id = self._fp_floor_by_id
-        rows = [[self._pair_or_flat(fa, by_id.get(id(t))) for t in src]
-                for fa in cap.pad_floors]
+        cl = self._cap_pad_layers(cap)
+        rows = [[self.clearance] * len(src) if self._flat_pad(cl, i)
+                else [self._pair_or_flat(fa, by_id.get(id(t))) for t in src]
+                for i, fa in enumerate(cap.pad_floors)]
         self._cap_pad_eff[ref] = (src, rows)
         return rows
 
@@ -944,9 +970,7 @@ class _Repair:
         # change would move caps for a non-violation. Charging it flat leaves
         # the pre-existing phantom exactly as it was; removing it altogether is
         # a separate fix to the side collapse, filed rather than folded in.
-        cap_layers = getattr(cap, 'pad_layers', None)
-        if cap_layers is not None and len(cap_layers) != len(cap.pad_floors):
-            cap_layers = None      # a duck-typed cap; grade flat
+        cap_layers = self._cap_pad_layers(cap)
         seg_layers = [self._seg_layer_by_id.get(id(t)) for t in src]
 
         def eff(fa, mine, j):
@@ -977,13 +1001,19 @@ class _Repair:
         # convention, and re-deriving would mis-price it silently. Absent ->
         # graded flat, i.e. v[3] is used as-is.
         by_id = self._via_radius_by_id
+        cl = self._cap_pad_layers(cap)
         rows = []
-        for fa in cap.pad_floors:
+        for i, fa in enumerate(cap.pad_floors):
+            flat = self._flat_pad(cl, i)
             row = []
             for v in vias:
                 rec = by_id.get(id(v))
-                row.append(v[3] if rec is None
-                           else rec[1] + self.via_required(fa, v[2]))
+                if rec is None:
+                    row.append(v[3])
+                elif flat:
+                    row.append(rec[1] + self.clearance)
+                else:
+                    row.append(rec[1] + self.via_required(fa, v[2]))
             rows.append(row)
         self._cap_via_eff[ref] = (vias, rows)
         return rows
@@ -1004,15 +1034,19 @@ class _Repair:
                                  or (rows and len(rows[0]) != len(other.pad_floors))):
             rows = None
         if rows is None:
-            rows = [[self._pair_or_flat(fa, fb) for fb in other.pad_floors]
-                    for fa in cap.pad_floors]
+            mine, theirs = self._cap_pad_layers(cap), self._cap_pad_layers(other)
+            rows = [[self.clearance
+                     if (self._flat_pad(mine, i) or self._flat_pad(theirs, j))
+                     else self._pair_or_flat(fa, fb)
+                     for j, fb in enumerate(other.pad_floors)]
+                    for i, fa in enumerate(cap.pad_floors)]
             self._cap_pair_eff[key] = rows
         return rows
 
     def required_rows(self, net_names=None, limit=200):
         """Rows `[cap_ref, '<kind> <partner>', mm, source]` for every pair this
         pass actually CHARGED at a requirement above the flat scalar, at the
-        caps' current poses.
+        SEED pose or the final one (see `both` below for why both).
 
         Same 4-column shape as legality.grade_pad_legality's 'required', so
         legality.format_required_clause renders it unchanged. `[]` when inert.

@@ -240,8 +240,68 @@ class TestSourcesReachTheEngine(unittest.TestCase):
         self.assertAlmostEqual(cap.max_floor, 0.5, places=6,
                                msg='the NPTH override reached max_floor and '
                                    'would widen every prune and the prescreen')
+        # ...and the pad's LAYER SET is empty, which is the marker every eff
+        # builder keys "grade this pad flat" on.
+        self.assertEqual(cap.pad_layers[-1], frozenset())
+        self.assertTrue(cap.pad_layers[0], 'the copper pad lost its layers')
     # MUTATION: drop the `_pad_carries_copper` guard on `model.pad_floor(p)` in
     # `_Cap.__init__` -> max_floor becomes 3.0.
+
+    def test_a_COPPERLESS_pad_is_graded_flat_in_EVERY_channel(self):
+        """Zeroing the copper-less pad's own override is not enough: the
+        PARTNER's netclass still flows through `pair()`, charging a keep-out
+        against a pad check_drc does not grade at all. Same defect as the
+        off-layer phantom, in the pad / via / cap-cap channels.
+
+        Measured before this guard, with C20's second copper pad replaced by an
+        np_thru_hole at lc=1.0 on a Default-0.4 board: that pad was priced at
+        0.4 against every foreign pad, and C20's foreign-pad shortfall read
+        0.6950mm where the flat scalar sees 0.2450."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'npthflat', classes=_default_class(0.4))
+            pcb = parse_kicad_pcb(p)
+            fp = pcb.footprints[ANCHOR_CAP]
+            real = [q for q in fp.pads if L._pad_carries_copper(q)]
+            self.assertGreaterEqual(len(real), 2, 'need a 2-copper-pad cap')
+            hole = copy.deepcopy(real[1])
+            hole.pad_type = 'np_thru_hole'
+            hole.drill = 1.0
+            hole.layers = ['*.Cu', '*.Mask']
+            hole.local_clearance = 1.0
+            fp.pads[fp.pads.index(real[1])] = hole
+            st = _repair(p, pcb=pcb)
+            cap = st.caps[ANCHOR_CAP]
+            flat_i = [k for k in range(len(cap.pad_floors))
+                      if not cap.pad_layers[k]]
+            live_i = [k for k in range(len(cap.pad_floors))
+                      if cap.pad_layers[k]]
+            # ON THE BRANCH: one of each, or this proves nothing.
+            self.assertEqual(len(flat_i), 1)
+            self.assertTrue(live_i)
+            fi, li = flat_i[0], live_i[0]
+
+            pad_rows = st._pad_effs(ANCHOR_CAP, cap)
+            self.assertEqual({round(v, 6) for v in pad_rows[fi]}, {CLEAR})
+            self.assertEqual({round(v, 6) for v in pad_rows[li]}, {0.4},
+                             'the COPPER pad must still be charged at 0.4')
+
+            vias = st.cap_vias[ANCHOR_CAP]
+            self.assertTrue(vias)
+            via_rows = st._via_effs(ANCHOR_CAP, cap, vias)
+            for j, v in enumerate(vias):
+                radius = st._via_radius_by_id[id(v)][1]
+                self.assertAlmostEqual(via_rows[fi][j], radius + CLEAR,
+                                       places=9)
+                self.assertAlmostEqual(via_rows[li][j], radius + 0.4, places=9)
+
+            oref = next((o for o in st.cap_caps[ANCHOR_CAP]
+                         if st._cap_floors_ok(st.caps[o])), None)
+            self.assertIsNotNone(oref, 'no mover neighbour to pair with')
+            pair_rows = st._pair_effs(ANCHOR_CAP, cap, oref, st.caps[oref])
+            self.assertEqual({round(v, 6) for v in pair_rows[fi]}, {CLEAR})
+            self.assertEqual({round(v, 6) for v in pair_rows[li]}, {0.4})
+    # MUTATION: drop the `_flat_pad` test in `_pad_effs` / `_via_effs` /
+    # `_pair_effs` -> the copper-less row comes back at 0.4.
 
     def test_a_board_declaring_nothing_builds_no_model(self):
         pcb = parse_kicad_pcb(INERT)
@@ -358,6 +418,33 @@ class TestChannels(unittest.TestCase):
             self.assertGreater(on, 0, 'no on-layer pair was raised')
     # MUTATION: drop the off-layer test in `_seg_effs` -> the off-layer rows
     # come back at the netclass 0.4.
+
+    def test_a_board_with_NO_copper_layers_is_not_scoped_by_layer(self):
+        """If `board_info.copper_layers` is empty, `pad_copper_layers` resolves
+        NOTHING for a `*.Cu` pad -- so every cap pad would look copper-less,
+        every pair would take the off-layer fallback, and the whole board would
+        be graded at the flat scalar. Before the layer scoping existed such a
+        board only ever OVER-blocked; the fallback flips the direction, and
+        under-blocking ships a violation. So the scoping switches itself off."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'nocu', classes=_default_class(0.4))
+            pcb = parse_kicad_pcb(p)
+            pcb.board_info.copper_layers = []
+            st = _repair(p, pcb=pcb)
+            # ON THE BRANCH: the model must still be active, or nothing is
+            # scoped anyway and this passes for the wrong reason.
+            self.assertIsNotNone(st._floors)
+            self.assertEqual(st._all_cu, frozenset())
+            cap = st.caps[ANCHOR_CAP]
+            self.assertIsNone(st._cap_pad_layers(cap),
+                              'layer scoping stayed on with no copper layers')
+            rows = st._pad_effs(ANCHOR_CAP, cap)
+            self.assertTrue(rows)
+            self.assertIn(0.4, {round(v, 6) for r in rows for v in r},
+                          'every pair fell back to the flat scalar -- the '
+                          'board is now UNDER-blocked')
+    # MUTATION: `return pl if self._all_cu else None` -> `return pl` -> every
+    # pad reads as copper-less and the whole board grades flat.
 
     def test_a_relaxing_rule_REPLACES_downward(self):
         """A dru rule REPLACES, so it can lower a pair below the netclass.
