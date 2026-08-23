@@ -785,6 +785,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    grid_step, track_via_clearance=None,
                                    hole_to_hole_clearance=None,
                                    layer_clearances=None,
+                                   layers=None, layer_costs=None,
+                                   power_net_widths=None,
                                    progress_callback=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
@@ -821,10 +823,24 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                         or 0) / 1e6
         except Exception:
             _edge_mm = 0.0
+        # #658 (audit finding): this config used to be BARE -- no layers, no
+        # layer_costs, no power_net_widths -- so the weld router here ran at
+        # UNIFORM layer economics while the CLI finalize priced them, and the
+        # #658 forbidden-layer guards inside oracle_reconnect were inert.
+        # Costs are soft, so a weld that MUST cross a plane layer still can.
+        # Omitted values fall back to the dataclass defaults, so an older
+        # caller that passes none behaves exactly as before.
+        _cfg_kw = {}
+        if layers:
+            _cfg_kw['layers'] = list(layers)
+        if layer_costs:
+            _cfg_kw['layer_costs'] = list(layer_costs)
+        if power_net_widths:
+            _cfg_kw['power_net_widths'] = dict(power_net_widths)
         ocfg = GridRouteConfig(
             clearance=clearance, track_width=track_width,
             via_size=via_size, via_drill=via_drill, grid_step=grid_step,
-            board_edge_clearance=_edge_mm)
+            board_edge_clearance=_edge_mm, **_cfg_kw)
         # #498: the temp save has no sibling .kicad_dru, so the oracle's own
         # auto-read finds nothing -- install the map explicitly (caller's
         # resolved map when given, else read the LIVE board's project file).

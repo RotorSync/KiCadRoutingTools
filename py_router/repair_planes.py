@@ -2306,6 +2306,12 @@ def repair_planes(
         # [None]=not yet queried, [False]=queried and unavailable, else the
         # link list. One query serves every gate net; a gate repair that
         # adds copper resets it.
+        # [None] = NOT YET QUERIED. A cancelled query returns None too, which
+        # made every later gate net re-query and re-print the SKIPPED line
+        # (audit finding). _GATE_CANCELLED is a distinct sentinel so the
+        # cancel is remembered once. Cosmetic-only (cancel short-circuits
+        # before the expensive call), but the two states are not the same.
+        _GATE_CANCELLED = object()
         _gate_oracle_links: list = [None]
 
         def _gate_oracle_query():
@@ -2400,8 +2406,11 @@ def repair_planes(
             # repair adds copper). KICAD_NO_GATE_ORACLE=1 disables for A/B.
             if not env_knobs.NO_GATE_ORACLE:
                 if _gate_oracle_links[0] is None:
-                    _gate_oracle_links[0] = _gate_oracle_query()
-                _gl = _gate_oracle_links[0]
+                    _q = _gate_oracle_query()
+                    _gate_oracle_links[0] = (_GATE_CANCELLED if _q is None
+                                             else _q)
+                _gl = (None if _gate_oracle_links[0] is _GATE_CANCELLED
+                       else _gate_oracle_links[0])
                 if _gl is not False and _gl is not None:
                     _net_links = [lk for lk in _gl if lk[0] == _nname]
                     print(f"  [{_nname}] gate oracle: KiCad reports "
@@ -2910,8 +2919,11 @@ def repair_planes(
             _confirmed, _cleared = list(failed_repair_pads), []
             try:
                 if _gate_oracle_links[0] is None:
-                    _gate_oracle_links[0] = _gate_oracle_query()
-                _olinks = _gate_oracle_links[0]
+                    _q = _gate_oracle_query()
+                    _gate_oracle_links[0] = (_GATE_CANCELLED if _q is None
+                                             else _q)
+                _olinks = (None if _gate_oracle_links[0] is _GATE_CANCELLED
+                           else _gate_oracle_links[0])
                 if _olinks is not False and _olinks is not None:
                     def _pad_open_per_oracle(entry):
                         # entry format: "REF.PAD (NET)"
@@ -3283,6 +3295,15 @@ Examples:
                         help="Net name(s) to process. If omitted, all nets with zones are processed.")
     parser.add_argument("--plane-layers", "-p", nargs="+",
                         help="Plane layer(s) to process. If omitted, all layers with zones are processed.")
+    parser.add_argument("--layer-costs", nargs="+", type=float, default=[],
+                        help="Per-layer cost multipliers, order matching "
+                             "--layers (same semantics as route.py's flag; a "
+                             "negative value = FORBIDDEN, obstacle-only). The "
+                             "ENGINE has honoured layer_costs since #658 and "
+                             "route.py forwards the chain's costs, but this "
+                             "standalone CLI had no way to express them, so a "
+                             "direct repair_planes run -- and its oracle leg "
+                             "-- routed at UNIFORM layer economics.")
     parser.add_argument("--layers", "-l", nargs="+",
                         help="Layer(s) available for routing (e.g., F.Cu B.Cu). If omitted, all copper layers are used.")
 
@@ -3502,6 +3523,7 @@ Examples:
     _rdp_result = repair_planes(
         input_file=args.input_file,
         output_file=args.output_file,
+        layer_costs=(list(args.layer_costs) if args.layer_costs else None),
 
         net_names=net_names,
         plane_layers=plane_layers,
@@ -3578,10 +3600,26 @@ Examples:
             _oracle_edge = effective_board_edge_clearance(args.input_file, 0.0)
         except Exception:
             _oracle_edge = 0.0
+        # LAYERS matter here even though the oracle routes on the board's own
+        # copper_layers (audit finding): install_layer_clearances is called
+        # with pcb_data=None just below, so kicad_dru falls back to
+        # `list(config.layers)` -- the DEFAULT 2-layer stack. On any 4+ layer
+        # board that silently (a) reads the #498 .kicad_dru map for F.Cu/B.Cu
+        # ONLY, so an `(layer inner)` clearance rule is never installed and
+        # this leg's welds can violate the board's own rules on inner layers,
+        # and (b) computes the fab floor as fab_floors(2)=0.127 instead of
+        # fab_floors(4)=0.1, refusing welds the fab can actually make.
         _ocfg = GridRouteConfig(
             clearance=args.clearance, track_width=args.track_width,
             via_size=args.via_size, via_drill=args.via_drill,
             grid_step=args.grid_step,
+            layers=list(args.layers) if getattr(args, 'layers', None)
+            else ['F.Cu', 'B.Cu'],
+            # #658: without these the weld router here ran at UNIFORM layer
+            # economics while the rest of the run priced them, and the
+            # forbidden-layer guards inside oracle_reconnect were inert.
+            layer_costs=(list(args.layer_costs)
+                         if getattr(args, 'layer_costs', None) else []),
             board_edge_clearance=_oracle_edge)
         from kicad_dru import install_layer_clearances
         install_layer_clearances(_ocfg, None, args.input_file, None)  # #498

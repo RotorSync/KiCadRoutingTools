@@ -400,6 +400,9 @@ def _polygon_area(poly) -> float:
 
 _REFILL_MEMO: Dict[tuple, dict] = {}
 _REFILL_MEMO_CAP = 8
+# Keys whose refill FAILED (audit finding): remember the "no" so N consumers
+# do not each pay a pcbnew subprocess to rediscover it.
+_REFILL_FAILED: set = set()
 
 
 def _refill_memo_key(board_file: str, project_from: str = None):
@@ -448,6 +451,13 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
     if kpy is None:
         return None
     _mk = _refill_memo_key(board_file, project_from)
+    # FAILURES are memoized too (audit finding): the memo used to store only
+    # successes, so a board whose refill fails re-spawned a pcbnew subprocess
+    # for every consumer and every oracle round -- the slowest possible way to
+    # learn the same "no" repeatedly. Keyed on content like the success path,
+    # so the next edit to the board retries for real.
+    if _mk is not None and _mk in _REFILL_FAILED:
+        return None
     if _mk is not None and _mk in _REFILL_MEMO:
         import copy as _copy
         return _copy.deepcopy(_REFILL_MEMO[_mk])
@@ -478,12 +488,27 @@ def refill_islands(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             if verbose:
                 print(f"  (exact-fill refill failed: rc={r.returncode} "
                       f"{(r.stderr or '').strip()[-200:]})")
+            if _mk is not None:
+                if len(_REFILL_FAILED) >= _REFILL_MEMO_CAP:
+                    _REFILL_FAILED.clear()
+                _REFILL_FAILED.add(_mk)
             return None
         with open(filled, 'r', encoding='utf-8') as f:
             text = f.read()
+    except subprocess.TimeoutExpired:
+        # A TIMEOUT is not remembered as a failure: it is a budget verdict,
+        # not a property of the board, and a later step may legitimately have
+        # more headroom. (The kicad-cli twin has _ORACLE_TIMED_OUT for that.)
+        if verbose:
+            print("  (exact-fill refill timed out)")
+        return None
     except Exception as e:
         if verbose:
             print(f"  (exact-fill unavailable: {e})")
+        if _mk is not None:
+            if len(_REFILL_FAILED) >= _REFILL_MEMO_CAP:
+                _REFILL_FAILED.clear()
+            _REFILL_FAILED.add(_mk)
         return None
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -793,8 +818,14 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
     # ORIGINAL board mid-plan -- refilling it would price the oracle against a
     # board missing every step's copper. When pcb_data carries a provider it IS
     # the current board, so ask it. Same {(net, layer): [poly, ...]} shape.
-    # (plane_fragility.py has consumed this provider since #424; the oracle was
-    # the last exact-fill consumer still insisting on a file.)
+    # (plane_fragility.py has consumed this provider since #424. The oracle
+    # was MEANT to be the last consumer still insisting on a file, but it
+    # never adopted this: all three of its call sites -- kicad_oracle's rounds
+    # loop and its for-else refetch, and repair_planes -- still pass no
+    # pcb_data, so from the oracle this branch is dead and every round pays a
+    # file round-trip + pcbnew refill. Audit finding; left as-is rather than
+    # wired blind, because the oracle mutates the board FILE between rounds
+    # and a live provider would have to be re-derived each round to match.)
     provider = getattr(pcb_data, 'exact_fill_provider', None)
     if provider is not None:
         try:
@@ -871,16 +902,49 @@ def exact_unconnected(board_file: str, net_names=None, pcb_data=None,
             pts = []
             for i, s in enumerate(csegs):
                 if comp_of_seg[i] == root:
+                    # BOTH ends (audit, #659): a component whose only contact
+                    # with a pad is at a segment's END was credited to nothing
+                    # and, worse, a component whose START merely passed over a
+                    # foreign-layer pad was credited to it.
                     pts.append((s.start_x, s.start_y, s.layer))
+                    pts.append((s.end_x, s.end_y, s.layer))
             for j, v in enumerate(cvias):
                 if j < len(comp_of_via) and comp_of_via[j] == root:
                     pts.append((v.x, v.y, None))
             if not pts:
                 continue
-            has_pad = any(
-                _m.hypot(p.global_x - x, p.global_y - y)
-                <= max(p.size_x, p.size_y) / 2.0 + 0.06
-                for p in pads for x, y, _l in pts)
+
+            def _pad_reaches(p, x, y, lyr):
+                """Could this pad actually TOUCH this point -- same layer,
+                not just the same XY?
+
+                The old test was pure XY, so an SMD pad on F.Cu credited a
+                B.Cu component sitting under it. Measured on daisho:
+                /ddr2/DM6's dead 3-segment B.Cu component starts at
+                (124.50, 87.50), the centre of U1.AB9 -- an F.Cu-only SMD pad
+                -- so has_pad was True, no link was emitted, and the
+                authoritative deletion below never got to look at it. That is
+                the fragment that then survived eleven chain steps.
+
+                This filter only decides whether to ASK: the caller's
+                _delete_stranded_link_fragment re-derives the verdict from the
+                authoritative graph. So erring toward emitting costs one
+                cheap check, while erring toward skipping loses the fragment
+                for good -- the filter must be conservative in THAT
+                direction."""
+                if _m.hypot(p.global_x - x, p.global_y - y) > \
+                        max(p.size_x, p.size_y) / 2.0 + 0.06:
+                    return False
+                if lyr is None:
+                    return True      # via barrel: spans layers, any pad plausible
+                from kicad_parser import pad_is_plated_through
+                if pad_is_plated_through(p):
+                    return True      # plated barrel ties every copper layer
+                _pl = p.layers or ()
+                return lyr in _pl or any(str(_l).startswith('*') for _l in _pl)
+
+            has_pad = any(_pad_reaches(p, x, y, lyr)
+                          for p in pads for x, y, lyr in pts)
             if not has_pad:
                 x, y, lyr = pts[0]
                 links.append((net.name, (x, y, lyr, 'track'),

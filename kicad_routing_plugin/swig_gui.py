@@ -3367,6 +3367,21 @@ class RoutingDialog(wx.Dialog):
                         except OSError:
                             pass
                         return None
+                    # #627 (audit finding): aSkipSettings above means the
+                    # snapshot carries NO sibling .kicad_pro, so the oracle's
+                    # exact-fill refill of it falls back to pcbnew's STOCK
+                    # rules -- not the clamps this session applied in memory
+                    # via update_live_drc_floors. The GUI then prices its A*
+                    # off a different fill than the CLI does on the same
+                    # copper. gui_utils does this on the FALLBACK oracle path
+                    # already; the PRIMARY staging path (this one, the normal
+                    # case) was missing it.
+                    try:
+                        from kicad_parser import stage_live_project_rules
+                        stage_live_project_rules(_p, _b)
+                    except Exception as _e627:
+                        print(f"(could not stage live project rules for the "
+                              f"plane-finalize oracle: {_e627})")
                     return _p
                 except Exception as e:
                     print(f"(could not stage the live board for the "
@@ -3793,6 +3808,9 @@ class RoutingDialog(wx.Dialog):
                     hole_to_hole_clearance=_pfo.get(
                         'hole_to_hole_clearance'),
                     layer_clearances=_pfo.get('layer_clearances'),
+                    layers=_pfo.get('layers'),
+                    layer_costs=_pfo.get('layer_costs'),
+                    power_net_widths=_pfo.get('power_net_widths'),
                     progress_callback=(
                         lambda c, t, m: self._apply_status(
                             f"{m} ({c}/{t})" if t else m)))

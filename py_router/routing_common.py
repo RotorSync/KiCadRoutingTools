@@ -6,6 +6,7 @@ pair routing to avoid code duplication.
 """
 from __future__ import annotations
 
+import os
 import time
 from typing import List, Optional, Tuple, Dict, Set
 
@@ -451,7 +452,7 @@ def filter_already_routed(
             # short of the pad, the case #549 A-2 was built to route. Ask the
             # authoritative graph which copper is dead, drop it, and re-count:
             # only if the REMAINDER is whole is there nothing left to route.
-            if n > 1:
+            if n > 1 and os.environ.get('KICAD_659_DIVERT', '1') != '0':
                 from check_connected import net_dead_copper
                 _dead_s, _dead_v = net_dead_copper(
                     pcb_data, net_id, net_segments, net_vias, net_pads,
