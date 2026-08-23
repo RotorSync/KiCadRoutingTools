@@ -445,6 +445,50 @@ with tempfile.TemporaryDirectory() as wd:
           and r2['no_pose_census']['BIG']['pairs_censused'] == 1,
           f"{r2['no_pose_verdict']} {r2['no_pose_census']}")
 
+    # THE EXCLUDE-SET DISCIPLINE, asserted directly rather than hoped for.
+    #
+    # A lifted blocker HAS NOT MOVED -- it is still sitting at its old pose
+    # and `_try_place` merely excludes it. So when the blockers go back one
+    # at a time, the ones still lifted must stay excluded (or they veto from
+    # a pocket they are about to vacate, and the trade reverts for a
+    # phantom), and the ones already returned must NOT be (or the second one
+    # lands on the first, which is the depth-1 bug that shipped once).
+    #
+    # This is checked here and not through `pairwise_legal` because on THIS
+    # board the two blockers re-seat 12mm apart, so a re-seat blind to the
+    # other still yields a legal board: the written-board check cannot see
+    # this fault, and a test that cannot fail is not a test. Measured -- the
+    # blind-re-seat mutation leaves every board assertion above green.
+    calls = []
+    _real_tp = seeder._try_place
+
+    def _recording_try_place(state, r, tx2, ty2, exclude, *a, **kw):
+        calls.append((r, frozenset(exclude)))
+        return _real_tp(state, r, tx2, ty2, exclude, *a, **kw)
+
+    seeder._try_place = _recording_try_place
+    try:
+        _seed(2)
+    finally:
+        seeder._try_place = _real_tp
+    last = {}
+    for r, exc in calls:
+        last[r] = exc
+    check("#699: the blocked part is seated against a board BOTH blockers "
+          "are lifted out of",
+          {'S1', 'S2'} <= last.get('BIG', frozenset()),
+          str(sorted(last.get('BIG', ()))))
+    check("#699: the first blocker goes back with the second still lifted "
+          "(a lifted part has not moved -- it must stay excluded)",
+          'S2' in last.get('S1', frozenset())
+          and 'S1' not in last.get('S1', frozenset()),
+          str(sorted(last.get('S1', ()))))
+    check("#699: and the second goes back with the first as an OBSTACLE, "
+          "not excluded again (that is the fault that shipped at depth 1)",
+          'S1' not in last.get('S2', frozenset())
+          and 'S2' not in last.get('S2', frozenset()),
+          str(sorted(last.get('S2', ()))))
+
 # --------------------------------------------------------------------------
 # A trade that cannot be completed REVERTS, says so, and leaves the board as
 # it was
