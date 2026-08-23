@@ -299,12 +299,74 @@ def test_sweep_runs_on_the_nothing_to_route_early_exit():
                          f"(rc={r_off.returncode})")
 
 
+def test_via_on_same_net_graphic_is_kept():
+    """The regression the sets1-5 corpus caught, in miniature.
+
+    Net-tagged copper GRAPHICS do not conduct in our connectivity graph
+    (#513), so a via whose only same-net neighbour is art looks pad-less --
+    but KiCad DOES credit the graphic, so that barrel is the bridge between
+    the net's copper and its art. remove_orphan_islands has guarded segment
+    islands against this since #337 via `_touches_graphic`, but that test
+    iterates the cluster's SEGMENTS, which is vacuous for a via-only cluster
+    -- exactly the cluster kind #659 taught it to see.
+
+    Measured on openstint /A- (stress set 4): the shipped board went from 0
+    kicad-cli unconnected items to 2, both with a `graphic` endpoint.
+    """
+    pads = [make_pad(net_id=1, x=0.0, y=0.0, ref='U1', num='1'),
+            make_pad(net_id=1, x=10.0, y=0.0, ref='U2', num='1')]
+    art = make_seg(4.0, 8.0, 6.0, 8.0, net_id=1)
+    art.graphic = True
+    on_art = make_via(5.0, 8.0, net_id=1)
+    pcb = make_pcb(segments=[make_seg(0.0, 0.0, 10.0, 0.0, net_id=1), art],
+                   vias=[on_art], pads_by_net={1: pads},
+                   nets={1: make_net(1, 'SIG')})
+    n, _ns, _st, _vs, nv = remove_orphan_islands([], pcb, None)
+    check(n == 0 and nv == 0,
+          f"a via sitting ON same-net art is KEPT (islands={n}, "
+          f"vias_removed={nv})")
+
+    # NEGATIVE CONTROL: the guard must not become "never sweep a via on a
+    # board that happens to contain art".
+    far = make_via(50.0, 50.0, net_id=1)
+    pcb2 = make_pcb(segments=[make_seg(0.0, 0.0, 10.0, 0.0, net_id=1), art],
+                    vias=[far], pads_by_net={1: pads},
+                    nets={1: make_net(1, 'SIG')})
+    n2, _ns2, _st2, _vs2, nv2 = remove_orphan_islands([], pcb2, None)
+    check(n2 == 1 and nv2 == 1,
+          f"a via far from the art is still swept (islands={n2}, "
+          f"vias_removed={nv2}) -- the guard is adjacency, not blanket amnesty")
+
+    # net_dead_copper must agree; the divert consults it, so a disagreement
+    # would route one decision off each rule.
+    from check_connected import net_dead_copper
+    ds, dv = net_dead_copper(pcb, 1, list(pcb.segments), list(pcb.vias),
+                             pads, [])
+    check(not ds and not dv,
+          f"net_dead_copper agrees the art-bridging via is not dead "
+          f"({len(ds)} seg, {len(dv)} via)")
+    # FRESH board: remove_orphan_islands mutates pcb_data in place, so
+    # reusing pcb2 here would ask net_dead_copper about a via that has
+    # already been deleted -- and get a vacuous "nothing dead".
+    far2 = make_via(50.0, 50.0, net_id=1)
+    art2 = make_seg(4.0, 8.0, 6.0, 8.0, net_id=1)
+    art2.graphic = True
+    pcb3 = make_pcb(segments=[make_seg(0.0, 0.0, 10.0, 0.0, net_id=1), art2],
+                    vias=[far2], pads_by_net={1: pads},
+                    nets={1: make_net(1, 'SIG')})
+    ds2, dv2 = net_dead_copper(pcb3, 1, list(pcb3.segments), list(pcb3.vias),
+                               pads, [])
+    check(len(dv2) == 1,
+          f"...and still calls the far via dead ({len(dv2)} via)")
+
+
 def main():
     print(__doc__.strip().splitlines()[0])
     for fn in (test_bare_via_island_removed,
                test_via_carrying_the_route_is_kept,
                test_zone_anchored_via_is_kept,
                test_late_sweep_removes_out_of_scope_debris,
+               test_via_on_same_net_graphic_is_kept,
                test_sweep_runs_on_the_nothing_to_route_early_exit):
         print(f"\n{fn.__name__}:")
         fn()

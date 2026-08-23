@@ -1967,7 +1967,7 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
         # an island whose copper overlaps a same-net graphic capsule is kept.
         net_graphics = [g for g in net_segs if getattr(g, 'graphic', False)]
 
-        def _touches_graphic(segs):
+        def _touches_graphic(segs, vias_=()):
             from geometry_utils import segment_to_segment_distance
             for s in segs:
                 for g in net_graphics:
@@ -1978,6 +1978,26 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                         g.start_x, g.start_y, g.end_x, g.end_y)
                     if d <= (s.width + g.width) / 2 + 1e-6:
                         return True
+            # VIAS too (#659 audit follow-up). A via-only component has NO
+            # segments, so the loop above was vacuous for it and a barrel
+            # sitting ON a same-net graphic was swept as debris -- measured
+            # on openstint /A-, where the via bridging the net's copper to
+            # its 216-segment graphic disappeared and KiCad went from 0
+            # unconnected items to 2. Our model does not credit graphics
+            # (#513), so such a via looks pad-less; KiCad DOES credit them,
+            # so it is load-bearing. No layer test: a barrel spans layers.
+            import math as _m
+            for v in vias_:
+                for g in net_graphics:
+                    dx, dy = g.end_x - g.start_x, g.end_y - g.start_y
+                    L2 = dx * dx + dy * dy
+                    tt = (max(0.0, min(1.0, ((v.x - g.start_x) * dx
+                                            + (v.y - g.start_y) * dy) / L2))
+                          if L2 else 0.0)
+                    d = _m.hypot(v.x - (g.start_x + tt * dx),
+                                 v.y - (g.start_y + tt * dy))
+                    if d <= v.size / 2.0 + g.width / 2 + 1e-6:
+                        return True
             return False
 
         for root, segs in comp_segs.items():
@@ -1985,7 +2005,10 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
                 continue
             if any(getattr(s, 'graphic', False) for s in segs):
                 continue  # immutable input art anchors the island
-            if net_graphics and _touches_graphic(segs):
+            _cv_gfx = [v for j, v in enumerate(net_vias)
+                       if via_reprs.get(j) is not None
+                       and uf.find(via_reprs[j]) == root]
+            if net_graphics and _touches_graphic(segs, _cv_gfx):
                 continue  # copper abutting input art (#337): physically joined
             if keep_input_copper and (
                     any(id(s) not in seg_owner for s in segs)

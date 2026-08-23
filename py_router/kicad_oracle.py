@@ -939,6 +939,33 @@ def _largest_track_component_points(pcb_data, net_id, max_pts: int = 40):
     return pts
 
 
+def _via_abuts_graphic(vias_, segs) -> bool:
+    """True if any of `vias_` overlaps a same-net GRAPHIC in `segs` (#337 art).
+
+    Graphics do not conduct in our connectivity graph (#513) but ARE copper to
+    KiCad, so a barrel touching one is joined to the net through it. Every
+    debris deleter has to honour this or it removes a real connection: the
+    segment-based guards test `any(seg.graphic)` over the cluster, which is
+    vacuous for a cluster that has no segments. No layer test -- a barrel
+    spans them.
+    """
+    art = [g for g in segs if getattr(g, 'graphic', False)]
+    if not art:
+        return False
+    for v in vias_:
+        for g in art:
+            dx, dy = g.end_x - g.start_x, g.end_y - g.start_y
+            L2 = dx * dx + dy * dy
+            t = (max(0.0, min(1.0, ((v.x - g.start_x) * dx
+                                    + (v.y - g.start_y) * dy) / L2))
+                 if L2 else 0.0)
+            if math.hypot(v.x - (g.start_x + t * dx),
+                          v.y - (g.start_y + t * dy)) \
+                    <= v.size / 2.0 + g.width / 2 + 1e-6:
+                return True
+    return False
+
+
 def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     """When either link endpoint sits on a PAD-LESS copper cluster of the
     net (per the authoritative connectivity graph, vias/zone credit
@@ -1011,6 +1038,15 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
             continue
         csegs = [s for i, s in enumerate(segs) if uf.find(2 * i) == root]
         if any(getattr(s, 'graphic', False) for s in csegs):
+            continue
+        # ...and a VIA-ONLY cluster has no csegs at all, so the test above is
+        # vacuous for it (#659 audit follow-up). A barrel sitting on same-net
+        # ART is joined to it in copper -- KiCad credits the graphic, we do
+        # not -- so deleting it breaks a connection that existed. Measured on
+        # openstint /A-: 0 unconnected items became 2.
+        _cv = [v for j, v in enumerate(vias)
+               if via_reprs.get(j) is not None and uf.find(via_reprs[j]) == root]
+        if _cv and _via_abuts_graphic(_cv, segs):
             continue
         cvias = [v for j, v in enumerate(vias)
                  if via_reprs.get(j) is not None

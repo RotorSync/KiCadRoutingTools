@@ -503,9 +503,51 @@ def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
            {uf.find(x) for x in (g.get('zone_index_repr') or {}).values()}
     via_repr = g.get('via_index_repr') or {}
     graphic_roots = set()
+    net_graphics = [s for s in segments if getattr(s, 'graphic', False)]
     for i, s in enumerate(segments):
         if getattr(s, 'graphic', False):
             graphic_roots.add(uf.find(2 * i))
+    # A cluster ABUTTING the art is joined to it in copper even though the
+    # graph does not conduct through it (#513). Measured on openstint: the
+    # via bridging /A-'s copper to its graphic looks pad-less to us and is
+    # load-bearing to KiCad -- deleting it took that board from 0 unconnected
+    # items to 2. Same rule remove_orphan_islands' _touches_graphic applies.
+    import math as _m
+
+    def _abuts_art_seg(s):
+        from geometry_utils import segment_to_segment_distance
+        for g in net_graphics:
+            if s.layer != g.layer:
+                continue
+            if segment_to_segment_distance(
+                    s.start_x, s.start_y, s.end_x, s.end_y,
+                    g.start_x, g.start_y, g.end_x, g.end_y) \
+                    <= (s.width + g.width) / 2 + 1e-6:
+                return True
+        return False
+
+    def _abuts_art_via(v):
+        for g in net_graphics:
+            dx, dy = g.end_x - g.start_x, g.end_y - g.start_y
+            L2 = dx * dx + dy * dy
+            tt = (max(0.0, min(1.0, ((v.x - g.start_x) * dx
+                                     + (v.y - g.start_y) * dy) / L2))
+                  if L2 else 0.0)
+            if _m.hypot(v.x - (g.start_x + tt * dx),
+                        v.y - (g.start_y + tt * dy)) \
+                    <= v.size / 2.0 + g.width / 2 + 1e-6:
+                return True
+        return False
+
+    if net_graphics:
+        for i, s in enumerate(segments):
+            if uf.find(2 * i) not in graphic_roots and _abuts_art_seg(s):
+                graphic_roots.add(uf.find(2 * i))
+        for j, v in enumerate(vias):
+            rep = via_repr.get(j)
+            if rep is not None and uf.find(rep) not in graphic_roots \
+                    and _abuts_art_via(v):
+                graphic_roots.add(uf.find(rep))
     dead_s = [s for i, s in enumerate(segments)
               if uf.find(2 * i) not in live
               and uf.find(2 * i) not in graphic_roots]
