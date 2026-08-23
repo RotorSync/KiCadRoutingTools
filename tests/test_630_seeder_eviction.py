@@ -920,7 +920,6 @@ with tempfile.TemporaryDirectory() as wd:
 # #699: `immovable` may be a plain set, the form the docstring still offers
 # --------------------------------------------------------------------------
 with tempfile.TemporaryDirectory() as wd:
-    from placement import floorplan as _fp6
     bpath = os.path.join(wd, 'st.kicad_pcb')
     pair_block_board(bpath)
     spcb = parse_kicad_pcb(bpath)
