@@ -214,6 +214,13 @@ IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
 # but its GUI home is the QFN panel's own control (see TOOL_FLAG_PARAMS, #381 D7).
 TOOL_FLAG_ALIASES = {
     'bga_fanout.py': {'--width': '--track-width'},
+    # Both fanout CLIs now accept BOTH spellings (they used to disagree, which
+    # cost a recorded run and a replay a wasted step each). Normalize qfn's
+    # --track-width to --width HERE, before TOOL_FLAG_PARAMS is consulted --
+    # otherwise it falls through to the global FLAG_PARAMS['--track-width'] and
+    # lands on the Basic-tab track_width instead of the QFN panel's own
+    # control, which is precisely the #381 D7 bug the override below fixes.
+    'qfn_fanout.py': {'--track-width': '--width'},
 }
 
 # Per-tool flag -> plan-param overrides (win over the global FLAG_PARAMS).

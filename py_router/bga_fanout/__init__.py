@@ -4034,8 +4034,13 @@ def main():
                         help='Component reference (auto-detected if not specified)')
     parser.add_argument('--layers', '-l', nargs='+', default=['F.Cu', 'B.Cu'],
                         help='Routing layers (default: F.Cu B.Cu)')
-    parser.add_argument('--track-width', '-w', type=float, default=defaults.BGA_TRACK_WIDTH,
-                        help=f'Track width in mm (default: {defaults.BGA_TRACK_WIDTH})')
+    # --width is an ALIAS (see the qfn_fanout twin): the two fanout CLIs used
+    # to disagree on the name for the same concept. dest stays `track_width`.
+    parser.add_argument('--track-width', '--width', '-w', type=float,
+                        default=defaults.BGA_TRACK_WIDTH,
+                        help=f'Track width in mm '
+                             f'(default: {defaults.BGA_TRACK_WIDTH}; '
+                             f'--width is an alias)')
     parser.add_argument('--clearance', type=float, default=defaults.BGA_CLEARANCE,
                         help=f'Track clearance in mm (default: {defaults.BGA_CLEARANCE})')
     parser.add_argument('--via-size', type=float, default=defaults.BGA_VIA_SIZE,

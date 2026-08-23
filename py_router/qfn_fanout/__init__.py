@@ -1181,8 +1181,15 @@ def main():
     parser.add_argument('--layer', '-l', default=None,
                         help='Routing layer (default: the layer the component '
                              'is mounted on)')
-    parser.add_argument('--width', '-w', type=float, default=0.1,
-                        help='Track width in mm')
+    # --track-width is an ALIAS, not a second knob: bga_fanout spells this
+    # same concept --track-width, and two sibling fanout CLIs disagreeing on
+    # the name is a trap. It cost a recorded stress run a wasted step
+    # (openstint set4 has three qfn_fanout attempts in its manifest -- the
+    # middle one is `--track-width 0.08` failing against this parser) and it
+    # cost a replay of that manifest another. dest stays `width`.
+    parser.add_argument('--width', '--track-width', '-w', type=float,
+                        default=0.1, help='Track width in mm '
+                                          '(--track-width is an alias)')
     import routing_defaults as defaults
     parser.add_argument('--extension', type=float, default=defaults.QFN_EXTENSION,
                         help='Extension past pad edge before bend (mm)')
