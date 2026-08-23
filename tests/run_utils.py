@@ -193,3 +193,33 @@ def evidence(path, what='evidence'):
     if os.path.getsize(path) == 0:
         raise AssertionError(f"{what} is empty: {path}")
     return path
+
+
+def corpus_boards(pattern: str = 'kicad_files/*.kicad_pcb'):
+    """The boards git TRACKS under kicad_files/ -- the fixed set any count or
+    "silent on every board" claim is actually about.
+
+    A plain glob of that directory is not that set. `kicad_files/` accumulates
+    GENERATED boards (routed/fanout/plane outputs, several of them gitignored),
+    so the same glob returns 22 entries on a clean clone, 27 on a lightly used
+    one, and 33+ on a machine that has run the suite for a while. Any threshold
+    pinned against it is therefore only right in ONE working copy, and it fails
+    on a clean checkout and in CI -- which is a test bug that reports as a
+    product bug, and reads as machine-dependent flake.
+
+    Returns [] when git cannot answer (a tarball export, no git on PATH);
+    callers must SKIP rather than grade against a set they cannot identify.
+
+    `tests/test_orbit_fit_noop.py` discovered this and carried the only copy;
+    it lives here so a second caller cannot re-derive it slightly differently.
+    """
+    try:
+        p = subprocess.run(['git', 'ls-files', '-z', pattern],
+                           cwd=ROOT_DIR, capture_output=True, text=True,
+                           timeout=60)
+        if p.returncode == 0:
+            return sorted(os.path.join(ROOT_DIR, n)
+                          for n in p.stdout.split('\0') if n)
+    except Exception:                                            # noqa: BLE001
+        pass
+    return []
