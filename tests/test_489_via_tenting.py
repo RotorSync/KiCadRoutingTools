@@ -173,6 +173,80 @@ def run():
           "a via clear of every pad is not via-in-pad")
     check(via_in_pad_sites([foreign], pads_by_net) == [],
           "a via in a FOREIGN pad is a short, not via-in-pad -- not this report")
+    # #695: an OFF-CENTRE via-in-pad has its centre outside the pad outline
+    # while the barrel still overlaps the copper. Solder wicks through copper
+    # continuity, not through the centre point, so that joint needs Type VII
+    # too -- and the router places exactly this geometry on purpose (QFN
+    # allow_via_in_pad, plane taps clamped to the pad edge, BGA underpad).
+    # The pad is 0.5 wide (edge at x=10.25) and the barrel radius is 0.225.
+    grazing = {'x': 10.40, 'y': 10.0, 'size': 0.45, 'drill': 0.25, 'net_id': 7}
+    clear = {'x': 10.60, 'y': 10.0, 'size': 0.45, 'drill': 0.25, 'net_id': 7}
+    check(abs(grazing['x'] - 10.0) > pad.size_x / 2,
+          "the grazing via's CENTRE must be outside the pad, or this row "
+          "passes on the centre test it is meant to retire")
+    check(len(via_in_pad_sites([grazing], pads_by_net)) == 1,
+          "a via whose BARREL overlaps a same-net pad is via-in-pad (#695)")
+    check(via_in_pad_sites([clear], pads_by_net) == [],
+          "a via whose barrel clears the pad is NOT via-in-pad -- without "
+          "this control the row above passes on a check that credits all")
+    # The credit must follow the pad's SHAPE, not a box around it. bga_fanout
+    # hands this function its dog-bone vias, and those sit on the half-pitch
+    # DIAGONAL from a round BGA pad -- precisely where a box inflated by the
+    # barrel radius over-credits by sqrt(2). Measured on ulx3s's BGA-381 while
+    # fixing #695: the box named all 379 of them and the exact test named none,
+    # the nearest copper being 0.37mm from a 0.225mm barrel. A false site here
+    # is a fab process requirement (filled/capped/plated), not a stray line.
+    round_pad = Pad(component_ref='U2', pad_number='A2', global_x=0.0, global_y=0.0,
+                    local_x=0, local_y=0, size_x=0.4, size_y=0.4, shape='circle',
+                    layers=['F.Cu'], net_id=8, net_name='M', drill=0.0,
+                    pad_type='smd')
+    dogbone = {'x': 0.4, 'y': 0.4, 'size': 0.45, 'drill': 0.25, 'net_id': 8}
+    # On the branch: inside the inflated BOX (0.4 <= 0.2+0.225 on both axes),
+    # outside the real copper (radially 0.566 - 0.2 = 0.366 > 0.225).
+    check(abs(dogbone['x']) <= round_pad.size_x / 2 + dogbone['size'] / 2
+          and abs(dogbone['y']) <= round_pad.size_y / 2 + dogbone['size'] / 2,
+          "the dog-bone via must be inside the pad's inflated BOX, or this "
+          "row does not exercise the corner over-credit it names")
+    check(via_in_pad_sites([dogbone], {8: [round_pad]}) == [],
+          "a dog-bone via on the half-pitch diagonal of a ROUND pad is not "
+          "via-in-pad -- the credit follows the pad shape, not its box (#695)")
+    # The cheap reject must be the DIAGONAL one, not an axis-aligned box: a
+    # rotated pad keeps size_x/size_y in its OWN frame and carries the tilt in
+    # rect_rotation, so a board-space box clips its copper. This via's centre
+    # is literally INSIDE the copper and a box gate drops it -- a MISSED Type
+    # VII callout, the unsafe direction.
+    tilted = Pad(component_ref='U3', pad_number='1', global_x=0.0, global_y=0.0,
+                 local_x=0, local_y=0, size_x=1.0, size_y=0.2, shape='rect',
+                 layers=['F.Cu'], net_id=9, net_name='R', drill=0.0,
+                 pad_type='smd', rotation=45.0)
+    tilted.rect_rotation = 45.0
+    on_tilt = {'x': 0.35, 'y': 0.35, 'size': 0.45, 'drill': 0.25, 'net_id': 9}
+    check(abs(on_tilt['x']) > tilted.size_y / 2 + on_tilt['size'] / 2,
+          "the tilted-pad via must fall outside the axis-aligned box, or "
+          "this row does not exercise the gate it names")
+    check(len(via_in_pad_sites([on_tilt], {9: [tilted]})) == 1,
+          "a via inside a ROTATED pad's copper is via-in-pad -- the reject "
+          "must be the diagonal prefilter, not a board-space box (#695)")
+    # The no-checker fallback is a real branch and had no coverage: with
+    # check_drc unavailable _pad_holds falls back to the pad's circumscribed
+    # reach, which must still refuse the dog-bone corner artifact above.
+    import builtins
+    _real_import = builtins.__import__
+
+    def _no_check_drc(name, *a, **kw):
+        if name == 'check_drc':
+            raise ImportError('forced: exercising the fallback branch')
+        return _real_import(name, *a, **kw)
+
+    builtins.__import__ = _no_check_drc
+    try:
+        check(len(via_in_pad_sites([grazing], pads_by_net)) == 1,
+              "with no check_drc, the fallback still names a real overlap")
+        check(via_in_pad_sites([dogbone], {8: [round_pad]}) == [],
+              "with no check_drc, the fallback's circumscribed-reach guard "
+              "still refuses the dog-bone corner artifact")
+    finally:
+        builtins.__import__ = _real_import
     summary = via_in_pad_summary([in_pad, outside], pads_by_net)
     check(summary and summary['count'] == 1 and summary['pads'] == ['U1.A1'],
           f"summary should name the one hit pad, got {summary}")

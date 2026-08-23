@@ -12,6 +12,9 @@ Synthetic Segment/Via/Pad cases:
   * a floating via                 -> unsupported-via flagged
   * a corner-graze terminal cap    -> narrow-pad-joint flagged (#696/#416)
   * the same cap landing in the pad body -> NOT flagged (clean)
+  * an off-centre via-in-pad (centre outside the pad, barrel overlapping)
+    -> NOT flagged, and its verdict AGREES with check_net_connectivity (#695)
+  * the same via moved until the barrel clears the pad -> dangling-via
 
 Plus two guards on the REPORTER, which is what #696 actually broke:
   * CATEGORIES is exactly the set of categories _finding(...) emits
@@ -36,6 +39,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from kicad_parser import Pad, Segment, Via, Zone, Net, BoardInfo, PCBData
 import check_weird as check_weird_mod
 from check_weird import check_weird, print_report, CATEGORIES
+from check_connected import check_net_connectivity
+from check_drc import point_to_pad_distance
+from connectivity import COINCIDENCE_TOL
+from routing_constants import SOFT_JOINT_MIN_GAP
 
 NET = 1
 NAME = '/TEST'
@@ -251,6 +258,151 @@ def main():
     f, _ = check_weird(pcb)
     results.append(("cap landing in the pad body NOT flagged",
                     not [x for x in f if x['category'] == 'narrow-pad-joint']))
+
+    # 12. Via-in-pad credited by the BARREL, not the centre (#695). The
+    #     router puts vias in pads on purpose (QFN allow_via_in_pad, plane
+    #     taps, BGA underpad), and an off-centre one has its centre just
+    #     OUTSIDE the pad outline while the barrel still overlaps the copper.
+    #     Crediting the centre only made this checker report `dangling-via`
+    #     on a joint check_net_connectivity -- the authoritative model, and
+    #     KiCad -- grades connected; check_weird's exit code is chain-blocking,
+    #     so that false positive cost a reroute lap.
+    #
+    #     Offset and pad are the kuchen case quoted in check_connected's own
+    #     comment (0.42mm circle pad, via centre 0.283mm away, so the centre
+    #     sits 0.073mm OUTSIDE the copper). The via here is _via()'s 0.6mm
+    #     default rather than kuchen's 0.42mm, so the barrel overlaps by
+    #     0.21 + 0.30 - 0.283 = 0.227mm, not kuchen's 0.137mm -- same class,
+    #     different number, and the guard below derives its bound from the
+    #     fixture instead of restating either. The via also carries a B.Cu run
+    #     to a second pad, so the pad is the only thing that can supply F.Cu.
+    def _via_in_pad_board(vx):
+        pads = [_pad(0, 0, size=0.42, num='1'),
+                _pad(5, 0, layers=('B.Cu',), num='2', ref='U2')]
+        segs = [_seg(vx, 0, 5, 0, layer='B.Cu')]
+        v = _via(vx, 0)
+        return _pcb(segs, vias=[v], pads=pads), segs, v, pads
+
+    # The row must be ON the branch it names: assert the via centre really is
+    # outside the pad copper by more than the old COINCIDENCE_TOL credit, or
+    # this passes for the wrong reason (the centre test would credit it too).
+    _gap = point_to_pad_distance(0.283, 0, _pad(0, 0, size=0.42))
+    _r = _via(0, 0).size / 2.0
+    results.append(("the #695 via centre is OUTSIDE the pad copper "
+                    "(guard is on the barrel branch, not the centre one)",
+                    COINCIDENCE_TOL < _gap < _r))
+
+    pcb, segs, v, pads = _via_in_pad_board(0.283)
+    f, _ = check_weird(pcb)
+    results.append(("via-in-pad whose barrel overlaps the pad NOT flagged",
+                    not [x for x in f if x['category']
+                         in ('dangling-via', 'unsupported-via')]))
+    #     Negative control: move the via until the barrel clears the copper
+    #     (0.55 -> 0.34mm gap > the 0.30 radius). Still a real dangling via.
+    #     Without this the row above would also pass on a check that credited
+    #     every pad unconditionally.
+    pcb_far, segs_far, v_far, pads_far = _via_in_pad_board(0.55)
+    f_far, _ = check_weird(pcb_far)
+    results.append(("via whose barrel does NOT reach the pad still flagged",
+                    len([x for x in f_far
+                         if x['category'] == 'dangling-via']) == 1))
+
+    #     The thesis of #695: this checker must not contradict the
+    #     AUTHORITATIVE connectivity model on the same geometry. Assert what
+    #     each model must say ABSOLUTELY, not merely that the two differ:
+    #     `joined != dangling` passes when BOTH are wrong (revert the margin
+    #     in check_weird AND check_connected -- the likely future edit, since
+    #     the fix mirrors them -- and it still holds), and it is not even the
+    #     right invariant, since it reads a whole-net verdict as a per-via one
+    #     and so goes red on any fixture that adds a third, unrouted pad.
+    for _label, (_pcb_, _segs_, _v_, _pads_), _want_joined in (
+            ('barrel overlaps', (pcb, segs, v, pads), True),
+            ('barrel clear', (pcb_far, segs_far, v_far, pads_far), False)):
+        _conn = check_net_connectivity(NET, _segs_, [_v_], _pads_, [])
+        _joined = (_conn['num_components'] == 1
+                   and not _conn['disconnected_pads'])
+        _dangling = any(x['category'] == 'dangling-via'
+                        for x in check_weird(_pcb_)[0])
+        results.append((f"check_connected joins this via to the pad "
+                        f"({_label}): expected {_want_joined}",
+                        _joined is _want_joined))
+        results.append((f"check_weird agrees with it ({_label}): "
+                        f"dangling must be {not _want_joined}",
+                        _dangling is (not _want_joined)))
+
+    # 13. The SAME centre-vs-barrel asymmetry, in the soft-joint anchor.
+    #     `at_anchor` credited a via by its BARREL radius and a pad by centre
+    #     containment, four lines apart -- so a stub whose round cap (r =
+    #     width/2) physically overlaps a pad, but whose endpoint sits outside
+    #     the outline, was counted as a free end. Two such ends facing each
+    #     other are then reported as `soft-joint` on copper check_connected
+    #     grades as ONE component (its #285 endpoint-cap rule unions a track
+    #     end into a pad at max(width/2 - 1e-6, tolerance)). `soft-joint`
+    #     carries size=None, so --tolerance cannot filter it away, and
+    #     check_weird's exit code is chain-blocking through check_complete.
+    #
+    #     1.0 x 0.6 pad at the origin; two 0.25mm stubs whose near ends sit
+    #     0.05mm outside its right edge, 0.12mm apart, each running away to
+    #     its own far pad so the FAR ends anchor and cannot confound the row.
+    def _soft_anchor_board(nx):
+        p1 = _rect_pad(0, 0, 1.0, 0.6, num='1', ref='U1')
+        p2 = _pad(3, 2, num='2', ref='U2')
+        p3 = _pad(3, -2, num='3', ref='U3')
+        segs = [_seg(nx, 0.06, 3, 2, width=0.25),
+                _seg(nx, -0.06, 3, -2, width=0.25)]
+        return _pcb(segs, pads=[p1, p2, p3]), segs, [p1, p2, p3]
+
+    _cap_r = 0.25 / 2.0
+    _p1 = _rect_pad(0, 0, 1.0, 0.6)
+    _near = point_to_pad_distance(0.55, 0.06, _p1)
+    _far = point_to_pad_distance(0.65, 0.06, _p1)
+    #     The rows must be ON the branch they name, in BOTH directions: the
+    #     near end outside the old centre credit but inside the cap (so the
+    #     centre test cannot pass it), the far end outside the cap too (so the
+    #     control is a real free end, not a fixture that merely moved).
+    results.append(("the soft-joint stub end is outside the pad copper but "
+                    "inside its own cap (guard is on the cap branch)",
+                    COINCIDENCE_TOL < _near < _cap_r))
+    results.append(("the control stub end is outside the cap as well",
+                    _far > _cap_r))
+    #     ...and that the PAIR condition itself is satisfied, or 'no
+    #     soft-joint' below would pass for the wrong reason.
+    _gap, _cap = 0.12, 0.25
+    results.append(("the two stub ends do form a soft-joint pair "
+                    "(gap within the overlapping caps)",
+                    SOFT_JOINT_MIN_GAP < _gap < _cap - 1e-6))
+
+    pcb_soft, segs_soft, pads_soft = _soft_anchor_board(0.55)
+    f_soft, _ = check_weird(pcb_soft)
+    results.append(("stub caps overlapping a pad NOT reported as soft-joint",
+                    not [x for x in f_soft if x['category'] == 'soft-joint']))
+    #     Negative control: same pair, moved until the caps clear the copper.
+    #     Still a genuine soft joint -- without this the row above would also
+    #     pass on a check that anchored every endpoint unconditionally.
+    pcb_gap, segs_gap, pads_gap = _soft_anchor_board(0.65)
+    f_gap, _ = check_weird(pcb_gap)
+    results.append(("stub caps clear of the pad still reported as soft-joint",
+                    len([x for x in f_gap
+                         if x['category'] == 'soft-joint']) == 1))
+
+    #     Same thesis as #695 above, and asserted the same way: what each
+    #     model must say ABSOLUTELY. In the overlapping case every pad is
+    #     joined through the centre pad; in the clear case that pad is
+    #     stranded, which is what makes the soft-joint report correct there.
+    for _label, (_pcb_, _segs_, _pads_), _want_joined in (
+            ('caps overlap the pad', (pcb_soft, segs_soft, pads_soft), True),
+            ('caps clear the pad', (pcb_gap, segs_gap, pads_gap), False)):
+        _conn = check_net_connectivity(NET, _segs_, [], _pads_, [])
+        _joined = (_conn['num_components'] == 1
+                   and not _conn['disconnected_pads'])
+        _soft = any(x['category'] == 'soft-joint'
+                    for x in check_weird(_pcb_)[0])
+        results.append((f"check_connected joins the stubs to the pad "
+                        f"({_label}): expected {_want_joined}",
+                        _joined is _want_joined))
+        results.append((f"check_weird agrees with it ({_label}): "
+                        f"soft-joint must be {not _want_joined}",
+                        _soft is (not _want_joined)))
 
     # 11. The reporter, which is what #696 actually broke: a finding whose
     #     category is missing from CATEGORIES counted toward the headline and

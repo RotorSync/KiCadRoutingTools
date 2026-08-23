@@ -13,6 +13,10 @@ Categories:
   soft-joint         same-net endpoints whose caps overlap but are not
                      coincident (check_drc's 'segment-endpoint-gap' class;
                      reuses routing_constants.SOFT_JOINT_MIN_GAP and approach).
+                     An end is ANCHORED -- and so not a free end at all -- by
+                     a via barrel or by a pad its own cap overlaps, both by
+                     RADIUS (#695); crediting a pad by centre containment made
+                     this contradict check_connected's endpoint-cap rule.
   redundant-cycle    same-net loop edges whose removal leaves connectivity
                      identical (pcb_modification._prune_net_cycles machinery,
                      report-only; zoned nets skipped -- planes are meshes).
@@ -26,8 +30,15 @@ Categories:
                      within ~1um) and coincident same-net vias (centers
                      within 0.01mm) -- the duplicate-emission bug class.
   unsupported-via    a via with no same-net track copper reaching its barrel,
-                     not inside a same-net pad, and not inside a same-net
-                     zone polygon (a floating via).
+                     no same-net pad whose copper that barrel overlaps, and
+                     not inside a same-net zone polygon (a floating via).
+                     Track and pad are both judged by BARREL OVERLAP (#695);
+                     the zone test is centre-in-OUTLINE, which is looser than
+                     the authoritative model -- check_net_connectivity credits
+                     a zone through its FILL model when a caller hands it
+                     pcb_data, so a via in a clearance void inside the outline
+                     grades supported here and unsupported there. Pre-existing,
+                     and not what #695 asked about.
   dangling-via       a via whose same-net copper reaches it on exactly ONE of
                      the layers it spans, so the barrel joins nothing. This is
                      KiCad's own `via_dangling` rule; it is a strictly weaker
@@ -120,12 +131,29 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
     more specific, category."""
     via_r = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in net_vias]
 
-    def at_anchor(x, y):
+    def at_anchor(x, y, width):
         for vx, vy, vr in via_r:
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
+        # The endpoint's round cap has a RADIUS (width/2), exactly as the via
+        # barrel two lines above has one -- so a stub ending just short of a
+        # pad outline can still have its cap physically overlapping the pad
+        # copper. Crediting the CENTRE only (COINCIDENCE_TOL, 0.02mm) made
+        # this branch contradict the authoritative model on copper KiCad
+        # grades joined: check_connected.py unions a track end into a pad at
+        # `_m = max(ewidth/2 - 1e-6, tolerance)` (the #285 endpoint-cap rule),
+        # so two 0.25mm stubs ending 0.05mm outside a 1.0x0.6 pad are ONE
+        # component there and a `soft-joint` here. That is the same
+        # centre-vs-barrel asymmetry #695 fixed for the via/pad credit, four
+        # lines apart from it, and it bites harder: `soft-joint` carries
+        # size=None, so --tolerance never filters it, and check_weird's exit
+        # code is chain-blocking through check_complete.
+        #
+        # `width` is REQUIRED rather than defaulted: a caller that forgot it
+        # would silently get the centre-only credit back, which is the defect.
+        _m = max(width / 2 - 1e-6, COINCIDENCE_TOL)
         for p in net_pads:
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if point_to_pad_distance(x, y, p) <= _m:
                 return True
         return False
 
@@ -142,7 +170,7 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if ep_count[(s.layer, rk(x, y))] != 1:
                 continue  # shared vertex = clean joint
-            if at_anchor(x, y):
+            if at_anchor(x, y, s.width):
                 continue  # terminates on a via / own pad = legitimate
             dangles[s.layer].append((x, y, s.width))
 
@@ -473,7 +501,9 @@ def stacked_copper_over_model(segs_by_net, vias_by_net, net_name):
 def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
                             net_zones, copper_layers, findings):
     """Floating vias: no same-net track copper reaching the barrel, no
-    same-net pad containing the center, no same-net zone polygon around it."""
+    same-net pad whose copper the barrel OVERLAPS, no same-net zone polygon
+    around it. Pad credit is barrel-overlap, not centre-containment (#695) --
+    see the note at the pad loop below."""
     for v in net_vias:
         span = _via_span(v, copper_layers)
         r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
@@ -499,8 +529,28 @@ def _check_unsupported_vias(net_id, name, net_segs, net_vias, net_pads,
             else:
                 pl = set(p.layers or [])
                 on = set(span) if any('*' in L for L in pl) else (span & pl)
+            # The barrel has a RADIUS against a track (above), so it has one
+            # against a pad too. `margin` inflates the EXACT pad outline, so
+            # this reads "the barrel copper overlaps the pad copper" -- the
+            # same GEOMETRY as check_connected.py's via-in-pad union and
+            # check_drc's via-in-edge-pad exemption, with COINCIDENCE_TOL kept
+            # as the floor exactly as it is there. Crediting the CENTRE only
+            # (COINCIDENCE_TOL, 0.02mm) made this checker contradict the
+            # authoritative connectivity model on copper KiCad grades joined,
+            # and check_weird's exit code is chain-blocking: an off-centre
+            # via-in-pad read as `dangling via` forced a reroute lap (#695).
+            #
+            # The LAYER model above is NOT the same, and this is only geometry
+            # parity: check_connected expands pad.layers (dropping *.Mask and
+            # friends) and unions only on a SHARED copper layer, while `on`
+            # here hands a drilled pad -- or one carrying any '*' layer -- the
+            # via's whole span. That predates #695 and no board in the corpus
+            # has a pad whose copper layers are a strict subset, but a plated
+            # pad declaring only F/B.Cu would let a buried via grazing its ring
+            # claim an inner layer. Left alone deliberately; fixing it is a
+            # different behaviour change from the one this comment describes.
             if on and not on <= sup and _point_in_pad(
-                    v.x, v.y, p, margin=COINCIDENCE_TOL):
+                    v.x, v.y, p, margin=max(r - 1e-6, COINCIDENCE_TOL)):
                 sup |= on
         for z in net_zones:
             if z.layer in span and z.layer not in sup and point_in_polygon(
