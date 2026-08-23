@@ -1094,7 +1094,7 @@ runs, and you get exit 143 with no partial board and no summary. 143 and 124
 are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by
 SCOPE -- fewer nets in --nets, a tighter --max-ripup, a named set of refs
 rather than a board sweep, --evict-depth 0 (already the default; it
-censuses and moves nothing) -- rather than by a clock.
+censuses and moves nothing, where 1 and 2 also trade blockers out) -- rather than by a clock.
 
 Record EVERY accepted iteration into the ledger above with converge.py, and
 every rejected one with --rejected before stepping back. The stage after this
@@ -1196,7 +1196,7 @@ runs, and you get exit 143 with no partial board and no summary. 143 and 124
 are the SHELL's codes, not a tool's. Run long steps DETACHED, and bound them by
 SCOPE -- fewer nets in --nets, a tighter --max-ripup, a named set of refs
 rather than a board sweep, --evict-depth 0 (already the default; it
-censuses and moves nothing) -- rather than by a clock.
+censuses and moves nothing, where 1 and 2 also trade blockers out) -- rather than by a clock.
 
 Two rules that are only true HERE, where the halves meet:
   - copper is not evidence about placement. A route that completed does not

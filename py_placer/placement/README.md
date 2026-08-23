@@ -139,7 +139,7 @@ rotation, and an unlocked load-bearing rotation was never protected from the
 quench either. Explore rotations deliberately with
 `place_portfolio.py --strategy poses`.
 
-### The eviction rung (`--evict-depth`, #630)
+### The eviction rung (`--evict-depth`, #630, #699)
 
 A part with no legal pose is not necessarily a part with no **room**. Run 19
 measured the difference: three sweeps returned a bare *"no legal pose anywhere
@@ -152,9 +152,7 @@ So when a part cannot be seated, the seeder counts its poses with each nearby
 seated incumbent lifted in turn. That census runs at every depth and is what
 the JSON_SUMMARY's `no_pose_blockers` (`{ref: {blocker: poses_freed}}`)
 reports, next to `unseated_refs` (names, not just a count). `--evict-depth 0`,
-the default, stops there: *tell me what is in the way, move nothing*. The
-`--reseat` path carries the same keys (`no_pose_blockers`, `evictions`,
-`evictions_reverted`) for its scope; it runs at depth 0, so the counts are 0.
+the default, stops there: *tell me what is in the way, move nothing*.
 
 `--evict-depth 1` also trades: evict the incumbent that frees the most, seat
 the blocked part **first** against the lifted board, then put the blocker back
@@ -170,13 +168,71 @@ pile has an artificially short HPWL, so any gate that ranks it refuses every
 legal seat. A trade that fails puts both parts back and is recorded as
 reverted (`evictions` counts kept trades, `evictions_reverted` the others).
 
-Bounded on every axis: depth 1 (a blocker's own blocker is not chased), at
-most 8 candidates per part (a geometric superset, so a part outside the box
-frees zero poses by construction), one trade per part, and the census counts
-to a cap. Locked parts and declared edge connectors are never candidates. The
-rung only fires on a part that was going to be reported unseated, so a run
-that seats everything is unaffected at either depth. It is opt-in until an
-A/B row on three boards exists (`tests/test_placement_ab.py`).
+**`--evict-depth 2` lifts a PAIR (#699).** A rung that only ever lifts one
+neighbour records *"immovable"* for a part two neighbours jointly block, and
+that verdict is true only of the basin the board happens to be in — the
+reporting case censused 8 neighbours, none of which frees a pose alone, on a
+board whose truth arrangement seats the part by moving two of them together.
+Depth 2 asks the same question of pairs, and **only for a part no single lift
+helped**: the pair sweep cannot be pruned by the single-lift counts, because
+in the case it exists for every one of them is zero. The trade, the ordering
+and the acceptance rule are the same code, not a second copy — the blockers
+simply go back **hardest first** (descending courtyard extent), each with the
+not-yet-returned ones still excluded, since a lifted part has not moved and
+would otherwise veto from a pocket it is about to vacate. Nothing deeper is
+defined: depth 3 is refused rather than silently meaning 2.
+
+Bounded on every axis: **no recursion at either depth** (a blocker's own
+blocker is not chased), at most 8 candidates per part (a geometric superset,
+so a part outside the box frees zero poses by construction), at most
+`EVICT_MAX_PAIRS = 16` of the C(8,2) pairs — ordered by `(i + j)` over the
+nearest-first candidate list, so truncation drops the far-far pairs instead of
+starving one candidate of partners — **one trade per part** (a single lift
+that was useful but whose trade reverted does *not* fall back to a pair), and
+the census counts to a cap. Every one of those is a **count**, never a clock:
+a wall-clock budget would place the same board differently on a slow machine
+and a fast one (#621). What a cap drops is reported, not silently omitted.
+Locked parts and declared edge connectors are never candidates. The rung only
+fires on a part that was going to be reported unseated, so a run that seats
+everything is unaffected at any depth. It is opt-in until an A/B row on three
+boards exists (`tests/test_placement_ab.py`).
+
+**The verdict says WHY, not just who (#699).** `no_pose_blockers[ref] == {}`
+used to mean two different things with opposite answers for the reader —
+"nothing seated is near this part" and "everything near it is locked" — and at
+depth 0 a census that freed nothing printed nothing at all. Every unseated
+part the rung reaches now carries a `no_pose_verdict` and a `no_pose_census`,
+in the JSON_SUMMARY and as a NOTE:
+
+| verdict | what it means | what to do about it |
+| --- | --- | --- |
+| `no_movable_neighbour` | nothing seated is near enough to be in the way | the outline, the zone or the part's own size refuses it |
+| `immovable_given_frozen` | the only neighbours in the way are locked or declared edge connectors, **named with the decision that froze each** | relax that lock, or accept the pose |
+| `no_single_lift_frees` | movable neighbours censused; no single lift frees a pose | try `--evict-depth 2` |
+| `no_pair_lift_frees` | ...and no pair of them frees one either | the room is not there |
+| `blocker_available` | a lift *would* free a pose; the depth declined to move | raise `--evict-depth` |
+| `trade_reverted` | a trade was attempted and put back | read the recorded conjunct |
+| `seated_after_eviction` | not unseated after all | — |
+| `no_target_recorded` | the rung never got to ask (no recorded seat context) | — |
+
+`no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
+`movable`, `frozen`, `truncated`, `baseline`, `pairs_total`, `pairs_censused`,
+`pairs_truncated`, `best_pair` — so a capped sweep can never read as a
+complete one.
+
+**On the `--reseat` path** the same flag applies and the same keys are
+carried. Depth ≥ 1 is the one exception to that pass's *"every other part is
+held fixed"* contract: it may trade out a seated **non-scope** neighbour, and
+those refs are named in `evicted`, in a NOTE, and in `moves`. They have to be
+in `moves` — that list is the whole of what gets written, so an evicted part
+left out of it is written at its **old** pose while the scope ref takes the
+pocket it vacated, which is overlapping copper reported as success. The pass
+additionally refuses any eviction that raised the board's stack count or
+overlap area (`eviction_licence_ok`): its ordinary gate compares `oob`
+lexicographically first, and `oob` moves hugely in this pass's own favour, so
+a new stack would sit below it unread. At depth 0 — the default, and what
+`place_reconstruct`'s reseat rung uses — nothing outside the scope is touched
+and the counts are 0.
 
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed
