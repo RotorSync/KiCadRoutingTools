@@ -170,6 +170,17 @@ class _Cap:
         # makes the alignment true by construction.
         self.pad_floors = []
         self.max_floor = 0.0
+        # Per-pad COPPER LAYER sets, index-aligned like pad_floors. Needed
+        # because self.segments records only an 'F'/'B' side and files an
+        # In1.Cu track under 'F' (a pre-existing model quirk), so an F-side cap
+        # pad is compared against inner-layer tracks it can never touch. That
+        # phantom is priced at the flat scalar today; without this set the
+        # NETCLASS term -- which is layer-blind -- would raise it too, and the
+        # pass would move caps to clear copper on a layer their pads do not
+        # occupy. Measured on orangecrab at --clearance 0.1 with a Default
+        # class of 0.3: R17/R18/R5's ENTIRE graze is that phantom, 0.082mm
+        # each flat and 0.70/0.70/0.57mm raised. See _seg_effs.
+        self.pad_layers = []
         for p in fp.pads:
             if not any(str(l).endswith('.Cu') for l in p.layers):
                 continue  # paste/mask-only aperture, not copper
@@ -195,6 +206,9 @@ class _Cap:
                 fl = (model.pad_floor(p) if _pad_carries_copper(p)
                       else PadFloor(0.0, 0.0, None))
                 self.pad_floors.append(fl)
+                from check_drc import pad_copper_layers
+                self.pad_layers.append(
+                    frozenset(pad_copper_layers(p, model.board_copper)))
                 mf = model.max_floor(fl)
                 if mf > self.max_floor:
                     self.max_floor = mf
@@ -408,11 +422,18 @@ class _Repair:
         # the model is inert. The 4-tuple shape is pinned: tests assign
         # st.vias wholesale and animate_fanout_clearance.py unpacks it.
         self.vias: List[Tuple[float, float, int, float]] = []
+        # The RADIUS, keyed on the tuple's identity. _via_effs has to strip the
+        # over-reach back off element 3, and deriving the radius arithmetically
+        # would silently mis-price a tuple a test assigned wholesale with a
+        # different keep-out convention. Absent from this map -> graded flat,
+        # which is the same fallback _pad_effs and _seg_effs already take.
+        self._via_radius_by_id: Dict[int, float] = {}
         for v in pcb_data.vias:
             size = v.size if v.size and v.size > 0 else default_via_size
-            self.vias.append((v.x, v.y, v.net_id,
-                              size / 2.0 + self._item_reach(
-                                  self._via_floor_for(v.net_id))))
+            t = (v.x, v.y, v.net_id,
+                 size / 2.0 + self._item_reach(self._via_floor_for(v.net_id)))
+            self.vias.append(t)
+            self._via_radius_by_id[id(t)] = size / 2.0
 
         # --- avoidance: foreign-net tracks on the cap's own side ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
@@ -430,12 +451,17 @@ class _Repair:
         # tuples live for this object's lifetime, so the id is stable; a tuple a
         # test injects is simply absent and grades flat.
         self._seg_floor_by_id: Dict[int, PadFloor] = {}
+        # ...and its REAL layer, for the same reason: the pruned list is built
+        # on the F/B side collapse, so _seg_effs needs the true layer to tell a
+        # pair that shares copper from one that cannot.
+        self._seg_layer_by_id: Dict[int, str] = {}
         for s in pcb_data.segments:
             side = 'B' if (s.layer or '').startswith('B') else 'F'
             fl = self._seg_floor_for(s.net_id, s.layer)
             t = (s.start_x, s.start_y, s.end_x, s.end_y, s.net_id,
                  s.width / 2.0 + self._item_reach(fl), side)
             self.segments.append(t)
+            self._seg_layer_by_id[id(t)] = s.layer
             if fl is not None:
                 self._seg_floor_by_id[id(t)] = fl
 
@@ -492,6 +518,11 @@ class _Repair:
         # #725 is about, and it interacts with the #617 balance below; filed
         # separately. (watchy's 8 NPTH overrides are all 0.100, below the 0.20
         # fab floor, so that board is numerically inert here.)
+        # NB: self.foreign_pads (and self.segments) are read nowhere after
+        # __init__ -- the pruned per-cap lists are what the sweep uses. They
+        # must NOT be deleted as dead: the id-keyed floor maps below depend on
+        # those tuples staying alive, and a recycled id would return ANOTHER
+        # item's floor, silently, with no error.
         self.foreign_pad_floors: List[Optional[PadFloor]] = []
         self.foreign_pad_mf: List[float] = []
         self.caps: Dict[str, _Cap] = {}
@@ -897,8 +928,29 @@ class _Repair:
         floors = [by_id.get(id(t)) for t in src]
         # t[5] is half width + the segment's own over-reach; strip it back.
         halves = [t[5] - self._item_reach(f) for t, f in zip(src, floors)]
-        rows = [[halves[j] + self._pair_or_flat(fa, floors[j])
-                 for j in range(len(src))] for fa in cap.pad_floors]
+        # A pair that shares NO copper layer keeps the FLAT scalar. cap_segs is
+        # pruned on the 'F'/'B' side collapse, which files an In1.Cu track
+        # under 'F', so it contains F-pad/inner-track pairs that cannot touch.
+        # The dru term already scopes itself away from them (empty shared set),
+        # but the netclass term does not -- and raising a phantom is how this
+        # change would move caps for a non-violation. Charging it flat leaves
+        # the pre-existing phantom exactly as it was; removing it altogether is
+        # a separate fix to the side collapse, filed rather than folded in.
+        cap_layers = getattr(cap, 'pad_layers', None)
+        if cap_layers is not None and len(cap_layers) != len(cap.pad_floors):
+            cap_layers = None      # a duck-typed cap; grade flat
+        seg_layers = [self._seg_layer_by_id.get(id(t)) for t in src]
+
+        def eff(fa, mine, j):
+            sl = seg_layers[j]
+            if mine is not None and sl is not None and sl not in mine:
+                return self.clearance
+            return self._pair_or_flat(fa, floors[j])
+
+        rows = [[halves[j] + eff(fa, None if cap_layers is None
+                                 else cap_layers[i], j)
+                 for j in range(len(src))]
+                for i, fa in enumerate(cap.pad_floors)]
         self._cap_seg_eff[ref] = (src, rows)
         return rows
 
@@ -912,10 +964,18 @@ class _Repair:
         rec = self._cap_via_eff.get(ref)
         if rec is not None and rec[0] is vias:
             return rec[1]
-        # v[3] is radius + the via's own over-reach; strip it back to a radius.
-        radii = [v[3] - self._item_reach(self._via_floor_for(v[2])) for v in vias]
-        rows = [[radii[j] + self.via_required(fa, v[2])
-                 for j, v in enumerate(vias)] for fa in cap.pad_floors]
+        # The radius comes from the identity map, never from arithmetic on
+        # v[3]: a tuple a test assigned wholesale carries its own keep-out
+        # convention, and re-deriving would mis-price it silently. Absent ->
+        # graded flat, i.e. v[3] is used as-is.
+        by_id = self._via_radius_by_id
+        rows = []
+        for fa in cap.pad_floors:
+            row = []
+            for v in vias:
+                r = by_id.get(id(v))
+                row.append(v[3] if r is None else r + self.via_required(fa, v[2]))
+            rows.append(row)
         self._cap_via_eff[ref] = (vias, rows)
         return rows
 
@@ -927,6 +987,13 @@ class _Repair:
             return None
         key = (ref, oref)
         rows = self._cap_pair_eff.get(key)
+        # The other three memos guard on their source list's identity; this one
+        # has no list to key on, so it validates its own SHAPE instead. Both
+        # exist for the same reason: st.caps / st.cap_* are assignable from a
+        # test, and a stale memo here is an IndexError or a wrong requirement.
+        if rows is not None and (len(rows) != len(cap.pad_floors)
+                                 or (rows and len(rows[0]) != len(other.pad_floors))):
+            rows = None
         if rows is None:
             rows = [[self._pair_or_flat(fa, fb) for fb in other.pad_floors]
                     for fa in cap.pad_floors]
@@ -978,16 +1045,30 @@ class _Repair:
                 continue
             fls = cap.pad_floors
             x, y, rot = cap.x, cap.y, cap.rot
+            sx, sy, srot = cap.seed_x, cap.seed_y, cap.seed_rot
+
+            def both(fn):
+                """Nets charged at the SEED pose or the final one.
+
+                The seed half is the point: the pass SUCCEEDS by leaving
+                nothing charged, so a final-pose-only report is empty exactly
+                when the raised requirement did its work -- and the operator
+                could not tell a run graded at --clearance from one graded at
+                five times it."""
+                out = set(fn(ref, cap, sx, sy, srot))
+                out |= set(fn(ref, cap, x, y, rot))
+                return out
+
             for kind, items, floor_of, net_of, charged in (
                     ('pad', self.cap_foreign_pads[ref],
                      lambda t: self._fp_floor_by_id.get(id(t)), lambda t: t[4],
-                     self._pad_shortfalls(ref, cap, x, y, rot)),
+                     both(self._pad_shortfalls)),
                     ('via', self.cap_vias[ref],
                      lambda t: self._via_floor_for(t[2]), lambda t: t[2],
-                     self._via_shortfalls(ref, cap, x, y, rot)),
+                     both(self._via_shortfalls)),
                     ('track', self.cap_segs[ref],
                      lambda t: self._seg_floor_by_id.get(id(t)), lambda t: t[4],
-                     self._seg_shortfalls(ref, cap, x, y, rot))):
+                     both(self._seg_shortfalls))):
                 for net, (mm, src) in best(fls, items, floor_of, net_of,
                                            set(charged)).items():
                     rows.append([ref, '{} {}'.format(kind, net_label(net)),
@@ -995,13 +1076,20 @@ class _Repair:
             # mover-vs-mover: the shortfall is a scalar per pair, so charge the
             # pair as a whole and name it by the partner's reference.
             cand = cap.pad_rects(x, y, rot)
+            seed = cap.pad_rects(sx, sy, srot)
             for oref in self.cap_caps[ref]:
                 other = self.caps[oref]
                 if not self._cap_floors_ok(other):
                     continue
                 effs = self._pair_effs(ref, cap, oref, other)
-                if _pad_pair_shortfall(cand, other.pad_rects(),
-                                       self.clearance, effs) <= EPS:
+                # seed pose OR final pose, for the reason `both` gives above
+                now = _pad_pair_shortfall(cand, other.pad_rects(),
+                                          self.clearance, effs)
+                was = _pad_pair_shortfall(
+                    seed, other.pad_rects(other.seed_x, other.seed_y,
+                                          other.seed_rot),
+                    self.clearance, effs)
+                if now <= EPS and was <= EPS:
                     continue
                 mm, src = 0.0, ''
                 for fa in fls:

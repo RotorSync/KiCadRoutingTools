@@ -316,6 +316,49 @@ class TestChannels(unittest.TestCase):
     # MUTATION: scope the segment floor to `self._all_cu` -> the F.Cu and
     # In1.Cu arms return 0.5 too.
 
+    def test_an_OFF_LAYER_track_pair_keeps_the_flat_scalar(self):
+        """`cap_segs` is pruned on the F/B side collapse, which files an
+        In1.Cu track under 'F' -- so it contains cap-pad/inner-track pairs that
+        cannot touch and that check_drc never grades at all. The dru term
+        scopes itself away from them (empty shared set), but the NETCLASS term
+        is layer-blind, so charging it there would raise a PHANTOM and move
+        caps to clear copper on a layer their pads do not occupy.
+
+        Measured before this guard, on this board at a Default class of 0.3:
+        R17/R18/R5's entire graze WAS the phantom -- 0.0821mm each flat,
+        0.6991/0.6991/0.5686 raised."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'offlayer', classes=_default_class(0.4))
+            st = _repair(p)
+            checked = off = on = 0
+            for ref, cap in st.caps.items():
+                rows = st._seg_effs(ref, cap)
+                if rows is None:
+                    continue
+                for i in range(len(cap.pad_floors)):
+                    mine = cap.pad_layers[i]
+                    for j, t in enumerate(st.cap_segs[ref]):
+                        layer = st._seg_layer_by_id.get(id(t))
+                        if layer is None:
+                            continue
+                        half = t[5] - st._item_reach(
+                            st._seg_floor_by_id.get(id(t)))
+                        checked += 1
+                        if layer in mine:
+                            on += rows[i][j] > half + CLEAR + 1e-9
+                        else:
+                            off += 1
+                            self.assertAlmostEqual(
+                                rows[i][j], half + CLEAR, places=9,
+                                msg='%s pad %d vs an off-layer %s track was '
+                                    'charged above the flat scalar'
+                                    % (ref, i, layer))
+            # ON THE BRANCH: both kinds must be present, or this proves nothing
+            self.assertGreater(off, 0, 'no off-layer pair in any pruned list')
+            self.assertGreater(on, 0, 'no on-layer pair was raised')
+    # MUTATION: drop the off-layer test in `_seg_effs` -> the off-layer rows
+    # come back at the netclass 0.4.
+
     def test_a_relaxing_rule_REPLACES_downward(self):
         """A dru rule REPLACES, so it can lower a pair below the netclass.
         Pinning this is what proves the compare uses pair(), not max_floor()."""
@@ -653,22 +696,45 @@ class TestShapeContract(unittest.TestCase):
                              'address the wrong pad' % rot)
     # MUTATION: sort or filter inside `_pad_cache_for` -> the nets reorder.
 
-    def test_injecting_st_vias_wholesale_still_grades(self):
+    def test_injecting_st_vias_wholesale_is_graded_AS_INJECTED(self):
         """`st.vias = [...]` is the idiom tests/test_fanout_clearance.py uses.
-        Any POSITIONAL parallel floor list would desync right here."""
-        st = _repair(self.path)
-        cap = st.caps[ANCHOR_CAP]
-        own = {p[4] for p in cap.pads}
-        foreign = next(n for n in range(1, 50) if n not in own)
-        r = cap.pad_rects()[0]
-        st.vias = [((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0, foreign,
-                    0.35 / 2 + CLEAR)]
-        st.cap_vias = {ref: st.vias for ref in st.caps}
-        self.assertGreater(
-            st.via_penalty(cap, cap.x, cap.y, cap.rot,
-                           st.cap_vias[ANCHOR_CAP], ref=ANCHOR_CAP), 0.0)
-    # MUTATION: key the via floors by list position -> IndexError, or a
-    # silently wrong requirement.
+        The injected tuple carries its own keep-out convention, so it must be
+        used verbatim -- deriving the radius by subtracting `_item_reach` off
+        element 3 and adding the pair requirement back silently re-prices it.
+
+        Staged with a netclass AND an inner-layer dru rule on purpose: that is
+        what makes `_item_reach` (0.5, raised by the rule on the via's all-copper
+        scope) differ from `pair` (0.4, the netclass, since the cap pad does not
+        share the ruled layer). On a fixture where they coincide, a derived
+        radius round-trips by luck and this test would pass either way."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'inject', classes=_default_class(0.4),
+                       dru=_dru('In1.Cu', 0.5))
+            st = _repair(p)
+            cap = st.caps[ANCHOR_CAP]
+            own = {q[4] for q in cap.pads}
+            foreign = next(n for n in range(1, 50) if n not in own)
+            r = cap.pad_rects()[0]
+            injected = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0, foreign,
+                        0.35 / 2 + CLEAR)
+            st.vias = [injected]
+            st.cap_vias = {ref: st.vias for ref in st.caps}
+            # ON THE BRANCH: the two must actually differ here.
+            reach = st._item_reach(st.via_floor(foreign))
+            pair = st.via_required(cap.pad_floors[0], foreign)
+            self.assertNotAlmostEqual(
+                reach, pair, places=6,
+                msg='_item_reach == pair on this fixture -- a derived radius '
+                    'would round-trip by luck and this test would pass '
+                    'whether or not the identity map is used')
+            rows = st._via_effs(ANCHOR_CAP, cap, st.cap_vias[ANCHOR_CAP])
+            self.assertAlmostEqual(rows[0][0], injected[3], places=9,
+                                   msg='the injected keep-out was re-priced')
+            self.assertGreater(
+                st.via_penalty(cap, cap.x, cap.y, cap.rot,
+                               st.cap_vias[ANCHOR_CAP], ref=ANCHOR_CAP), 0.0)
+    # MUTATION: derive the radius from `v[3] - _item_reach(...)` instead of the
+    # identity map -> rows[0][0] comes out 0.1mm low.
 
     def test_injecting_cap_foreign_pads_grades_without_misindexing(self):
         """A tuple a test injected carries no registered floor, so it must be
