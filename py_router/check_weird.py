@@ -13,6 +13,10 @@ Categories:
   soft-joint         same-net endpoints whose caps overlap but are not
                      coincident (check_drc's 'segment-endpoint-gap' class;
                      reuses routing_constants.SOFT_JOINT_MIN_GAP and approach).
+                     An end is ANCHORED -- and so not a free end at all -- by
+                     a via barrel or by a pad its own cap overlaps, both by
+                     RADIUS (#695); crediting a pad by centre containment made
+                     this contradict check_connected's endpoint-cap rule.
   redundant-cycle    same-net loop edges whose removal leaves connectivity
                      identical (pcb_modification._prune_net_cycles machinery,
                      report-only; zoned nets skipped -- planes are meshes).
@@ -127,12 +131,29 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
     more specific, category."""
     via_r = [(v.x, v.y, (getattr(v, 'size', 0) or 0) / 2.0) for v in net_vias]
 
-    def at_anchor(x, y):
+    def at_anchor(x, y, width):
         for vx, vy, vr in via_r:
             if math.hypot(x - vx, y - vy) <= vr + 0.01:
                 return True
+        # The endpoint's round cap has a RADIUS (width/2), exactly as the via
+        # barrel two lines above has one -- so a stub ending just short of a
+        # pad outline can still have its cap physically overlapping the pad
+        # copper. Crediting the CENTRE only (COINCIDENCE_TOL, 0.02mm) made
+        # this branch contradict the authoritative model on copper KiCad
+        # grades joined: check_connected.py unions a track end into a pad at
+        # `_m = max(ewidth/2 - 1e-6, tolerance)` (the #285 endpoint-cap rule),
+        # so two 0.25mm stubs ending 0.05mm outside a 1.0x0.6 pad are ONE
+        # component there and a `soft-joint` here. That is the same
+        # centre-vs-barrel asymmetry #695 fixed for the via/pad credit, four
+        # lines apart from it, and it bites harder: `soft-joint` carries
+        # size=None, so --tolerance never filters it, and check_weird's exit
+        # code is chain-blocking through check_complete.
+        #
+        # `width` is REQUIRED rather than defaulted: a caller that forgot it
+        # would silently get the centre-only credit back, which is the defect.
+        _m = max(width / 2 - 1e-6, COINCIDENCE_TOL)
         for p in net_pads:
-            if point_to_pad_distance(x, y, p) <= COINCIDENCE_TOL:
+            if point_to_pad_distance(x, y, p) <= _m:
                 return True
         return False
 
@@ -149,7 +170,7 @@ def _check_soft_joints(net_id, name, net_segs, net_vias, net_pads, findings):
         for (x, y) in ((s.start_x, s.start_y), (s.end_x, s.end_y)):
             if ep_count[(s.layer, rk(x, y))] != 1:
                 continue  # shared vertex = clean joint
-            if at_anchor(x, y):
+            if at_anchor(x, y, s.width):
                 continue  # terminates on a via / own pad = legitimate
             dangles[s.layer].append((x, y, s.width))
 

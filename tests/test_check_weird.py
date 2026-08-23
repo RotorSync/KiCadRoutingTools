@@ -42,6 +42,7 @@ from check_weird import check_weird, print_report, CATEGORIES
 from check_connected import check_net_connectivity
 from check_drc import point_to_pad_distance
 from connectivity import COINCIDENCE_TOL
+from routing_constants import SOFT_JOINT_MIN_GAP
 
 NET = 1
 NAME = '/TEST'
@@ -328,6 +329,80 @@ def main():
         results.append((f"check_weird agrees with it ({_label}): "
                         f"dangling must be {not _want_joined}",
                         _dangling is (not _want_joined)))
+
+    # 13. The SAME centre-vs-barrel asymmetry, in the soft-joint anchor.
+    #     `at_anchor` credited a via by its BARREL radius and a pad by centre
+    #     containment, four lines apart -- so a stub whose round cap (r =
+    #     width/2) physically overlaps a pad, but whose endpoint sits outside
+    #     the outline, was counted as a free end. Two such ends facing each
+    #     other are then reported as `soft-joint` on copper check_connected
+    #     grades as ONE component (its #285 endpoint-cap rule unions a track
+    #     end into a pad at max(width/2 - 1e-6, tolerance)). `soft-joint`
+    #     carries size=None, so --tolerance cannot filter it away, and
+    #     check_weird's exit code is chain-blocking through check_complete.
+    #
+    #     1.0 x 0.6 pad at the origin; two 0.25mm stubs whose near ends sit
+    #     0.05mm outside its right edge, 0.12mm apart, each running away to
+    #     its own far pad so the FAR ends anchor and cannot confound the row.
+    def _soft_anchor_board(nx):
+        p1 = _rect_pad(0, 0, 1.0, 0.6, num='1', ref='U1')
+        p2 = _pad(3, 2, num='2', ref='U2')
+        p3 = _pad(3, -2, num='3', ref='U3')
+        segs = [_seg(nx, 0.06, 3, 2, width=0.25),
+                _seg(nx, -0.06, 3, -2, width=0.25)]
+        return _pcb(segs, pads=[p1, p2, p3]), segs, [p1, p2, p3]
+
+    _cap_r = 0.25 / 2.0
+    _p1 = _rect_pad(0, 0, 1.0, 0.6)
+    _near = point_to_pad_distance(0.55, 0.06, _p1)
+    _far = point_to_pad_distance(0.65, 0.06, _p1)
+    #     The rows must be ON the branch they name, in BOTH directions: the
+    #     near end outside the old centre credit but inside the cap (so the
+    #     centre test cannot pass it), the far end outside the cap too (so the
+    #     control is a real free end, not a fixture that merely moved).
+    results.append(("the soft-joint stub end is outside the pad copper but "
+                    "inside its own cap (guard is on the cap branch)",
+                    COINCIDENCE_TOL < _near < _cap_r))
+    results.append(("the control stub end is outside the cap as well",
+                    _far > _cap_r))
+    #     ...and that the PAIR condition itself is satisfied, or 'no
+    #     soft-joint' below would pass for the wrong reason.
+    _gap, _cap = 0.12, 0.25
+    results.append(("the two stub ends do form a soft-joint pair "
+                    "(gap within the overlapping caps)",
+                    SOFT_JOINT_MIN_GAP < _gap < _cap - 1e-6))
+
+    pcb_soft, segs_soft, pads_soft = _soft_anchor_board(0.55)
+    f_soft, _ = check_weird(pcb_soft)
+    results.append(("stub caps overlapping a pad NOT reported as soft-joint",
+                    not [x for x in f_soft if x['category'] == 'soft-joint']))
+    #     Negative control: same pair, moved until the caps clear the copper.
+    #     Still a genuine soft joint -- without this the row above would also
+    #     pass on a check that anchored every endpoint unconditionally.
+    pcb_gap, segs_gap, pads_gap = _soft_anchor_board(0.65)
+    f_gap, _ = check_weird(pcb_gap)
+    results.append(("stub caps clear of the pad still reported as soft-joint",
+                    len([x for x in f_gap
+                         if x['category'] == 'soft-joint']) == 1))
+
+    #     Same thesis as #695 above, and asserted the same way: what each
+    #     model must say ABSOLUTELY. In the overlapping case every pad is
+    #     joined through the centre pad; in the clear case that pad is
+    #     stranded, which is what makes the soft-joint report correct there.
+    for _label, (_pcb_, _segs_, _pads_), _want_joined in (
+            ('caps overlap the pad', (pcb_soft, segs_soft, pads_soft), True),
+            ('caps clear the pad', (pcb_gap, segs_gap, pads_gap), False)):
+        _conn = check_net_connectivity(NET, _segs_, [], _pads_, [])
+        _joined = (_conn['num_components'] == 1
+                   and not _conn['disconnected_pads'])
+        _soft = any(x['category'] == 'soft-joint'
+                    for x in check_weird(_pcb_)[0])
+        results.append((f"check_connected joins the stubs to the pad "
+                        f"({_label}): expected {_want_joined}",
+                        _joined is _want_joined))
+        results.append((f"check_weird agrees with it ({_label}): "
+                        f"soft-joint must be {not _want_joined}",
+                        _soft is (not _want_joined)))
 
     # 11. The reporter, which is what #696 actually broke: a finding whose
     #     category is missing from CATEGORIES counted toward the headline and
