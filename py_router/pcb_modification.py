@@ -3699,17 +3699,23 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                    base_clearance=eff, net_clearances=net_clearances)
         if pd < eff + w / 2.0 - 1e-4:
             return False
-        d = min(pd,
-                _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff,
-                                      track_clearances=_trk_clr),  # #549
-                _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
-        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
-        ok = (d >= eff + w / 2.0 - 1e-4 and
-              hd >= npth_clr + w / 2.0 - 1e-4 and
-              edge_clears(x1, y1, x2, y2, w) and
-              keepout_clears(x1, y1, x2, y2, layer, w))
+        sd = _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
+                                   net_clearances=net_clearances,
+                                   base_clearance=eff,
+                                   track_clearances=_trk_clr)  # #549
+        if sd < eff + w / 2.0 - 1e-4:
+            return False
+        vd = _seg_foreign_via_dist(pcb_data, net_id,
+                                   x1,y1,x2,y2,layer,
+                                   net_clearances=net_clearances,
+                                   base_clearance=eff)
+        if vd < eff + w / 2.0 - 1e-4:
+            return False
+        hd = _seg_foreign_hole_dist(pcb_data,
+                                    net_id,x1,y1,x2,y2)
+        ok = (hd >= npth_clr + w / 2.0 - 1e-4 and
+              edge_clears(x1,y1,x2,y2,w) and
+              keepout_clears(x1,y1,x2,y2,layer,w))
         if _665trace and ok:
             # #665 forensics: re-check the pad distance with a FRESH pad
             # array (cache detached); a disagreement = a stale/poisoned
