@@ -24,7 +24,9 @@ from __future__ import annotations
 RUN_ALL_FAST_OK = True
 RUN_ALL_TIMEOUT = 900
 
+import contextlib
 import copy
+import io
 import json
 import math
 import os
@@ -163,7 +165,14 @@ class TestSourcesReachTheEngine(unittest.TestCase):
                          'the stock board must not charge this pair')
         pad.local_clearance = 0.5
         st = _repair(BOARD, pcb=pcb)
-        self.assertIsNotNone(st._floors, 'the override did not activate a model')
+        # NB: NOT `assertIsNotNone(st._floors)` -- this board's 6 fiducials
+        # already carry local_clearance 0.375, so the model is active before
+        # this test writes anything, and that assertion would credit the setup
+        # for a state it did not create.
+        self.assertAlmostEqual(st.caps[ANCHOR_CAP].max_floor, 0.0, places=9,
+                               msg='the CAP carries a floor of its own -- the '
+                                   'shortfall below would not isolate the '
+                                   'foreign override')
         got = _short(st, ANCHOR_CAP)
         self.assertIn(pad.net_id,
                       got, 'the %s override never reached the shortfall' % owner)
@@ -443,8 +452,11 @@ class TestChannels(unittest.TestCase):
             self.assertIn(0.4, {round(v, 6) for r in rows for v in r},
                           'every pair fell back to the flat scalar -- the '
                           'board is now UNDER-blocked')
-    # MUTATION: `return pl if self._all_cu else None` -> `return pl` -> every
-    # pad reads as copper-less and the whole board grades flat.
+    # MUTATION: `return pl if self._all_cu else None` -> `return pl` -> the
+    # `assertIsNone` fails. NB the effs are 0.4 either way on this board: only
+    # a `*.Cu` pad resolves empty against an empty layer list, and orangecrab's
+    # cap pads are all concrete F.Cu/B.Cu, so the under-block this guards
+    # against needs a through-hole cap pad to appear at all.
 
     def test_a_relaxing_rule_REPLACES_downward(self):
         """A dru rule REPLACES, so it can lower a pair below the netclass.
@@ -466,8 +478,10 @@ class TestChannels(unittest.TestCase):
             self.assertGreaterEqual(
                 cap.max_floor, 0.4,
                 'the broad-phase bound was lowered by a relaxing rule')
-    # MUTATION: use `max_floor` instead of `pair` in the eff precompute -> the
-    # first assertion reads 0.4.
+    # MUTATION: `_pair_or_flat` -> `max(self.clearance, model.max_floor(fa),
+    # model.max_floor(fb))` -> the `required(...)` assertion reads 0.4 instead
+    # of the replaced-down 0.15. (A mutation confined to the eff builders does
+    # NOT reach this test -- it reads the resolver directly.)
 
     def test_the_track_bbox_reject_widens_with_the_requirement(self):
         """`_seg_shortfalls`' cheap bbox reject is a SKIP keyed on the same
@@ -485,8 +499,10 @@ class TestChannels(unittest.TestCase):
         self.assertGreater(widened, 0,
                            'no track keep-out was raised -- this test would '
                            'pass vacuously')
-    # MUTATION: leave `_seg_shortfalls`' reject at the flat `halfw` -> the
-    # widened band is never scanned.
+    # MUTATION: `_seg_effs`' `halves[j] + eff(...)` -> `halves[j] +
+    # self.clearance` -> no row exceeds the flat half-width.
+    # NB this reads the eff ROWS; `_seg_shortfalls`' own widened bbox reject is
+    # a separate site and is NOT what this test covers.
 
 
 class TestPruneRadiiStayExact(unittest.TestCase):
@@ -522,8 +538,12 @@ class TestPruneRadiiStayExact(unittest.TestCase):
         for name in ('cap_foreign_pads', 'cap_caps', 'cap_segs', 'cap_vias'):
             self.assertIn(name, grew,
                           '%s never grew -- its reach was not raised' % name)
-    # MUTATION: revert any one of the four prune radii -> that list shrinks and
-    # its name is missing from `grew`.
+    # MUTATION: revert the foreign-pad radius or the cap-cap radius -> that
+    # list shrinks and its name is missing from `grew`.
+    # NB the segment and via radii are NOT covered here: on a uniform-class
+    # fixture the ITEMS' own floors already grow those two lists, so removing
+    # the cap-side slack leaves `grew` intact. They are covered by
+    # test_the_cap_side_slack_raises_the_via_and_track_reaches.
 
     def test_a_foreign_pad_beyond_the_OLD_reach_is_still_kept(self):
         cap = self.st.caps[ANCHOR_CAP]
@@ -772,21 +792,79 @@ class TestNudgerGraderConsistency(unittest.TestCase):
     # MUTATION: drop the `_radii[id(moved)] = ...` carry-over in
     # `nudge_vias_for_unresolved` -> rec is None.
 
+    def test_the_nudger_grades_a_COPPERLESS_cap_pad_flat_too(self):
+        """The copper-less-pad rule must not stop at the eff builders. The
+        nudger resolves through the same helpers, so without the marker it
+        charges a phantom the grader does not -- handing itself a via nothing
+        flagged and printing an operator-facing line naming a non-violation."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'nudgeflat', classes=_default_class(0.4))
+            pcb = parse_kicad_pcb(p)
+            fp = pcb.footprints[ANCHOR_CAP]
+            real = [q for q in fp.pads if L._pad_carries_copper(q)]
+            hole = copy.deepcopy(real[1])
+            hole.pad_type = 'np_thru_hole'
+            hole.drill = 1.0
+            hole.layers = ['*.Cu', '*.Mask']
+            hole.local_clearance = 1.0
+            fp.pads[fp.pads.index(real[1])] = hole
+            st = _repair(p, pcb=pcb)
+            cap = st.caps[ANCHOR_CAP]
+            flat_i = [k for k in range(len(cap.pad_floors))
+                      if not cap.pad_layers[k]]
+            # ON THE BRANCH: there must be exactly one copper-less pad, and the
+            # board must be declaring, or the phantom cannot arise.
+            self.assertEqual(len(flat_i), 1)
+            self.assertIsNotNone(st._floors)
+            seen = []
+            real_req = st.via_required
+
+            def recording(pad_floor, via_net):
+                seen.append(pad_floor)
+                return real_req(pad_floor, via_net)
+            st.via_required = recording
+            nudge_vias_for_unresolved(st, pcb, CLEAR)
+            self.assertTrue(seen, 'the nudger never consulted via_required')
+            bad = [f for f in seen if f is cap.pad_floors[flat_i[0]]]
+            self.assertEqual(bad, [], 'the nudger priced the copper-less pad '
+                                      'at its own floor instead of flat')
+    # MUTATION: drop the `pad_layers` check in `cap_floors_of` -> the
+    # copper-less pad's floor reaches via_required.
+
     def test_a_duck_typed_state_grades_flat_instead_of_crashing(self):
         """test_617 and test_370 drive the nudger with a _FakeSt/_FakeCap that
-        carries none of this machinery."""
+        carries none of this machinery.
+
+        The cap and the UNRESOLVED verdict are both load-bearing: with no caps
+        the function returns at its pre-existing early return, 58 lines above
+        the first `getattr(st, ...)` this change added, and the test proves
+        nothing at all. It did exactly that until an audit measured the line
+        coverage."""
+        pcb = parse_kicad_pcb(INERT)
+
+        class _FakeCap(object):
+            pads = [(0.0, 0.0, 0.1, 0.1, 1)]
+            x = y = rot = 0.0
+            side = 'F'
+
+            def pad_rects(self, *a):
+                b = pcb.board_info.board_bounds
+                return [(b[0] + 1.0, b[1] + 1.0, b[0] + 1.2, b[1] + 1.2, 1)]
+
         class _FakeSt(object):
-            caps = {}
+            caps = {'C1': _FakeCap()}
             locked_refs = set()
 
             def graze_penalty(self, *a):
-                return 0.0
-
-        self.assertEqual(
-            nudge_vias_for_unresolved(_FakeSt(), parse_kicad_pcb(INERT), CLEAR),
-            ([], []))
-    # MUTATION: read `st._floors` (or `cap.pad_floors`) directly instead of via
-    # getattr -> AttributeError, and two existing test files go red.
+                return 1.0          # unresolved, so the offender loop RUNS
+        st = _FakeSt()
+        moves, segs = nudge_vias_for_unresolved(st, pcb, CLEAR)
+        self.assertEqual((moves, segs), ([], []))
+        # ON THE BRANCH: prove the guarded reads were reached, not skipped.
+        self.assertIsNone(getattr(st, '_floors', None))
+        self.assertFalse(hasattr(_FakeCap, 'pad_floors'))
+    # MUTATION: read `st.required` / `cap.pad_floors` directly instead of via
+    # getattr -> AttributeError here, and in test_617 / test_370.
 
 
 class TestShapeContract(unittest.TestCase):
@@ -807,11 +885,19 @@ class TestShapeContract(unittest.TestCase):
     def test_the_four_pinned_tuple_widths(self):
         # ON THE BRANCH: grading the FLAT path proves nothing about the shapes.
         self.assertIsNotNone(self.st._floors)
-        self.assertTrue(all(len(v) == 4 for v in self.st.vias))
-        self.assertTrue(all(len(s) == 7 for s in self.st.segments))
-        self.assertTrue(all(len(t) == 6 for t in self.st.foreign_pads))
+        # every all() below is vacuous on an empty collection, so gate each
+        for what, coll, width in (('vias', self.st.vias, 4),
+                                  ('segments', self.st.segments, 7),
+                                  ('foreign_pads', self.st.foreign_pads, 6)):
+            self.assertTrue(coll, 'no %s on this fixture -- the width '
+                                  'assertion would be vacuous' % what)
+            self.assertTrue(all(len(t) == width for t in coll),
+                            '%s is not %d wide' % (what, width))
+        self.assertTrue(self.st.caps)
         for cap in self.st.caps.values():
-            self.assertTrue(all(len(r) == 5 for r in cap.pad_rects()))
+            rects = cap.pad_rects()
+            self.assertTrue(rects)
+            self.assertTrue(all(len(r) == 5 for r in rects))
     # MUTATION: widen any of them -> animate_fanout_clearance.py and three
     # existing test files stop unpacking.
 
@@ -825,7 +911,9 @@ class TestShapeContract(unittest.TestCase):
             self.assertEqual([r[4] for r in rects], base,
                              'pad order changed at rot %g -- floors would '
                              'address the wrong pad' % rot)
-    # MUTATION: sort or filter inside `_pad_cache_for` -> the nets reorder.
+    # MUTATION: FILTER inside `_pad_cache_for` (drop a pad) -> the length
+    # assertions fail. NB a deterministic SORT is not covered: `base` comes
+    # from the same function, so both sides reorder together.
 
     def test_injecting_st_vias_wholesale_is_graded_AS_INJECTED(self):
         """`st.vias = [...]` is the idiom tests/test_fanout_clearance.py uses.
@@ -896,11 +984,64 @@ class TestShapeContract(unittest.TestCase):
     # MUTATION: drop the source-list identity guard in `_pad_effs` -> the
     # shortfall reads 0.35.
 
-    def test_ten_positional_arguments_still_construct(self):
-        _Repair(parse_kicad_pcb(BOARD), BOARD, CLEAR, 0.1, 0.55, 1.0, 2.0, 0.3,
-                'C', set())
-    # MUTATION: insert a parameter before `max_displacement_cap` -> four
-    # existing test files break.
+    def test_via_penalty_without_a_ref_grades_FLAT_as_documented(self):
+        """`via_penalty(cap, x, y, rot)` is a public 4-positional path existing
+        tests use. Its docstring says the flat scalar is used there. #725
+        redefined the tuple's keep-out slot as the prune OVER-reach, so grading
+        that slot directly charges more than any pair needs -- and more than
+        upstream's slot, which really was radius + clearance."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'noref', classes=_default_class(0.4),
+                       dru=_dru('In1.Cu', 0.9))
+            st = _repair(p)
+            ref = 'C7'          # C20's vias clear both ways; C7's do not
+            cap = st.caps[ref]
+            vias = st.cap_vias[ref]
+            self.assertTrue(vias)
+            flat = st.via_penalty(cap, cap.x, cap.y, cap.rot, vias)
+            expect = over = 0.0
+            for (bx0, by0, bx1, by1, net) in cap.pad_rects():
+                for v in vias:
+                    if v[2] == net:
+                        continue
+                    d = _point_to_rect_dist(v[0], v[1], (bx0, by0, bx1, by1))
+                    ko = st._via_radius_by_id[id(v)][1] + CLEAR
+                    if d < ko - 1e-6:
+                        expect += ko - d
+                    if d < v[3] - 1e-6:          # the tuple's over-reach slot
+                        over += v[3] - d
+            # ON THE BRANCH: the two must actually differ on this cap, or the
+            # assertion below holds whichever quantity is graded.
+            self.assertGreater(over, expect + 1.0,
+                               'flat and over-reach coincide here (%.4f vs '
+                               '%.4f) -- this would pass vacuously'
+                               % (expect, over))
+            self.assertAlmostEqual(flat, expect, places=9,
+                                   msg='the no-ref path graded at the prune '
+                                       'over-reach, not the flat scalar')
+    # MUTATION: grade `keepout` directly in via_penalty's flat branch -> the
+    # penalty comes out far above the flat scalar.
+
+    def test_ten_positional_arguments_bind_to_the_documented_params(self):
+        """Four existing test files construct _Repair with 10 positionals. A
+        bare construction asserts nothing -- inserting a DEFAULTED parameter
+        still constructs fine and binds every argument to the wrong name. Check
+        the signature, then check the values landed."""
+        import inspect
+        names = list(inspect.signature(_Repair.__init__).parameters)[1:11]
+        self.assertEqual(names, ['pcb_data', 'pcb_file', 'clearance',
+                                 'grid_step', 'board_edge_clearance',
+                                 'near_margin', 'capture_radius',
+                                 'default_via_size', 'cap_prefix',
+                                 'extra_locked'])
+        st = _Repair(parse_kicad_pcb(BOARD), BOARD, CLEAR, 0.1, 0.55, 1.0, 2.0,
+                     0.3, 'C', set())
+        self.assertEqual(st.clearance, CLEAR)
+        self.assertEqual(st.grid_step, 0.1)
+        self.assertEqual(st.capture_radius, 2.0)
+        self.assertEqual(st._cap_prefixes, ('C',))
+    # MUTATION: insert ANY parameter (defaulted or not) before `extra_locked`
+    # -> the name list differs, and the values land on the wrong attributes.
 
 
 class TestInertness(unittest.TestCase):
@@ -937,6 +1078,49 @@ class TestInertness(unittest.TestCase):
         self.assertEqual(r['clearance_notes'], [])
     # MUTATION: drop the `.active` gate in `_Repair.__init__` -> hits > 0.
 
+    def test_the_locked_warning_still_names_a_COPPERLESS_NPTH_pad(self):
+        """The locked-part warning exists to surface a foreign via inside a
+        locked pad's keep-out. A via inside a 1.7mm mounting hole is exactly
+        that, and upstream reported it. #725's copper predicate must decide how
+        the pair is PRICED, not whether it is seen -- dropping such pads removed
+        real rows on a board that declares nothing at all, which would break
+        the inertness claim in this channel."""
+        pcb = parse_kicad_pcb(INERT)
+        st = _repair(INERT, pcb=pcb)
+        # ON THE BRANCH: an inert board, and a locked part to convert.
+        self.assertIsNone(st._floors)
+        locked = sorted(st.locked_refs)
+        self.assertTrue(locked, 'no locked part on this fixture')
+
+        def warn_rows(board):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                repair_fanout_clearance(board, INERT, clearance=CLEAR)
+            return [ln.strip() for ln in buf.getvalue().splitlines()
+                    if '<-> via at' in ln]
+
+        # ON THE BRANCH: convert the pad that actually HAS a via in its
+        # keep-out, or the row it should keep does not exist either way.
+        # (Match the ref token exactly -- 'U8.16'.startswith('U8.1') is True,
+        # and a prefix test silently passed on the wrong row while checking
+        # this fix.)
+        before = warn_rows(pcb)
+        self.assertTrue(before, 'no locked-pad warning at all on this fixture')
+        ref, pnum = before[0].split(' ')[0].split('.', 1)
+        fp = pcb.footprints[ref]
+        pad = next(q for q in fp.pads if str(q.pad_number) == pnum)
+        pad.pad_type = 'np_thru_hole'
+        pad.drill = 1.7
+        pad.layers = ['*.Cu', '*.Mask']
+        self.assertFalse(L._pad_carries_copper(pad))
+        after = warn_rows(pcb)
+        named = [r for r in after if r.split(' ')[0] == '%s.%s' % (ref, pnum)]
+        self.assertTrue(named,
+                        'the copper-less locked pad vanished from the warning: '
+                        '%r -> %r' % (before, after))
+    # MUTATION: `continue` on `not _pad_carries_copper(p)` in the locked
+    # warning -> those rows disappear, on an INERT board.
+
     def test_the_counter_itself_fires_on_a_declaring_board(self):
         """Without this, the test above also passes if `pair` is simply never
         the method the fix calls."""
@@ -948,6 +1132,9 @@ class TestInertness(unittest.TestCase):
         finally:
             PadClearanceModel.pair = orig
         self.assertGreater(hits[0], 0)
+    # MUTATION: make the counter patch a method the fix does not call (e.g.
+    # `pair_with_source`) -> this control goes red while the inertness test
+    # above still passes, which is the point of having it.
 
 
 class TestReport(unittest.TestCase):
@@ -959,9 +1146,18 @@ class TestReport(unittest.TestCase):
             for ref, who, mm, src in rows:
                 self.assertIn(src, ('netclass', 'layer rule', 'pad override'))
                 self.assertGreater(mm, st.clearance)
+            # every source this fixture can produce is 'netclass'; assert that
+            # rather than a 3-way `assertIn` that one value satisfies
+            self.assertEqual({r[3] for r in rows}, {'netclass'})
             clause = L.format_required_clause({'required': rows})
             self.assertIn('requires', clause)
             self.assertIn('netclass', clause)
+            # the mover-vs-mover leg must contribute, or deleting it passes
+            self.assertTrue([r for r in rows if r[1].startswith('cap ')],
+                            'no mover-vs-mover row -- deleting that leg would '
+                            'leave this test green')
+    # MUTATION: delete the mover-vs-mover leg of `required_rows` -> the last
+    # assertion fails (it left 59 of 77 rows and passed before this guard).
 
     def test_only_CHARGED_pairs_are_reported(self):
         """An in-reach pair that happens to be clear is not a finding, it is the
@@ -976,6 +1172,45 @@ class TestReport(unittest.TestCase):
                             'required_rows is reporting in-reach pairs rather '
                             'than charged ones')
     # MUTATION: drop the `charged` filter in `required_rows` -> hundreds of rows.
+
+    def test_the_report_never_names_an_OFF_LAYER_track_pair(self):
+        """`required_rows` must MIRROR what was charged, not re-derive it.
+        `_seg_effs` prices a cap-pad/track pair that shares no copper layer at
+        the flat scalar (the F/B side collapse puts such pairs in `cap_segs` at
+        all); a report that resolves the requirement independently names them
+        anyway, at the netclass. check_drc grades no such pair, so every one of
+        those rows sends the reader after a violation that does not exist --
+        measured at up to 43% of the disclosure on rp2350."""
+        with tempfile.TemporaryDirectory() as td:
+            p = _stage(td, 'offrep', classes=_default_class(0.4), src=INERT)
+            pcb = parse_kicad_pcb(p)
+            st = _repair(p, pcb=pcb)
+            names = {n.net_id: n.name for n in pcb.nets.values()}
+            by_name = {v: k for k, v in names.items()}
+            rows = st.required_rows(names)
+            tracks = [r for r in rows if r[1].startswith('track ')]
+            # ON THE BRANCH: there must BE track rows and there must be
+            # off-layer pairs in reach, or this proves nothing.
+            self.assertTrue(tracks, 'no track rows at all on this fixture')
+            off_pairs = sum(
+                1 for ref, cap in st.caps.items()
+                for t in st.cap_segs[ref]
+                if not any(st._seg_layer_by_id.get(id(t)) in pl
+                           for pl in cap.pad_layers))
+            self.assertGreater(off_pairs, 0, 'no off-layer pair in any pruned '
+                                             'list -- this would pass vacuously')
+            for ref, who, mm, src in tracks:
+                nid = by_name.get(who[6:])
+                cap = st.caps[ref]
+                shared = any(
+                    any(st._seg_layer_by_id.get(id(t)) in pl
+                        for pl in cap.pad_layers)
+                    for t in st.cap_segs[ref] if t[4] == nid)
+                self.assertTrue(shared,
+                                '%s <-> %s shares no copper layer, so it is '
+                                'priced flat and must not be reported' % (ref, who))
+    # MUTATION: drop the `layer not in cap_layers[i]` guard in
+    # `required_rows`' `best()` -> phantom rows come back.
 
     def test_an_unreadable_declaration_is_disclosed_not_silent(self):
         """A FAILED read is exactly what makes a model look INERT, so the notes

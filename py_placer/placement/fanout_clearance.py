@@ -1082,8 +1082,16 @@ class _Repair:
                 return '<hole>'
             return names.get(net, str(net))
 
-        def best(floors_a, items, floor_of, net_of, only):
-            """Worst requirement, with its source, over the items on `only`."""
+        def best(floors_a, items, floor_of, net_of, only,
+                 cap_layers=None, layer_of=None, side_of=None):
+            """Worst requirement, with its source, over the items on `only`.
+
+            Takes the SAME two per-pad guards the eff builders take, because a
+            report that re-derives the price instead of mirroring it reports
+            pairs the pass never charged. Both were measured: without the
+            layer guard, up to 43% of the rows on rp2350 named a cap pad
+            against a track on a layer it does not occupy -- pairs check_drc
+            does not grade and `_seg_effs` prices at the flat scalar."""
             out = {}
             for t in items:
                 net = net_of(t)
@@ -1092,7 +1100,21 @@ class _Repair:
                 fb = floor_of(t)
                 if fb is None:
                     continue
-                for fa in floors_a:
+                # an SMD foreign pad on the other board side is skipped by
+                # _pad_shortfalls, so it charges nothing and belongs in no row
+                pside = None if side_of is None else side_of(t)
+                if pside is not None and pside != cap.side:
+                    continue
+                layer = None if layer_of is None else layer_of(t)
+                for i, fa in enumerate(floors_a):
+                    # a copper-less cap pad is graded flat, so it charges
+                    # nothing and belongs in no row
+                    if _Repair._flat_pad(cap_layers, i):
+                        continue
+                    # ...and neither does a pair that shares no copper layer
+                    if (layer is not None and cap_layers is not None
+                            and layer not in cap_layers[i]):
+                        continue
                     mm, src = pair_with_source(fa, fb)
                     if src and mm > out.get(net, (0.0, ''))[0]:
                         out[net] = (mm, src)
@@ -1117,18 +1139,21 @@ class _Repair:
                 out |= set(fn(ref, cap, x, y, rot))
                 return out
 
-            for kind, items, floor_of, net_of, charged in (
+            cl = self._cap_pad_layers(cap)
+            for kind, items, floor_of, net_of, charged, layer_of, side_of in (
                     ('pad', self.cap_foreign_pads[ref],
                      lambda t: self._fp_floor_by_id.get(id(t)), lambda t: t[4],
-                     both(self._pad_shortfalls)),
+                     both(self._pad_shortfalls), None, lambda t: t[5]),
                     ('via', self.cap_vias[ref],
                      lambda t: self._via_floor_for(t[2]), lambda t: t[2],
-                     both(self._via_shortfalls)),
+                     both(self._via_shortfalls), None, None),
                     ('track', self.cap_segs[ref],
                      lambda t: self._seg_floor_by_id.get(id(t)), lambda t: t[4],
-                     both(self._seg_shortfalls))):
+                     both(self._seg_shortfalls),
+                     lambda t: self._seg_layer_by_id.get(id(t)), None)):
                 for net, (mm, src) in best(fls, items, floor_of, net_of,
-                                           set(charged)).items():
+                                           set(charged), cl, layer_of,
+                                           side_of).items():
                     rows.append([ref, '{} {}'.format(kind, net_label(net)),
                                  round(mm, 6), src])
             # mover-vs-mover: the shortfall is a scalar per pair, so charge the
@@ -1150,8 +1175,13 @@ class _Repair:
                 if now <= EPS and was <= EPS:
                     continue
                 mm, src = 0.0, ''
-                for fa in fls:
-                    for fb in other.pad_floors:
+                theirs = self._cap_pad_layers(other)
+                for i, fa in enumerate(fls):
+                    if self._flat_pad(cl, i):
+                        continue
+                    for j, fb in enumerate(other.pad_floors):
+                        if self._flat_pad(theirs, j):
+                            continue
                         m, sc = pair_with_source(fa, fb)
                         if sc and m > mm:
                             mm, src = m, sc
@@ -1184,13 +1214,23 @@ class _Repair:
         effs = None if ref is None else self._via_effs(ref, cap, vias)
         pen = 0.0
         if effs is None:
+            # The tuple's slot is the prune OVER-reach, not a requirement, so
+            # grading it directly would charge more than any pair needs (and
+            # more than upstream's slot, which was radius + clearance). Recover
+            # the radius where we know it and grade at the flat scalar, which
+            # is what this path documents. A tuple absent from the map -- one a
+            # test assigned wholesale -- is graded exactly as injected.
+            by_id = self._via_radius_by_id
             for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-                for vx, vy, vnet, keepout in vias:
+                for v in vias:
+                    vx, vy, vnet, keepout = v
                     if vnet == net:
                         continue
+                    rec = by_id.get(id(v))
+                    ko = keepout if rec is None else rec[1] + self.clearance
                     d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
-                    if d < keepout - EPS:
-                        pen += (keepout - d)
+                    if d < ko - EPS:
+                        pen += (ko - d)
             return pen
         # #725 active path: effs[i][j] IS the pair's keep-out (via radius +
         # required clearance), precomputed -- the tuple's own keepout slot is
@@ -1551,12 +1591,16 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
         if fp is None:
             continue
         for p in fp.pads:
-            # #725: the copper predicate is the shared one. An np_thru_hole pad
-            # lists *.Cu and carries no copper, so the loose test named it here
-            # as a copper obstacle -- and would have charged its keep-clear
-            # override besides.
-            if not _pad_carries_copper(p):
+            # #725: an np_thru_hole pad lists *.Cu and carries no copper. It
+            # is still WARNED ABOUT -- upstream did, foreign_pads does, and a
+            # via inside a 1.7mm mounting hole is exactly what this warning is
+            # for -- but it is graded FLAT: its keep-clear override is not
+            # copper and must not raise the pair. Dropping it outright (the
+            # first version of this fix) removed real rows on boards that
+            # declare nothing at all.
+            if not any(str(l).endswith('.Cu') for l in p.layers):
                 continue
+            _carries = _pad_carries_copper(p)
             # ...and the RECT gets the same rect_rotation inflation _Cap and
             # foreign_pads use. This was the one pad-geometry site in the file
             # built from raw size_x/size_y, so a tilted locked pad under-blocked
@@ -1574,7 +1618,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # from the via's radius. A locked fiducial's keep-clear override is
             # exactly the case this warning exists to surface, and priced flat
             # it under-reported it.
-            pfl = st.pad_floor(p)
+            pfl = st.pad_floor(p) if _carries else None
             for vx, vy, vnet, keepout in st.vias:
                 if vnet == p.net_id:
                     continue
@@ -1881,9 +1925,21 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     def cap_floors_of(cap, rects):
         """This cap's per-pad floors, index-aligned with `rects` -- or None,
         which grades flat. Tests drive this function with a duck-typed cap that
-        carries neither the attribute nor a matching length."""
+        carries neither the attribute nor a matching length.
+
+        A pad whose `pad_layers` entry is EMPTY carries no copper, and its
+        entry comes back None so it grades flat here too. The eff builders key
+        on that same marker; without it the nudger would charge a phantom the
+        grader does not, hand itself a via nothing flagged, and print an
+        operator-facing line naming a non-violation.
+        """
         pf = getattr(cap, 'pad_floors', None)
-        return pf if (pf is not None and len(pf) == len(rects)) else None
+        if pf is None or len(pf) != len(rects):
+            return None
+        pl = getattr(cap, 'pad_layers', None)
+        if pl is None or len(pl) != len(pf):
+            return list(pf)
+        return [f if pl[i] else None for i, f in enumerate(pf)]
 
     # `all_cap_rects` is function-local, so it CAN carry the pad's floor.
     all_cap_rects = []
