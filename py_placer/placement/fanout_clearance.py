@@ -50,6 +50,12 @@ from placement.legality import (BoardOutlineGate, PadClearanceModel, PadFloor,
 
 ROTATIONS = [0.0, 90.0, 180.0, 270.0]
 EPS = 1e-6
+# The keep-out written into an eff cell for a pair sharing NO copper layer
+# (#731). Large and NEGATIVE, so _seg_shortfalls' EXISTING cheap bbox reject
+# (min(x1, x2) > bx1 + halfw) fires on the first comparison: the layer gate
+# costs the innermost loop nothing -- no extra branch, no mask row. Finite
+# rather than -inf so nothing can produce a NaN if a caller sums a row.
+_OFF_LAYER = -1.0e9
 
 # These four moved to placement/legality.py, the shared home with quench.py
 # (which carried byte-identical copies of the first two). Aliased rather than
@@ -144,7 +150,7 @@ class _Cap:
     for decoupling caps).
     """
 
-    def __init__(self, fp, courtyard_local, model=None):
+    def __init__(self, fp, courtyard_local, model=None, board_copper=None):
         self.ref = fp.reference
         self.side = 'B' if (fp.layer or '').startswith('B') else 'F'
         self.seed_x, self.seed_y = fp.x, fp.y
@@ -170,16 +176,26 @@ class _Cap:
         # makes the alignment true by construction.
         self.pad_floors = []
         self.max_floor = 0.0
-        # Per-pad COPPER LAYER sets, index-aligned like pad_floors. Needed
-        # because self.segments records only an 'F'/'B' side and files an
-        # In1.Cu track under 'F' (a pre-existing model quirk), so an F-side cap
-        # pad is compared against inner-layer tracks it can never touch. That
-        # phantom is priced at the flat scalar today; without this set the
-        # NETCLASS term -- which is layer-blind -- would raise it too, and the
-        # pass would move caps to clear copper on a layer their pads do not
-        # occupy. Measured on orangecrab at --clearance 0.1 with a Default
-        # class of 0.3: R17/R18/R5's ENTIRE graze is that phantom, 0.082mm
-        # each flat and 0.70/0.70/0.57mm raised. See _seg_effs.
+        # Per-pad COPPER LAYER sets, index-aligned like self.pads. This is
+        # what scopes a cap pad to the tracks it can actually touch (#731):
+        # check_drc grades a pad-segment pair only on their SHARED copper, and
+        # the netclass term is layer-blind, so without this set the pass both
+        # charged phantom inner-layer pairs and missed the real B.Cu/inner
+        # pairs of a through-hole pad.
+        #
+        # Built from the BOARD STACKUP alone, never from the clearance model
+        # (#731). Which copper a pad occupies is a fact about the board, not
+        # about what it declares -- and PadClearanceModel is inert unless a
+        # netclass, a .kicad_dru rule or a pad override exists. Gated on the
+        # model, as pad_floors legitimately is, this would be inert on exactly
+        # the boards carrying the most phantom: rp2350 declares none of the
+        # three, is 6 copper layers, and 2342 of its 4331 pruned pad x track
+        # pairs are off-layer, carrying 4.6685mm of phantom graze against
+        # 0.0142mm of real. `board_copper` falls back to the model's copy only
+        # so a caller passing a model and nothing else still resolves layers.
+        _cu = list(board_copper if board_copper is not None
+                   else (getattr(model, 'board_copper', None) or ()))
+        from check_drc import pad_copper_layers
         self.pad_layers = []
         for p in fp.pads:
             if not any(str(l).endswith('.Cu') for l in p.layers):
@@ -192,31 +208,30 @@ class _Cap:
             half_x = hx * c + hy * s
             half_y = hx * s + hy * c
             self.pads.append((off_x, off_y, half_x, half_y, p.net_id))
+            # The GEOMETRY filter above stays loose on purpose (see the
+            # comment), but a FLOOR must not: PadClearanceModel.pad_floor
+            # reads local_clearance unconditionally, and an np_thru_hole
+            # pad lists *.Cu while carrying no copper at all. Charging its
+            # override would move a cap to clear copper that does not
+            # exist -- and would contradict the model's own inertness
+            # rule, which refuses to ACTIVATE for an NPTH-only override
+            # (legality._pad_carries_copper, the watchy measurement).
+            # A pad that carries no copper is graded FLAT, whole stop --
+            # not merely stripped of its own override. check_drc does not
+            # grade such a pad at all, so letting the PARTNER's netclass
+            # through pair() would charge a keep-out that does not exist,
+            # which is the same defect as the off-layer phantom #731 is
+            # about. The EMPTY layer set is the marker the eff builders
+            # key on; a real copper pad always resolves at least one layer.
+            carries = _pad_carries_copper(p)
+            # Appended ALWAYS, model or not (#731), and unconditionally
+            # within the loop so the index alignment the loose geometry
+            # filter buys is preserved.
+            self.pad_layers.append(
+                frozenset(pad_copper_layers(p, _cu)) if carries else frozenset())
             if model is not None:
-                # The GEOMETRY filter above stays loose on purpose (see the
-                # comment), but a FLOOR must not: PadClearanceModel.pad_floor
-                # reads local_clearance unconditionally, and an np_thru_hole
-                # pad lists *.Cu while carrying no copper at all. Charging its
-                # override would move a cap to clear copper that does not
-                # exist -- and would contradict the model's own inertness
-                # rule, which refuses to ACTIVATE for an NPTH-only override
-                # (legality._pad_carries_copper, the watchy measurement).
-                # Zero floor, appended unconditionally so the index alignment
-                # the loose filter buys is preserved.
-                # A pad that carries no copper is graded FLAT, whole stop --
-                # not merely stripped of its own override. check_drc does not
-                # grade such a pad at all, so letting the PARTNER's netclass
-                # through pair() would charge a keep-out that does not exist,
-                # which is the same defect as the off-layer phantom below.
-                # The empty layer set is the marker the eff builders key on;
-                # a real copper pad always resolves at least one layer.
-                carries = _pad_carries_copper(p)
                 fl = model.pad_floor(p) if carries else PadFloor(0.0, 0.0, None)
                 self.pad_floors.append(fl)
-                from check_drc import pad_copper_layers
-                self.pad_layers.append(
-                    frozenset(pad_copper_layers(p, model.board_copper))
-                    if carries else frozenset())
                 mf = model.max_floor(fl)
                 if mf > self.max_floor:
                     self.max_floor = mf
@@ -451,34 +466,40 @@ class _Repair:
             self.vias.append(t)
             self._via_radius_by_id[id(t)] = (t, size / 2.0)
 
-        # --- avoidance: foreign-net tracks on the cap's own side ---
+        # --- avoidance: foreign-net tracks the cap's pads can actually TOUCH ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
         # then pull a cap onto an escape track -> a PAD-SEGMENT violation.
-        # Keyed by side so a B.Cu cap only avoids B.Cu tracks.
-        # #725: element 5 is the OVER-REACH, like self.vias[3] above. The
-        # segment's floor is keyed by its REAL layer, not by the F/B `side`
-        # collapse on the next line (which files an In1.Cu track under 'F') --
-        # a .kicad_dru rule is layer-scoped, and check_drc's pad-segment path
-        # resolves it as a single-layer REPLACE on seg.layer. The side collapse
-        # is pre-existing and deliberately left alone here.
+        # #725: element 5 is the OVER-REACH, like self.vias[3] above, and the
+        # segment's floor is keyed by its REAL layer.
+        # #731: so is element 6, which used to be the 'F'/'B' board SIDE. That
+        # collapse filed every non-B layer under 'F', so an In1.Cu track was
+        # compared against an F-side cap pad that can never touch it -- 928
+        # such pairs on orangecrab at --clearance 0.1, 0.2464mm of phantom
+        # graze at the seed, and the ENTIRE bill of R17/R18/R5. check_drc
+        # grades no such pair at all (check_pad_segment_overlap returns early
+        # when seg.layer is not in the pad's expanded copper layers). It was
+        # wrong in the other direction too: a THROUGH-HOLE cap pad's copper
+        # spans every layer, and the side test DROPPED the B.Cu and inner
+        # tracks it really does share copper with.
+        #
+        # The tuple WIDTH is unchanged (TestShapeContract pins it) and the
+        # side is now derived, in one place (_seg_side), only where a cap's
+        # real pad layers are unavailable.
         self.segments: List[Tuple[float, float, float, float, int, float, str]] = []
-        # The 7-tuple carries `side`, not the real layer, so the floor cannot be
-        # re-derived from it later -- keep it on the tuple's identity. The
-        # tuples live for this object's lifetime, so the id is stable; a tuple a
-        # test injects is simply absent and grades flat.
+        # The floor cannot be re-derived from the tuple, so keep it on the
+        # tuple's identity. The tuples live for this object's lifetime, so the
+        # id is stable; a tuple a test injects is simply absent and grades
+        # flat. (There is no companion layer map any more: the layer IS the
+        # tuple's element 6, so there is exactly one answer to "what layer is
+        # this track on". The old map was additionally gated on an ACTIVE
+        # clearance model, which is what made the layer truth vanish on the
+        # boards carrying the most phantom -- see _cap_seg_scope.)
         self._seg_floor_by_id: Dict[int, PadFloor] = {}
-        # ...and its REAL layer, for the same reason: the pruned list is built
-        # on the F/B side collapse, so _seg_effs needs the true layer to tell a
-        # pair that shares copper from one that cannot.
-        self._seg_layer_by_id: Dict[int, str] = {}
         for s in pcb_data.segments:
-            side = 'B' if (s.layer or '').startswith('B') else 'F'
             fl = self._seg_floor_for(s.net_id, s.layer)
             t = (s.start_x, s.start_y, s.end_x, s.end_y, s.net_id,
-                 s.width / 2.0 + self._item_reach(fl), side)
+                 s.width / 2.0 + self._item_reach(fl), s.layer)
             self.segments.append(t)
-            if self._floors is not None:
-                self._seg_layer_by_id[id(t)] = s.layer
             if fl is not None:
                 self._seg_floor_by_id[id(t)] = fl
 
@@ -556,7 +577,7 @@ class _Repair:
             is_cap = (ref.startswith(self._cap_prefixes) and n_copper <= 2
                       and ref not in locked)
             if is_cap:
-                cap = _Cap(fp, lb, self._floors)
+                cap = _Cap(fp, lb, self._floors, self._all_cu)
                 if self._near_any(cap.rect(), bga_bboxes, near_margin):
                     self.caps[ref] = cap
                     continue
@@ -649,7 +670,7 @@ class _Repair:
         self.cap_static: Dict[str, List[Tuple[int, Tuple]]] = {}
         # other movable caps (refs, same side) that could ever touch this one
         self.cap_caps: Dict[str, List[str]] = {}
-        # foreign-net tracks on the cap's side in reach
+        # foreign-net tracks this cap's pads SHARE COPPER WITH, in reach (#731)
         self.cap_segs: Dict[str, List[Tuple]] = {}
         # through-vias in reach (each (vx, vy, net, keepout))
         self.cap_vias: Dict[str, List[Tuple[float, float, int, float]]] = {}
@@ -700,8 +721,25 @@ class _Repair:
             # this cap's excess over the flat scalar bounds the pair.
             seg_reach = (max_displacement_cap + 2 * span + clearance
                          + max(0.0, cap_mf - clearance))
+            # #731: keep a track only if SOME pad of this cap shares its copper
+            # layer. The union is a superset of every per-pad set (see
+            # _seg_shares), so this can never drop a chargeable pair -- the
+            # list stays EXACT, as TestPruneRadiiStayExact requires. The
+            # per-pad half is applied in _seg_effs, and matters only for a cap
+            # whose pads differ (an SMD pad beside a through-hole one).
+            #
+            # When scoping is off, fall back to the OLD side collapse rather
+            # than keeping everything: check_drc still layer-scopes such a
+            # board (its routing_layers falls back to the segment-derived set,
+            # then to ['F.Cu','B.Cu']), so the placer must stay on the
+            # over-block side, not stop filtering altogether.
+            _pl, _union = self._cap_seg_scope(cap)
             for seg in self.segments:
-                if seg[6] != cap.side:
+                layer = seg[6]
+                if _union is None:
+                    if self._seg_side(layer) != cap.side:
+                        continue
+                elif layer in self._all_cu and layer not in _union:
                     continue
                 d = _point_to_seg_dist(ccx, ccy, seg[0], seg[1], seg[2], seg[3])
                 if d <= seg_reach + seg[5]:
@@ -931,7 +969,13 @@ class _Repair:
         because a board with no copper layers has no layer question to answer.
         """
         pl = getattr(cap, 'pad_layers', None)
-        if pl is None or len(pl) != len(getattr(cap, 'pad_floors', ())):
+        # #731: anchored on `pads`, NOT on `pad_floors`. pad_layers is built
+        # unconditionally and pad_floors only when the model is active, so a
+        # pad_floors-anchored check would return None on every INERT board --
+        # switching layer scoping off precisely where the phantom is largest.
+        # `pads` is the list pad_rects() is built from, so it is the alignment
+        # that actually matters.
+        if pl is None or len(pl) != len(getattr(cap, 'pads', ())):
             return None
         return pl if self._all_cu else None
 
@@ -939,6 +983,44 @@ class _Repair:
     def _flat_pad(cap_layers, i):
         """True when cap pad `i` carries no copper and must be graded flat."""
         return cap_layers is not None and not cap_layers[i]
+
+    @staticmethod
+    def _seg_side(layer):
+        """The 'F'/'B' collapse the track prune used to be keyed on, kept ONLY
+        as the fallback for a cap whose real pad layers are unavailable.
+        Byte-identical to what __init__ computed before #731."""
+        return 'B' if (layer or '').startswith('B') else 'F'
+
+    def _cap_seg_scope(self, cap):
+        """(per-pad copper layer sets, their union) for the TRACK channel, or
+        (None, None) when layer scoping is off for this cap -- a duck-typed
+        cap, a misaligned list, a board declaring no copper layers, or a cap
+        with no copper-carrying pad at all. ONE decision point, so the prune
+        and the eff matrix can never disagree about whether scoping is on."""
+        pl = self._cap_pad_layers(cap)
+        if not pl:
+            return None, None
+        u = frozenset().union(*pl)
+        return (pl, u) if u else (None, None)
+
+    def _seg_shares(self, layer, mine):
+        """True when a track on `layer` can touch a cap pad whose copper layer
+        set is `mine`. The ONE predicate the prune, the eff matrix and the
+        disclosure all resolve through, so they cannot drift (#731).
+
+          mine is None              -> scoping off for this cap; charge, as before
+          layer not in self._all_cu -> an UNKNOWN layer (including None, a
+                                       test-injected 'F'/'B', and every layer
+                                       on a board declaring no copper): charge.
+                                       Over-blocking is the only direction that
+                                       can never ship a violation.
+          mine empty                -> a copper-less pad, which check_drc grades
+                                       not at all (#725): shares nothing.
+
+        Exactness of the union prune follows: _seg_shares(L, mine[i]) implies
+        `L not in _all_cu or L in union`, so a pair the per-pad grader would
+        charge can never be pruned away."""
+        return mine is None or layer not in self._all_cu or layer in mine
 
     def _cap_floors_ok(self, cap):
         """True when this cap carries a usable, index-aligned floor list. A
@@ -966,10 +1048,21 @@ class _Repair:
 
     def _seg_effs(self, ref, cap):
         """[cap pad i][pruned segment j] final half-width KEEP-OUT -- the
-        track's half width plus that pair's required clearance -- or None."""
-        if not self._cap_floors_ok(cap):
-            return None
+        track's half width plus that pair's required clearance -- or
+        `_OFF_LAYER` for a pair that shares no copper layer (#731). None only
+        for a cap offering neither floors nor layers (the duck-typed path).
+
+        Built even when the clearance model is INERT: the layer gate is a fact
+        about the stackup, not about what the board declares. On that path
+        every on-layer cell is the tuple's own t[5] BIT-EXACTLY and pair() is
+        never called, so an inert board stays byte-identical."""
         src = self.cap_segs[ref]
+        n = len(getattr(cap, 'pads', None) or ())
+        floors_ok = self._cap_floors_ok(cap)
+        cap_layers, _union = self._cap_seg_scope(cap)
+        # Nothing to price AND nothing to gate -> the duck-typed flat path.
+        if n == 0 or (not floors_ok and cap_layers is None):
+            return None
         rec = self._cap_seg_eff.get(ref)
         if rec is not None and rec[0] is src:
             return rec[1]
@@ -977,27 +1070,30 @@ class _Repair:
         floors = [by_id.get(id(t)) for t in src]
         # t[5] is half width + the segment's own over-reach; strip it back.
         halves = [t[5] - self._item_reach(f) for t, f in zip(src, floors)]
-        # A pair that shares NO copper layer keeps the FLAT scalar. cap_segs is
-        # pruned on the 'F'/'B' side collapse, which files an In1.Cu track
-        # under 'F', so it contains F-pad/inner-track pairs that cannot touch.
-        # The dru term already scopes itself away from them (empty shared set),
-        # but the netclass term does not -- and raising a phantom is how this
-        # change would move caps for a non-violation. Charging it flat leaves
-        # the pre-existing phantom exactly as it was; removing it altogether is
-        # a separate fix to the side collapse, filed rather than folded in.
-        cap_layers = self._cap_pad_layers(cap)
-        seg_layers = [self._seg_layer_by_id.get(id(t)) for t in src]
-
-        def eff(fa, mine, j):
-            sl = seg_layers[j]
-            if mine is not None and sl is not None and sl not in mine:
-                return self.clearance
-            return self._pair_or_flat(fa, floors[j])
-
-        rows = [[halves[j] + eff(fa, None if cap_layers is None
-                                 else cap_layers[i], j)
-                 for j in range(len(src))]
-                for i, fa in enumerate(cap.pad_floors)]
+        rows = []
+        for i in range(n):
+            fa = cap.pad_floors[i] if floors_ok else None
+            mine = None if cap_layers is None else cap_layers[i]
+            flat_pad = self._flat_pad(cap_layers, i)
+            row = []
+            for j, t in enumerate(src):
+                if not self._seg_shares(t[6], mine):
+                    # #731: a pair sharing no copper layer is not repriced, it
+                    # is REMOVED. _OFF_LAYER makes _seg_shortfalls' existing
+                    # cheap bbox reject fire on its first comparison, so the
+                    # gate costs the innermost loop nothing at all.
+                    row.append(_OFF_LAYER)
+                elif fa is None and floors[j] is None:
+                    # Bit-exact: t[5] itself, not (t[5] - clearance) + clearance,
+                    # so an INERT board grades every surviving pair to the same
+                    # float it did before, and an injected tuple grades exactly
+                    # as injected. The model is never consulted on this arm.
+                    row.append(t[5])
+                elif flat_pad:
+                    row.append(halves[j] + self.clearance)
+                else:
+                    row.append(halves[j] + self._pair_or_flat(fa, floors[j]))
+            rows.append(row)
         self._cap_seg_eff[ref] = (src, rows)
         return rows
 
@@ -1111,9 +1207,15 @@ class _Repair:
                     # nothing and belongs in no row
                     if _Repair._flat_pad(cap_layers, i):
                         continue
-                    # ...and neither does a pair that shares no copper layer
-                    if (layer is not None and cap_layers is not None
-                            and layer not in cap_layers[i]):
+                    # ...and neither does a pair that shares no copper layer.
+                    # THE SAME predicate _seg_effs prices with (#731), not a
+                    # second derivation -- a report that re-derives reports
+                    # pairs the pass never charged. `layer` is None for the
+                    # pad/via kinds, and _seg_shares charges an unknown layer,
+                    # so this is a no-op for them.
+                    if not self._seg_shares(
+                            layer, None if cap_layers is None
+                            else cap_layers[i]):
                         continue
                     mm, src = pair_with_source(fa, fb)
                     if src and mm > out.get(net, (0.0, ''))[0]:
@@ -1150,7 +1252,7 @@ class _Repair:
                     ('track', self.cap_segs[ref],
                      lambda t: self._seg_floor_by_id.get(id(t)), lambda t: t[4],
                      both(self._seg_shortfalls),
-                     lambda t: self._seg_layer_by_id.get(id(t)), None)):
+                     lambda t: t[6], None)):
                 for net, (mm, src) in best(fls, items, floor_of, net_of,
                                            set(charged), cl, layer_of,
                                            side_of).items():
@@ -1278,7 +1380,8 @@ class _Repair:
         return by_net
 
     def _seg_shortfalls(self, ref, cap, x, y, rot):
-        """PER-FOREIGN-NET, same-side track clearance shortfall for a placement,
+        """PER-FOREIGN-NET track clearance shortfall for a placement, over the
+        tracks this cap's pads actually SHARE COPPER WITH (#731),
         keyed by the track's net_id (#441): {snet: sum of (halfw - dist) over that
         net's segments this cap penetrates}. A net absent from the dict is fully
         clear. halfw already includes the clearance, so a positive shortfall is a
@@ -1287,13 +1390,16 @@ class _Repair:
         shortfall drops -- the zynq_ad9364 GND<->NetR2_2 repair-pass short (a move
         that relieved a 260um DDR3_BA2 graze by dropping a GND pad 85um onto a
         previously-clear NetR2_2 track looked like a net improvement to the old
-        scalar baseline). Uses the per-cap pruned, same-side track list."""
+        scalar baseline). Uses the per-cap pruned, layer-scoped track list."""
         by_net: Dict[int, float] = {}
         segs = self.cap_segs[ref]
         effs = self._seg_effs(ref, cap)
         if effs is None:
+            # Duck-typed cap only (#731): a real _Cap always offers pads, so it
+            # always gets a matrix. There is no layer to gate on here, and an
+            # injected tuple grades exactly as injected.
             for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-                for x1, y1, x2, y2, snet, halfw, side in segs:
+                for x1, y1, x2, y2, snet, halfw, _layer in segs:
                     if snet == net:
                         continue
                     # cheap reject: the segment's bbox can't reach the pad rect
@@ -1307,10 +1413,12 @@ class _Repair:
             return by_net
         # #725 active path: effs[i][j] IS the pair's keep-out, and the cheap
         # bbox reject widens with it -- a reject left at the flat half width
-        # would silently drop the pairs this fix exists to charge.
+        # would silently drop the pairs this fix exists to charge. Since #731
+        # the row also carries the LAYER gate, as _OFF_LAYER; the same cheap
+        # reject is what makes that free.
         for i, (bx0, by0, bx1, by1, net) in enumerate(cap.pad_rects(x, y, rot)):
             row = effs[i]
-            for j, (x1, y1, x2, y2, snet, _hw, side) in enumerate(segs):
+            for j, (x1, y1, x2, y2, snet, _hw, _layer) in enumerate(segs):
                 if snet == net:
                     continue
                 halfw = row[j]
