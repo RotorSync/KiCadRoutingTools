@@ -744,6 +744,20 @@ def route_single_ended_nets(
             total_iterations += result['iterations']
             # Record success (inline version to avoid circular import)
             add_route_to_pcb_data(pcb_data, result, debug_lines=config.debug_lines)
+            # In-loop stub-debris trim (KICAD_STUB_DEBRIS_TRIM=0 reverts):
+            # prune the stub branches this route left unused and any via
+            # they leave dangling NOW -- before the obstacle-cache
+            # recompute below -- so the freed cells are routable by the
+            # very next net instead of blocking until sweep_dead_ends at
+            # cleanup. Multipoint mains keep everything: their stubs are
+            # Phase-3 landing sites.
+            if env_knobs.STUB_DEBRIS_TRIM and not result.get('is_multipoint'):
+                from pcb_modification import trim_net_stub_debris
+                _td_s, _td_v = trim_net_stub_debris(pcb_data, net_id, result,
+                                                    config)
+                if _td_s or _td_v:
+                    print(f"    stub-debris trim: {_td_s} unused stub "
+                          f"segment(s), {_td_v} dangling via(s) freed")
             from plane_fragility import fragility_on_copper_change  # #466
             fragility_on_copper_change(config, pcb_data,
                                        result.get('new_segments'),
@@ -1208,6 +1222,17 @@ def route_single_ended_nets(
                             successful += 1
                             total_iterations += retry_result['iterations']
                             add_route_to_pcb_data(pcb_data, retry_result, debug_lines=config.debug_lines)
+                            # In-loop stub-debris trim -- same rationale as
+                            # the first-pass site above.
+                            if (env_knobs.STUB_DEBRIS_TRIM
+                                    and not retry_result.get('is_multipoint')):
+                                from pcb_modification import trim_net_stub_debris
+                                _td_s, _td_v = trim_net_stub_debris(
+                                    pcb_data, net_id, retry_result, config)
+                                if _td_s or _td_v:
+                                    print(f"    stub-debris trim: {_td_s} unused "
+                                          f"stub segment(s), {_td_v} dangling "
+                                          f"via(s) freed")
                             from plane_fragility import fragility_on_copper_change  # #466
                             fragility_on_copper_change(config, pcb_data,
                                                        retry_result.get('new_segments'),

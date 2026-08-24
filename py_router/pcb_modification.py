@@ -1807,6 +1807,157 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
     return segs_removed, len(removed_via_ids), original_to_remove
 
 
+def _via_support_layers(v, segs, pads, zones, copper_layers):
+    """Copper layers on which same-net copper actually reaches the via
+    barrel: segments (body distance, not endpoint coincidence), pads
+    (plated barrel credits the whole span; SMD its own copper layers),
+    zone polygons. A via supported on <=1 layer of its span joins
+    nothing -- KiCad's own `via_dangling` rule."""
+    from check_weird import _via_span
+    span = _via_span(v, copper_layers)
+    r = (getattr(v, 'size', 0.6) or 0.6) / 2.0
+    sup = set()
+    for s in segs:
+        if s.layer in span and s.layer not in sup and _pt_seg_dist(
+                v.x, v.y, s.start_x, s.start_y,
+                s.end_x, s.end_y) < r + s.width / 2 - 1e-6:
+            sup.add(s.layer)
+    for p in pads:
+        if getattr(p, 'pad_type', '') == 'np_thru_hole':
+            continue
+        if p.drill and p.drill > 0:
+            on = set(span)
+        else:
+            pl = set(p.layers or [])
+            on = set(span) if any('*' in L for L in pl) else (span & pl)
+        if not on or on <= sup:
+            continue
+        px = getattr(p, 'global_x', 0.0)
+        py = getattr(p, 'global_y', 0.0)
+        ps = max(getattr(p, 'size_x', 0.5), getattr(p, 'size_y', 0.5))
+        if math.hypot(v.x - px, v.y - py) < ps / 2 + r:
+            sup |= on
+    if zones:
+        from check_connected import point_in_polygon
+        for z in zones:
+            if z.layer in span and z.layer not in sup and point_in_polygon(
+                    v.x, v.y, z.polygon):
+                sup.add(z.layer)
+    return sup & span
+
+
+def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config):
+    """In-loop stub-debris trim: the moment a net's route COMMITS, prune
+    the branches of its own pre-existing stub tree the route left unused
+    -- and any via those branches leave DANGLING (same-net copper on <=1
+    layer of its span).
+
+    Timing is the point (#622): sweep_dead_ends does this board-wide but
+    runs in the post-route cleanup, AFTER every net has routed -- so an
+    orphaned fanout tail, and worse its via barrel (which blocks every
+    layer), holds its space against ALL later nets and is only swept
+    when nobody can use it anymore. This runs between
+    add_route_to_pcb_data and update_net_obstacles_after_routing, so the
+    freed cells never enter the recomputed obstacle cache and the very
+    NEXT net can route through them. Measured motive (allwinner DDR
+    microscope): a member attaching at its ball orphans its escape stub;
+    the tail plus the ball via then blocked the under-field channels its
+    own siblings needed.
+
+    Safety mirrors sweep_dead_ends: per-segment connectivity-validated
+    prune (_safe_prune_net), soft-joint restore, graphics and LOCKED
+    copper anchored (never removed), and via drops verified by a whole-
+    net before/after connectivity check (locked vias exempt). Mutates
+    pcb_data and the result's write-lists in place; input copper removed
+    here leaves the written output via the #220/#284 stale-input strip,
+    whose reference snapshot freezes later (at cleanup); in
+    --keep-input-copper runs (config._keep_input_copper) input copper is
+    read-only. Returns (segments_removed, vias_removed).
+    """
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    if not pads:
+        return 0, 0
+    net_segs = [s for s in pcb_data.segments if s.net_id == net_id]
+    net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
+    if not net_segs and not net_vias:
+        return 0, 0
+    zones = [z for z in (getattr(pcb_data, 'zones', []) or [])
+             if z.net_id == net_id]
+    _zcv = None
+    _zfa = None
+    if zones:
+        from check_connected import make_real_fill_validator
+        _fvb = {}
+        _zcv = make_real_fill_validator(pcb_data, net_id, shared_buckets=_fvb)
+        _zfa = make_model_fill_anchor(
+            pcb_data, net_id,
+            fallback=make_real_fill_validator(pcb_data, net_id, margin=0.02,
+                                              shared_buckets=_fvb))
+    from connectivity import COINCIDENCE_TOL as _tol
+    _keep_input = bool(getattr(config, '_keep_input_copper', False))
+    _new_seg_ids = {id(s) for s in (result.get('new_segments') or [])}
+    _new_via_ids = {id(v) for v in (result.get('new_vias') or [])}
+    anchor = [s for s in net_segs
+              if getattr(s, 'graphic', False) or getattr(s, 'locked', False)
+              or (_keep_input and id(s) not in _new_seg_ids)]
+    prunable = [s for s in net_segs if id(s) not in {id(a) for a in anchor}]
+    kept, removed = _safe_prune_net(net_id, prunable, net_vias, pads, zones,
+                                    anchor_segments=anchor or None,
+                                    zone_credit_validator=_zcv,
+                                    fill_anchor_validator=_zfa,
+                                    aggressive=True, tol=_tol,
+                                    pcb_data=pcb_data)
+    kept, removed = _restore_soft_joint_bridges(list(kept) + anchor, removed,
+                                                net_vias, pads)
+    removed = [s for s in removed if not getattr(s, 'graphic', False)
+               and not getattr(s, 'locked', False)]
+    kept_all = [s for s in net_segs
+                if id(s) not in {id(x) for x in removed}]
+
+    # Dangling-via pass over the post-prune copper. Locked vias exempt.
+    copper_layers = pcb_data.board_info.copper_layers or ['F.Cu', 'B.Cu']
+    via_candidates = [
+        v for v in net_vias
+        if not getattr(v, 'locked', False)
+        and not (_keep_input and id(v) not in _new_via_ids)
+        and len(_via_support_layers(v, kept_all, pads, zones,
+                                    copper_layers)) <= 1]
+    if via_candidates:
+        from check_connected import check_net_connectivity
+        keep_v = [v for v in net_vias
+                  if id(v) not in {id(c) for c in via_candidates}]
+        before = check_net_connectivity(net_id, kept_all, net_vias, pads,
+                                        zones, zone_credit_validator=_zcv,
+                                        pcb_data=pcb_data)
+        after = check_net_connectivity(net_id, kept_all, keep_v, pads, zones,
+                                       zone_credit_validator=_zcv,
+                                       pcb_data=pcb_data)
+        if (before.get('connected') and not after.get('connected')) or \
+           len(after.get('disconnected_pads') or []) > \
+           len(before.get('disconnected_pads') or []) or \
+           (after.get('num_components') or 1) > \
+           (before.get('num_components') or 1):
+            via_candidates = []
+
+    if not removed and not via_candidates:
+        return 0, 0
+    rm_seg_ids = {id(s) for s in removed}
+    rm_via_ids = {id(v) for v in via_candidates}
+    if rm_seg_ids:
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in rm_seg_ids]
+        segs = result.get('new_segments')
+        if segs:
+            result['new_segments'] = [s for s in segs
+                                      if id(s) not in rm_seg_ids]
+    if rm_via_ids:
+        pcb_data.vias = [v for v in pcb_data.vias if id(v) not in rm_via_ids]
+        vias = result.get('new_vias')
+        if vias:
+            result['new_vias'] = [v for v in vias if id(v) not in rm_via_ids]
+    return len(rm_seg_ids), len(rm_via_ids)
+
+
 def collapse_strict_redundant(results, pcb_data: PCBData, scope_net_ids=None,
                               keep_input_copper: bool = False
                               ) -> Tuple[int, List[Segment]]:

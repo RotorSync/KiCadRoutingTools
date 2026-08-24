@@ -69,6 +69,14 @@ def refresh() -> None:
     g['BUS_MULTIPOINT_SPAN'] = _on_default('KICAD_BUS_MULTIPOINT_SPAN')
     g['BARE_BALL_ZONE_EXEMPT'] = _on_default('KICAD_BARE_BALL_ZONE_EXEMPT')
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
+    # In-loop stub-debris trim (default ON, KICAD_STUB_DEBRIS_TRIM=0
+    # reverts): when a route commits, immediately prune the unused
+    # branches of its own pre-existing stub tree AND any via they leave
+    # dangling, so the freed cells are routable by the very next net --
+    # sweep_dead_ends does the same board-wide but only at cleanup,
+    # after every net has already routed around the debris (and it never
+    # touches input vias at all).
+    g['STUB_DEBRIS_TRIM'] = _on_default('KICAD_STUB_DEBRIS_TRIM')
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     # #648 oracle source union: kicad-cli DRC gates the demand set, the

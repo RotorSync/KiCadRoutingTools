@@ -1104,6 +1104,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         print(f"Same-net pad via clearance {_snpc581:g}mm (from {_snpc_src}, "
               f"#581): vias stay off same-net pads")
     config = GridRouteConfig(**config_kwargs)
+    # The in-loop stub-debris trim must treat input copper as read-only in
+    # --keep-input-copper runs; the loop only sees config, so carry it there.
+    if keep_input_copper:
+        object.__setattr__(config, '_keep_input_copper', True)
 
     try:
         config.bus_rip_resistance = float(
