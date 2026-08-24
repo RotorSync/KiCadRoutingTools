@@ -331,16 +331,27 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           base_clearance=None, net_clearances=None,
                           window=_FOREIGN_PAD_WINDOW):
-    """Min foreign-pad edge distance sampled along a (short, terminal) segment.
+    """Min foreign-pad edge distance from a (short, terminal) segment -- EXACT.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
     manufactures phantom grazes (#315). Vectorized: windows pads to the segment's
-    bbox + margin, then evaluates ALL sample points against them in one matrix op.
+    bbox + margin, then computes the exact min edge distance from the segment to
+    each windowed pad in one matrix op (no sampling -- see below).
     `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
     local-clearance excess so unchanged caller thresholds honor overrides.
     `net_clearances` (#436): see _pt_foreign_pad_dist -- also folds each foreign
     pad's netclass excess so cross-class pad grazes are enforced.
-    `window` (mm): per-call scan radius (see _pt_foreign_pad_dist)."""
+    `window` (mm): per-call scan radius (see _pt_foreign_pad_dist).
+
+    Exactness: the old kernel SAMPLED the segment at 0.02mm pitch and took the
+    min rounded-rect SDF over the samples. Sampling can MISS a narrow violation
+    that falls between samples; exact geometry cannot. This computes the true
+    min over the whole segment: rotate the segment into each pad's LOCAL frame
+    (R(-rot); identity for axis-aligned pads), where the inner rect (half-extents
+    shrunk by corner_r) is axis-aligned. The min distance from a segment to a
+    rectangle is the min over its 4 edges of segment-to-segment distance (0 when
+    the segment crosses an edge or lies inside), exact for degenerate inner rects
+    too (circle -> point, oval -> capsule axis); subtract corner_r."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -354,31 +365,74 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     R = window
     # Pad bbox (centre +/- global half-extent, true bbox for tilted pads) must
     # reach within R of the segment bbox; a pad excluded here is > R from every
-    # sample point on the segment.
+    # point on the segment.
     near = ((cx + ex >= min(x1, x2) - R) & (cx - ex <= max(x1, x2) + R) &
             (cy + ey >= min(y1, y2) - R) & (cy - ey <= max(y1, y2) + R) & (nids != net_id))
     if not near.any():
         return best_custom
     fcx, fcy, fhx, fhy, fcr = cx[near], cy[near], hx[near], hy[near], cr[near]
     frc, frs = rc[near], rs[near]
-    # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
-    # rotated by R(-rot); identity for axis-aligned pads): shrink the
-    # half-extents by the corner radius, take the outside distance to that
-    # inner rect, then subtract the radius.
-    ddx = sx[:, None] - fcx[None, :]
-    ddy = sy[:, None] - fcy[None, :]
-    lx = np.abs(ddx * frc[None, :] + ddy * frs[None, :])
-    ly = np.abs(-ddx * frs[None, :] + ddy * frc[None, :])
-    dx = np.maximum(lx - (fhx[None, :] - fcr[None, :]), 0.0)
-    dy = np.maximum(ly - (fhy[None, :] - fcr[None, :]), 0.0)
-    d = np.hypot(dx, dy) - fcr[None, :]
+    # Rotate the segment into each pad's LOCAL frame.
+    ddx1 = x1 - fcx; ddy1 = y1 - fcy
+    ddx2 = x2 - fcx; ddy2 = y2 - fcy
+    lx1 = ddx1 * frc + ddy1 * frs; ly1 = -ddx1 * frs + ddy1 * frc
+    lx2 = ddx2 * frc + ddy2 * frs; ly2 = -ddx2 * frs + ddy2 * frc
+    ihx = fhx - fcr; ihy = fhy - fcr   # inner-rect half-extents (>= 0)
+    # Exact min distance from the segment to the inner rect: min over its 4
+    # edges of segment-to-segment distance (0 when crossed / inside). Corner-to-
+    # segment distances are shared across adjacent edges (12 point-to-segment
+    # ops vs 16 for four independent capsule calls); exact for degenerate inner
+    # rects too (circle -> point, oval -> capsule axis).
+    def _pt_seg(px, py):
+        _dx = lx2 - lx1; _dy = ly2 - ly1
+        _L2 = _dx * _dx + _dy * _dy
+        _safe = np.where(_L2 > 0, _L2, 1.0)
+        _t = np.clip(((px - lx1) * _dx + (py - ly1) * _dy) / _safe, 0.0, 1.0)
+        return np.hypot(px - (lx1 + _t * _dx), py - (ly1 + _t * _dy))
+    c1x = -ihx; c1y = -ihy; c2x = ihx; c2y = -ihy
+    c3x = ihx; c3y = ihy; c4x = -ihx; c4y = ihy
+    dc1 = _pt_seg(c1x, c1y); dc2 = _pt_seg(c2x, c2y)
+    dc3 = _pt_seg(c3x, c3y); dc4 = _pt_seg(c4x, c4y)
+    def _end_edges(px, py):
+        def _pe(ex1, ey1, ex2, ey2):
+            _dex = ex2 - ex1; _dey = ey2 - ey1
+            _L = _dex * _dex + _dey * _dey
+            _safe = np.where(_L > 0, _L, 1.0)
+            _t = np.clip(((px - ex1) * _dex + (py - ey1) * _dey) / _safe, 0.0, 1.0)
+            return np.hypot(px - (ex1 + _t * _dex), py - (ey1 + _t * _dey))
+        return (_pe(c1x, c1y, c2x, c2y), _pe(c2x, c2y, c3x, c3y),
+                _pe(c3x, c3y, c4x, c4y), _pe(c4x, c4y, c1x, c1y))
+    eA = _end_edges(lx1, ly1); eB = _end_edges(lx2, ly2)
+    d_e1 = np.minimum(np.minimum(dc1, dc2), np.minimum(eA[0], eB[0]))
+    d_e2 = np.minimum(np.minimum(dc2, dc3), np.minimum(eA[1], eB[1]))
+    d_e3 = np.minimum(np.minimum(dc3, dc4), np.minimum(eA[2], eB[2]))
+    d_e4 = np.minimum(np.minimum(dc4, dc1), np.minimum(eA[3], eB[3]))
+    d_inner = np.minimum(np.minimum(d_e1, d_e2), np.minimum(d_e3, d_e4))
+    # Proper crossing of any edge -> segment enters the rect -> distance 0.
+    sdx = lx2 - lx1; sdy = ly2 - ly1
+    def _cross(ex1, ey1, ex2, ey2):
+        hdx = ex2 - ex1; hdy = ey2 - ey1
+        o1 = sdx * (ey1 - ly1) - sdy * (ex1 - lx1)
+        o2 = sdx * (ey2 - ly1) - sdy * (ex2 - lx1)
+        o3 = hdx * (ly1 - ey1) - hdy * (lx1 - ex1)
+        o4 = hdx * (ly2 - ey1) - hdy * (lx2 - ex1)
+        return (o1 * o2 < 0) & (o3 * o4 < 0)
+    crs = (_cross(c1x, c1y, c2x, c2y) | _cross(c2x, c2y, c3x, c3y) |
+           _cross(c3x, c3y, c4x, c4y) | _cross(c4x, c4y, c1x, c1y))
+    d_inner = np.where(crs, 0.0, d_inner)
+    # A segment lying entirely INSIDE the inner rect (both endpoints inside)
+    # crosses no edge; its distance to the rect is 0.
+    in1 = (lx1 >= -ihx) & (lx1 <= ihx) & (ly1 >= -ihy) & (ly1 <= ihy)
+    in2 = (lx2 >= -ihx) & (lx2 <= ihx) & (ly2 >= -ihy) & (ly2 <= ihy)
+    d_inner = np.where(in1 | in2, 0.0, d_inner)
+    d = d_inner - fcr
     if base_clearance is not None:
         excess = np.maximum(plc[near] - base_clearance, 0.0)
         if net_clearances:
             fcls = np.array([max(0.0, net_clearances.get(int(f), base_clearance) - base_clearance)
                              for f in nids[near]], dtype=float)
             excess = np.maximum(excess, fcls)
-        d = d - excess[None, :]
+        d = d - excess
     return min(float(np.min(d)), best_custom)
 
 
@@ -427,10 +481,10 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           track_clearances=None, window=_FOREIGN_PAD_WINDOW):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
-    the terminal centreline to the foreign copper EDGE (point-to-segment distance to
-    the foreign centreline minus the foreign half-width), sampled along the terminal
-    and vectorized over windowed foreign segments. A negative result (centreline
-    inside foreign copper) is returned as-is so the caller necks to the floor.
+    the terminal centreline to the foreign copper EDGE (true segment-to-segment
+    distance to the foreign centreline minus the foreign half-width), EXACT -- no
+    sampling. A negative result (centreline inside foreign copper) is returned as-is
+    so the caller necks to the floor.
 
     #436: when `net_clearances` (net_id -> class clearance mm) is given, each
     foreign segment's netclass EXCESS over `base_clearance` (max(0, classF -
@@ -443,11 +497,17 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     folds the SAME way, raise-only on top of the class value -- this channel is
     seg-vs-seg ONLY, which is exactly what this helper measures, so a caller
     passing it here must NOT pass it to the pad/via helpers (KiCad's
-    Type=='track' binds tracks to tracks). Inert when the map is empty."""
+    Type=='track' binds tracks to tracks). Inert when the map is empty.
+
+    Exactness: the old kernel SAMPLED the terminal at 0.02mm pitch and took the
+    min point-to-segment distance over the samples. Sampling can MISS a narrow
+    violation that falls between samples; exact geometry cannot. This computes
+    the true min over the whole segment via _seg_capsule_axis_dist (min of the
+    four endpoint-to-other-segment distances, 0 on proper crossing), then
+    subtracts each foreign half-width."""
     nid, fax, fay, fbx, fby, fhw = _foreign_seg_arrays(pcb_data, layer)
     if nid.size == 0:
         return 1e9
-    n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     R = window
     fminx = np.minimum(fax, fbx) - fhw; fmaxx = np.maximum(fax, fbx) + fhw
     fminy = np.minimum(fay, fby) - fhw; fmaxy = np.maximum(fay, fby) + fhw
@@ -456,19 +516,9 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if not near.any():
         return 1e9
     ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
-    t = np.linspace(0.0, 1.0, n + 1)
-    sx = x1 + (x2 - x1) * t
-    sy = y1 + (y2 - y1) * t
-    abx = bx - ax; aby = by - ay                      # (M,)
-    L2 = abx * abx + aby * aby                         # (M,)
-    pax = sx[:, None] - ax[None, :]                    # (S, M)
-    pay = sy[:, None] - ay[None, :]
-    safe_L2 = np.where(L2 > 0, L2, 1.0)
-    tt = (pax * abx[None, :] + pay * aby[None, :]) / safe_L2[None, :]
-    tt = np.where(L2[None, :] > 0, np.clip(tt, 0.0, 1.0), 0.0)
-    projx = ax[None, :] + tt * abx[None, :]
-    projy = ay[None, :] + tt * aby[None, :]
-    dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
+    # Exact segment-to-segment distance from the query segment to each foreign
+    # centreline (0 on proper crossing), minus the foreign half-width.
+    d = _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by) - hw
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
         # #549: the track-rule value raises the same per-foreign requirement.
@@ -479,8 +529,8 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                max(_nc.get(int(f), base_clearance),
                                    _tc.get(int(f), 0.0)) - base_clearance)
                            for f in fnid], dtype=float)
-        dist = dist - excess[None, :]
-    return float(np.min(dist))
+        d = d - excess
+    return float(np.min(d))
 
 
 def _foreign_via_arrays(pcb_data):
