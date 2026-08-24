@@ -2401,6 +2401,50 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # never off the board / into a cutout / inside the edge margin (#370 B3)
         if not edge_ok_point(nx, ny, vr):
             return False
+        # #737: the relocated via's COPPER against copper-less (NPTH) holes.
+        # This function had no such test at all. Its only drilled-pad gate is
+        # the DRILL-to-drill one below, which measures the DRILL, so it covered
+        # the annular ring only while
+        #
+        #     ring = (size - drill) / 2 <= H2H_PAD - npth_clr
+        #
+        # -- 0.25 at the fab floor, but only 0.20 at the shipped --clearance
+        # 0.25, and 0 at clearance >= 0.45. Past that the pass parked ring
+        # copper inside a mounting hole's keep-out, and this pass WRITES the
+        # via (placement/writer.py, and the plugin's pcbnew mirror). Measured
+        # on a rig at --clearance 0.1: a 1.4/0.3 via relocated to 0.05mm of
+        # copper-to-hole-wall gap, which check_drc reports as a via-hole
+        # violation of exactly that.
+        #
+        # Same helper, same floor, same own-net exemption and the same 1e-4 as
+        # connector_clear's gate below, so the two sibling validators cannot
+        # disagree about which holes exist or what one costs -- and the gate
+        # order in the two now reads alike (edge, hole, cap rects, board pads,
+        # vias, segments). `board_pads` was the cheaper source and is the wrong
+        # one: it drops the pads of movable caps, which the helper keeps. That
+        # buys AGREEMENT between the siblings, not truth -- both read pre-move
+        # pad coordinates, so neither is right about a cap already relocated.
+        # A degenerate segment is the point case: _seg_capsule_axis_dist guards
+        # L2 == 0 and its crossing test is strict, so a zero-length segment
+        # cannot report a spurious crossing.
+        #
+        # The drill test below stays net-INDEPENDENT and keeps its own floor:
+        # drill-to-drill is a machine constraint, this is an etch constraint,
+        # and check_drc's via-hole arm makes the same own-net exemption
+        # (check_drc.py, `if via.net_id == hnet: continue`).
+        #
+        # KNOWN GAP, deliberately not closed here, exactly as at the cap
+        # keep-out site above: neither this gate nor the sibling honours the
+        # hole pad's OWN `local_clearance`, which check_drc does honour, so
+        # both under-block by `lc - npth_clr` on such a pad. That is #730 --
+        # a wrong VALUE, where this is a missing GATE -- and closing it here
+        # would move a number #730 needs to move in one place.
+        #
+        # NOT a reversal of #617. #617 measured RAISING this pass's hole floor
+        # to a board's DECLARED min_hole_clearance and refused it; the floor
+        # here is still the flat npth_clr, deliberately NOT st.npth_floor.
+        if _seg_foreign_hole_dist(pcb_data, v.net_id, nx, ny, nx, ny) <                 npth_clr + vr - 1e-4:
+            return False
         for (bx0, by0, bx1, by1, net, _cl, pfl) in all_cap_rects:
             # via barrel spans all layers: no layer gate here
             if net != v.net_id and _point_to_rect_dist(
