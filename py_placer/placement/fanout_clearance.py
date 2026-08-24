@@ -189,9 +189,10 @@ class _Cap:
         # netclass, a .kicad_dru rule or a pad override exists. Gated on the
         # model, as pad_floors legitimately is, this would be inert on exactly
         # the boards carrying the most phantom: rp2350 declares none of the
-        # three, is 6 copper layers, and 2342 of its 4331 pruned pad x track
+        # three, is 6 copper layers, and 2342 of its 4468 pruned pad x track
         # pairs are off-layer, carrying 4.6685mm of phantom graze against
-        # 0.0142mm of real. `board_copper` falls back to the model's copy only
+        # 0.0142mm of real. (Both figures count same-net pairs; excluding them
+        # it is 2238 of 4331. Mixing the two conventions is easy and wrong.) `board_copper` falls back to the model's copy only
         # so a caller passing a model and nothing else still resolves layers.
         _cu = list(board_copper if board_copper is not None
                    else (getattr(model, 'board_copper', None) or ()))
@@ -406,7 +407,35 @@ class _Repair:
         # intersecting with all-copper reproduces that exactly (blind vias
         # included). Never None here -- PadClearanceModel.pair does
         # `fb.layers or ()`, and an EMPTY shared set discards every dru rule.
-        self._all_cu = frozenset(pcb_data.board_info.copper_layers or ())
+        # #731: resolved through the SAME three-level fallback check_drc's
+        # run_drc uses (check_drc.py: filter to .Cu -> the layers segments
+        # actually sit on -> ['F.Cu','B.Cu']), because this set is what decides
+        # whether layer scoping is on at all. A board whose `(layers ...)`
+        # stanza yields no copper -- kicad_parser's regex has produced that in
+        # the field, see its `In1(GND).Cu` note -- would otherwise switch
+        # scoping off and fall back to the 'F'/'B' side collapse. That is NOT
+        # the safe direction it looks like: check_drc still expands a `*.Cu`
+        # pad over the segment-derived layers and grades it, while the side
+        # collapse DROPS every B.Cu and inner track a through-hole cap pad
+        # shares copper with -- an UNDER-block, and the very mirror bug #731
+        # exists to fix. Measured on rp2350 with the copper list cleared and
+        # cap pads made through-hole: 280 pairs check_drc grades that the
+        # side-collapse fallback ignores, byte-identical to the pre-#731 count.
+        # sorted(), not list(set(...)): string hashing is randomized per
+        # process and this list feeds pad-layer expansion (the same reason
+        # check_drc sorts it).
+        _cu = [l for l in (pcb_data.board_info.copper_layers or [])
+               if str(l).endswith('.Cu')]
+        if not _cu:
+            _cu = sorted({s.layer for s in pcb_data.segments
+                          if (s.layer or '').endswith('.Cu')})
+        if not _cu:
+            _cu = ['F.Cu', 'B.Cu']
+        self._all_cu = frozenset(_cu)
+        # The ORDERED list is what pad-layer expansion consumes; `_all_cu` is
+        # the membership test. Keeping both means `*.Cu` never resolves through
+        # a set whose iteration order varies run to run.
+        self._all_cu_ordered = list(_cu)
         self._via_floor: Dict[int, PadFloor] = {}
         self._seg_floor: Dict[Tuple[int, str], PadFloor] = {}
         # #617: KiCad's copper-to-hole rule is the BOARD's `min_hole_clearance`
@@ -577,7 +606,7 @@ class _Repair:
             is_cap = (ref.startswith(self._cap_prefixes) and n_copper <= 2
                       and ref not in locked)
             if is_cap:
-                cap = _Cap(fp, lb, self._floors, self._all_cu)
+                cap = _Cap(fp, lb, self._floors, self._all_cu_ordered)
                 if self._near_any(cap.rect(), bga_bboxes, near_margin):
                     self.caps[ref] = cap
                     continue
@@ -728,11 +757,17 @@ class _Repair:
             # per-pad half is applied in _seg_effs, and matters only for a cap
             # whose pads differ (an SMD pad beside a through-hole one).
             #
-            # When scoping is off, fall back to the OLD side collapse rather
-            # than keeping everything: check_drc still layer-scopes such a
-            # board (its routing_layers falls back to the segment-derived set,
-            # then to ['F.Cu','B.Cu']), so the placer must stay on the
-            # over-block side, not stop filtering altogether.
+            # The `_union is None` arm is a fallback for a cap that offers no
+            # copper pad at all -- cap detection admits n_copper == 0 (a
+            # paste-only C-prefixed part). Such a cap has an empty pad_rects,
+            # so NOTHING it keeps is ever graded and the arm cannot change an
+            # outcome; it keeps the old side filter purely so the pruned list
+            # stays the size it always was. It is NOT reachable for an empty
+            # copper list any more: `_all_cu` above resolves through
+            # check_drc's own three-level fallback and is never empty, which
+            # is deliberate -- falling back to the side collapse there would
+            # DROP the B.Cu and inner tracks a through-hole cap pad shares
+            # copper with, an under-block (measured: 280 pairs on rp2350).
             _pl, _union = self._cap_seg_scope(cap)
             for seg in self.segments:
                 layer = seg[6]
@@ -1000,8 +1035,16 @@ class _Repair:
         pl = self._cap_pad_layers(cap)
         if not pl:
             return None, None
-        u = frozenset().union(*pl)
-        return (pl, u) if u else (None, None)
+        # An EMPTY union means every pad of this cap is copper-LESS (an NPTH
+        # keep-out). It must NOT collapse to "scoping off" (#731 review): that
+        # switched the guard off for the TRACK channel alone, so `_flat_pad`
+        # read False and those pads were charged at the partner's netclass --
+        # reinstating, in one channel, exactly the phantom 4bbfa4de removed
+        # from every other. Measured on a staged orangecrab with R17's pads set
+        # to np_thru_hole at a Default class of 0.4: 52 track cells charged at
+        # 0.4 while the pad channel correctly charged the flat 0.1. check_drc
+        # grades none of them -- it skips a copper-less pad outright.
+        return pl, frozenset().union(*pl)
 
     def _seg_shares(self, layer, mine):
         """True when a track on `layer` can touch a cap pad whose copper layer
@@ -1090,10 +1133,12 @@ class _Repair:
                     # resolver OUT of the inert path entirely -- _pair_or_flat
                     # is not called, so an inert board cannot start consulting
                     # a model, and an injected tuple grades exactly as
-                    # injected. (The arithmetic round-trip happens to be
-                    # float-exact on every cell measured -- 0 of 1063 on
-                    # rp2350 -- so this is about the call, not about the
-                    # rounding.)
+                    # injected. NB this is about the CALL, not the
+                    # rounding: the arithmetic round-trip turns out to be
+                    # float-exact everywhere measured (0 of rp2350's 1063
+                    # segment round-trips DIFFER, and 0 of orangecrab's 618),
+                    # which is precisely why an equality assertion cannot tell
+                    # the two forms apart and the test spies the call instead.
                     row.append(t[5])
                 elif flat_pad:
                     row.append(halves[j] + self.clearance)
@@ -1401,8 +1446,10 @@ class _Repair:
         segs = self.cap_segs[ref]
         effs = self._seg_effs(ref, cap)
         if effs is None:
-            # Duck-typed cap only (#731): a real _Cap always offers pads, so it
-            # always gets a matrix. There is no layer to gate on here, and an
+            # No matrix: a duck-typed cap, or a real _Cap with no copper pad
+            # at all (cap detection admits n_copper == 0, e.g. a paste-only
+            # C-prefixed part -- whose pad_rects is empty, so this loop does
+            # nothing either way). There is no layer to gate on here, and an
             # injected tuple grades exactly as injected.
             for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
                 for x1, y1, x2, y2, snet, halfw, _layer in segs:

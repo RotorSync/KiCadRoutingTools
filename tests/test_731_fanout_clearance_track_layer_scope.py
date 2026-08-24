@@ -23,11 +23,14 @@ Conventions this file follows (from #697/#725 and CLAUDE.md):
     "and this one still is".
 
 Nothing here shells out or drives a CLI: it runs entirely in-process in ~25 s.
-`run_all.is_integration` classifies by grepping the SOURCE for `run_utils` and
-the name of the standard sub-process module, and this file NAMES those markers
-in prose (including in this sentence), which is how the first version of the
-#725 file got bucketed as integration and silently skipped under `--fast`.
-Hence the explicit opt-out below.
+`run_all.is_integration` classifies by grepping the SOURCE for the literal
+strings `import run_utils`, `from run_utils` and the name of the standard
+sub-process module. This file contains NONE of them as written -- the prose
+above is hyphenated and unqualified on purpose -- so the opt-out below is
+belt-and-braces, not load-bearing: it is here so that a later edit which does
+introduce one of those strings cannot silently reclassify the file and skip it
+under `--fast`. That is not hypothetical; it is what happened to the first
+version of the #725 file (6c2096c6).
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ RUN_ALL_FAST_OK = True
 
 import copy
 import inspect
+import io
 import os
 import sys
 import unittest
@@ -151,8 +155,12 @@ class TestTheTruthTable(unittest.TestCase):
             self.assertAlmostEqual(pen, 0.0, places=9,
                                    msg='%s track charged %.6f against an F.Cu '
                                        'pad' % (layer, pen))
-    # MUTATION: revert the prune to `if seg[6] != cap.side: continue` -> every
-    # arm charges BITE (0.05).
+    # MUTATION: `_seg_shares` -> `return True` -> every arm charges BITE
+    # (0.05). NB reverting the PRUNE alone does NOT kill this: the gate is
+    # two-layer (prune + `_seg_effs`), and with the grading half intact the
+    # pair is still priced `_OFF_LAYER` and billed nothing. Only
+    # `test_no_pruned_pair_is_one_check_drc_would_IGNORE` sees a prune-only
+    # revert -- it fires there at exactly 928.
 
     def test_the_SAME_geometry_on_F_Cu_IS_still_charged(self):
         """The negative control. Without it, a build that deleted track grading
@@ -311,7 +319,8 @@ class TestTheSeedPhantomIsGone(unittest.TestCase):
                                    0.0, places=9, msg='%s track graze' % ref)
             self.assertAlmostEqual(st.graze_penalty(ref, cap, x, y, rot),
                                    0.0, places=9, msg='%s total' % ref)
-    # MUTATION: revert the prune -> each reads 0.0821.
+    # MUTATION: `_seg_shares` -> `return True` -> each reads 0.0821. (A
+    # prune-only revert leaves these green; see the note above.)
 
     def test_the_boards_whole_seed_track_graze_is_zero_and_was_not(self):
         """0.246393mm before #731, every micron of it off-layer: this board has
@@ -326,7 +335,8 @@ class TestTheSeedPhantomIsGone(unittest.TestCase):
                                    % (total, PRE_FIX_PHANTOM_MM))
         # ON THE BRANCH: there must be tracks in the pruned lists at all.
         self.assertGreater(sum(len(v) for v in st.cap_segs.values()), 0)
-    # MUTATION: revert the prune -> the total reads 0.246393.
+    # MUTATION: `_seg_shares` -> `return True` -> the total reads 0.246393.
+    # (A prune-only revert leaves this green; see the note above.)
 
 
 class TestTheInertPath(unittest.TestCase):
@@ -449,8 +459,10 @@ class TestTheInertPath(unittest.TestCase):
         self.assertEqual(sorted(r['unresolved']), ['C23'])
         self.assertEqual(sorted(r['resolved']), ['C18'])
         self.assertEqual(r['required'], [], 'an inert board discloses nothing')
-    # MUTATION: any revert of the prune, the unconditional pad_layers, or the
-    # `_cap_pad_layers` anchor -> the 7-ref unresolved list comes back.
+    # MUTATION: `_seg_shares` -> `return True`, or reverting the
+    # unconditional pad_layers, or the `_cap_pad_layers` anchor -> the 7-ref
+    # unresolved list comes back. (A prune-only revert leaves this green: the
+    # grading half still zeroes the phantom.)
 
 
 class TestTheOffSwitches(unittest.TestCase):
@@ -513,34 +525,232 @@ class TestTheOffSwitches(unittest.TestCase):
     # MUTATION: delete the `_seg_shares` branch in `_seg_effs` -> this reads
     # BITE (0.05) while every board-level test stays green.
 
-    def test_a_board_with_NO_copper_layers_falls_back_to_the_SIDE_collapse(self):
-        """`pad_copper_layers(p, [])` resolves nothing for a `*.Cu` pad, so
-        every pad would read copper-less and every pair would take the
-        off-layer path -- an UNDER-block, which ships violations. Scoping
-        switches off wholesale. It must fall back to the OLD side test, NOT to
-        keeping every segment on the board: check_drc still layer-scopes such a
-        board (its routing_layers falls back to the segment-derived set), so
-        the placer must stay on the over-block side."""
+    def test_a_board_with_NO_copper_layers_RESOLVES_one_instead_of_giving_up(self):
+        """A board whose `(layers ...)` stanza yields no copper must NOT fall
+        back to the 'F'/'B' side collapse.
+
+        That looked like the safe direction and is not. check_drc resolves the
+        same situation with a THREE-level fallback -- filter to `.Cu`, then the
+        layers segments actually sit on, then ['F.Cu','B.Cu'] -- and still
+        expands a `*.Cu` pad over the result and grades it. The side collapse
+        DROPS every B.Cu and inner track a through-hole cap pad shares copper
+        with, which is an UNDER-block and the exact mirror bug #731 fixes.
+        Measured on rp2350 with the copper list cleared and cap pads made
+        through-hole: 280 pairs check_drc grades that the side-collapse
+        fallback ignored, byte-identical to the pre-#731 count."""
         pcb = parse_kicad_pcb(BOARD)
+        real = list(pcb.board_info.copper_layers)
         pcb.board_info.copper_layers = []
         st = _repair(BOARD, pcb=pcb)
-        self.assertEqual(st._all_cu, frozenset())
+        # ON THE BRANCH: the board really declares nothing, and the fallback
+        # really had to reconstruct the list from the segments.
+        self.assertEqual(pcb.board_info.copper_layers, [])
+        self.assertTrue(st._all_cu, 'the fallback resolved no copper at all')
+        self.assertTrue(st._all_cu <= set(real),
+                        'the fallback invented a layer the board lacks: %r'
+                        % (st._all_cu - set(real),))
+        # ...and scoping stays ON, so a through-hole pad keeps its inner and
+        # back-side copper.
         cap = st.caps[CAP]
-        self.assertIsNone(st._cap_pad_layers(cap),
-                          'layer scoping stayed on with no copper layers')
-        # ON THE BRANCH: the board must carry tracks on BOTH sides, or "did not
-        # keep everything" cannot be distinguished from "kept everything".
-        sides = {st._seg_side(t[6]) for t in st.segments}
-        self.assertEqual(sides, {'F', 'B'})
-        kept = st.cap_segs[CAP]
-        self.assertTrue(kept, 'the fallback dropped every track')
-        self.assertTrue(all(st._seg_side(t[6]) == cap.side for t in kept),
-                        'a track from the OTHER side survived: the fallback '
-                        'stopped filtering instead of using the side test')
-        self.assertLess(len(kept), len(st.segments),
-                        'the fallback kept every segment on the board')
-    # MUTATION: make the `_union is None` arm keep every segment -> the last
-    # two assertions fail.
+        self.assertIsNotNone(st._cap_pad_layers(cap),
+                             'layer scoping switched itself off')
+        for t in st.cap_segs[CAP]:
+            self.assertIn(t[6], st._all_cu)
+            self.assertTrue(any(t[6] in pl for pl in cap.pad_layers),
+                            'an off-layer track survived the fallback')
+        self.assertEqual(sorted(st._all_cu_ordered), sorted(st._all_cu))
+    # MUTATION: `self._all_cu = frozenset(board_info.copper_layers or ())`
+    # (drop the fallback) -> `_all_cu` is empty, `_cap_pad_layers` returns None
+    # and the assertIsNotNone fires.
+    #
+    # NB the prune's `_union is None` arm is deliberately NOT pinned by a
+    # mutation: with the fallback in place it is reachable only for a cap with
+    # zero copper pads, whose pad_rects is empty, so no assertion anywhere can
+    # observe what it keeps. Claiming a mutation for it would be an unearned
+    # MUTATION line -- the exact defect this file's review found elsewhere.
+
+    def test_EVERY_tracked_board_resolves_a_copper_list_and_stays_scoped(self):
+        """The invariant the prune's off-switch now rests on: `_all_cu` is
+        never empty, so layer scoping never silently degrades to the side
+        collapse on a real board."""
+        import subprocess
+        out = subprocess.run(['git', 'ls-files', '-z', 'kicad_files/*.kicad_pcb'],
+                             cwd=_ROOT, capture_output=True, text=True)
+        boards = [b for b in out.stdout.split(chr(0)) if b]
+        if not boards:
+            self.skipTest('git could not list the corpus')
+        checked = 0
+        for rel in boards:
+            path = os.path.join(_ROOT, rel)
+            pcb = parse_kicad_pcb(path)
+            st = _repair(path, pcb=pcb)
+            self.assertTrue(st._all_cu, '%s resolved no copper layers' % rel)
+            for ref, cap in st.caps.items():
+                self.assertIsNotNone(
+                    st._cap_pad_layers(cap),
+                    '%s %s: layer scoping switched off on a real board'
+                    % (rel, ref))
+                checked += 1
+        self.assertGreater(checked, 0, 'no cap on any tracked board')
+    # MUTATION: drop the segment-derived fallback for `_all_cu` -> a board
+    # whose (layers ...) stanza yields no copper fails the first assertion.
+
+    def test_a_cap_whose_pads_carry_NO_COPPER_is_graded_flat_in_the_TRACK_channel_too(self):
+        """4bbfa4de established that a copper-less pad is graded FLAT in every
+        channel: check_drc does not grade such a pad at all, so letting the
+        partner's netclass through would charge a keep-out that does not exist.
+
+        An empty per-pad union must therefore NOT read as 'scoping off'. It did
+        in the first version of #731, which switched the guard off for the
+        TRACK channel alone -- so `_flat_pad` read False and those pads were
+        charged at the partner's netclass, reinstating in one channel exactly
+        the phantom the previous commit removed from every other."""
+        import tempfile, json
+        with tempfile.TemporaryDirectory() as td:
+            from copy_board import copy_board
+            dst = os.path.join(td, 'b.kicad_pcb')
+            copy_board(BOARD, dst)
+            with open(os.path.splitext(dst)[0] + '.kicad_pro', 'w',
+                      encoding='utf-8') as f:
+                json.dump({'net_settings': {'classes': [
+                    {'name': 'Default', 'clearance': 0.4, 'track_width': 0.2,
+                     'via_diameter': 0.6, 'via_drill': 0.4,
+                     'priority': 2147483647}],
+                    'netclass_assignments': {}, 'netclass_patterns': []}}, f)
+            pcb = parse_kicad_pcb(dst)
+            for p in _copper_pads(pcb.footprints[CAP]):
+                p.layers = ['*.Cu', '*.Mask']
+                p.pad_type = 'np_thru_hole'
+                p.drill = 0.3
+            st = _repair(dst, pcb=pcb)
+            cap = st.caps[CAP]
+            # ON THE BRANCH: the model is active (0.4) and every pad of this
+            # cap really did resolve copper-less, or nothing is being tested.
+            self.assertIsNotNone(st._floors)
+            self.assertEqual(list(st._cap_pad_layers(cap)),
+                             [frozenset()] * len(cap.pads))
+            # The union is EMPTY but scoping stays ON -- that is the whole
+            # point. (None, None) here is what let the netclass through.
+            pl, union = st._cap_seg_scope(cap)
+            self.assertIsNotNone(pl, 'scoping switched off for the track '
+                                     'channel on a copper-less cap')
+            self.assertEqual(union, frozenset())
+            # A pad with no copper shares copper with nothing, so there is no
+            # track pair at all -- which is exactly what check_drc does with
+            # it (_pad_has_no_copper skips the pad outright). Charging such a
+            # pair, at ANY price, is the phantom.
+            self.assertEqual(st.cap_segs[CAP], [],
+                             '%d track pair(s) kept for a cap whose every pad '
+                             'is copper-less' % len(st.cap_segs[CAP]))
+            self.assertAlmostEqual(
+                st.seg_penalty(CAP, cap, cap.x, cap.y, cap.rot), 0.0, places=9)
+            # ON THE BRANCH / cross-channel: the PAD channel still grades these
+            # same pads, and grades them FLAT at 0.1 -- not at the 0.4 class.
+            # If the track channel disagreed with that, the two channels would
+            # be grading one cap two different ways, which is the defect.
+            prows = st._pad_effs(CAP, cap)
+            self.assertTrue(prows and prows[0], 'no foreign pad in reach')
+            self.assertEqual({round(v, 9) for r in prows for v in r}, {CLEAR})
+    # MUTATION: `return (pl, u) if u else (None, None)` in `_cap_seg_scope` ->
+    # `union` reads None, the track pairs come back and are charged at the 0.4
+    # netclass while the pad channel still says 0.1.
+
+
+    def test_the_PRUNE_keeps_a_track_on_a_layer_the_board_does_not_declare(self):
+        """The prune's `layer in self._all_cu` conjunct, tested where it lives.
+
+        `test_an_INJECTED_tuple_with_an_UNRECOGNISED_layer_is_still_graded`
+        pins the same invariant on the GRADING side, but it injects into
+        `cap_segs` AFTER the prune, so it never reaches this arm -- deleting
+        the conjunct survived that test. A track on a layer the board's copper
+        list omits must be KEPT (and charged): check_drc reaches such a segment
+        through its own segment-derived fallback, so dropping it under-blocks.
+        """
+        pcb = parse_kicad_pcb(BOARD)
+        pads = _copper_pads(pcb.footprints[CAP])
+        target = pads[0]
+        x0, x1 = target.global_x - target.size_x / 2, target.global_x + target.size_x / 2
+        keepout = TRACK_W / 2 + CLEAR
+        ty = target.global_y - target.size_y / 2 - keepout + BITE
+        seg = make_seg(x0 - 1.0, ty, x1 + 1.0, ty, layer='In9.Cu',
+                       net_id=FOREIGN_NET, width=TRACK_W)
+        pcb.segments = [seg]
+        pcb.vias = []
+        st = _repair(BOARD, pcb=pcb)
+        cap = st.caps[CAP]
+        # ON THE BRANCH: the layer really is absent from the board's list and
+        # from the pad's set, so only the `_all_cu` conjunct can save it.
+        self.assertNotIn('In9.Cu', st._all_cu)
+        self.assertNotIn('In9.Cu', cap.pad_layers[0])
+        self.assertTrue(st.cap_segs[CAP],
+                        'a track on an UNDECLARED layer was pruned away -- '
+                        'check_drc still reaches it, so this under-blocks')
+        self.assertAlmostEqual(
+            st.seg_penalty(CAP, cap, cap.x, cap.y, cap.rot), BITE, places=9)
+    # MUTATION: drop the `layer in self._all_cu` conjunct from the PRUNE
+    # (`elif layer not in _union: continue`) -> the track is dropped and the
+    # penalty reads 0.0.
+
+    def test_a_COPPERLESS_pad_meeting_an_UNKNOWN_layer_is_charged_FLAT(self):
+        """`_seg_effs`' `elif flat_pad:` arm.
+
+        Reaching it takes a precise combination, which is why a naive fixture
+        cannot pin it. A copper-less pad against a REAL layer is already
+        removed by `_seg_shares`; against an unknown layer whose segment has no
+        registered floor, the flat arm and the fallback both yield the same
+        number. The arm only bites for a copper-less pad meeting a segment that
+        is BOTH on a layer the board does not declare AND carries a resolved
+        netclass floor -- and then the difference is the whole netclass."""
+        import tempfile, json
+        from copy_board import copy_board
+        with tempfile.TemporaryDirectory() as td:
+            dst = os.path.join(td, 'b.kicad_pcb')
+            copy_board(BOARD, dst)
+            with open(os.path.splitext(dst)[0] + '.kicad_pro', 'w',
+                      encoding='utf-8') as f:
+                json.dump({'net_settings': {'classes': [
+                    {'name': 'Default', 'clearance': 0.4, 'track_width': 0.2,
+                     'via_diameter': 0.6, 'via_drill': 0.4,
+                     'priority': 2147483647}],
+                    'netclass_assignments': {}, 'netclass_patterns': []}}, f)
+            pcb = parse_kicad_pcb(dst)
+            pads = _copper_pads(pcb.footprints[CAP])
+            for pad in pads:
+                pad.layers = ['*.Cu', '*.Mask']
+                pad.pad_type = 'np_thru_hole'
+                pad.drill = 0.3
+            target = pads[0]
+            x0 = target.global_x - target.size_x / 2
+            x1 = target.global_x + target.size_x / 2
+            keepout = TRACK_W / 2 + CLEAR
+            ty = target.global_y - target.size_y / 2 - keepout + BITE
+            pcb.segments = [make_seg(x0 - 1.0, ty, x1 + 1.0, ty,
+                                     layer='In9.Cu', net_id=FOREIGN_NET,
+                                     width=TRACK_W)]
+            pcb.vias = []
+            st = _repair(dst, pcb=pcb)
+            cap = st.caps[CAP]
+            # ON THE BRANCH, all four conditions the arm needs:
+            self.assertIsNotNone(st._floors)                 # model active
+            self.assertEqual(cap.pad_layers[0], frozenset())  # copper-less pad
+            self.assertNotIn('In9.Cu', st._all_cu)            # unknown layer
+            t = st.segments[0]
+            floor = st._seg_floor_by_id.get(id(t))
+            self.assertIsNotNone(floor, 'the segment carries no floor, so the '
+                                        'flat arm and the fallback agree and '
+                                        'this test cannot discriminate')
+            self.assertAlmostEqual(floor.ncl, 0.4, places=6)
+            self.assertTrue(st.cap_segs[CAP], 'the unknown-layer track was '
+                                              'pruned away')
+            rows = st._seg_effs(CAP, cap)
+            half = t[5] - st._item_reach(floor)
+            self.assertAlmostEqual(rows[0][0], half + CLEAR, places=9,
+                                   msg='a copper-less pad was charged %r; the '
+                                       'flat price is %r and the netclass '
+                                       'price is %r'
+                                       % (rows[0][0], half + CLEAR, half + 0.4))
+    # MUTATION: delete the `elif flat_pad:` arm in `_seg_effs` -> the cell is
+    # priced at the 0.4 netclass instead of the flat 0.1.
 
 
 class TestShapeAndClassification(unittest.TestCase):
@@ -602,15 +812,29 @@ class TestShapeAndClassification(unittest.TestCase):
     # MUTATION: put `side` back in element 6 -> `assertIn(t[6], _all_cu)` fails.
 
     def test_this_file_is_collected_as_a_FAST_test(self):
-        """This file names the integration markers in its own prose, which is
-        exactly how the #725 file got bucketed as integration and skipped under
-        --fast (commit 6c2096c6)."""
+        """A file bucketed as integration is skipped under --fast, and a test
+        file that proves nothing is worse than none (6c2096c6).
+
+        Note what this does and does not pin. The opt-out marker is currently
+        INERT -- this file contains none of the literal strings the classifier
+        greps for, so deleting `RUN_ALL_FAST_OK = True` changes nothing today.
+        Asserting on the marker would therefore be asserting on a value the
+        branch does not key on. What is worth pinning is the OUTCOME: the file
+        is collected and it is fast. The second half below is the one that
+        would fail if a later edit introduced a marker string while the opt-out
+        had been dropped."""
         import run_all
-        self.assertFalse(run_all.is_integration(os.path.abspath(__file__)))
+        path = os.path.abspath(__file__)
+        self.assertFalse(run_all.is_integration(path))
         found = [os.path.basename(f) for f in run_all.discover(['731'])]
         self.assertIn(os.path.basename(__file__), found)
-    # MUTATION: delete the `RUN_ALL_FAST_OK = True` line -> is_integration
-    # returns True and the file is skipped under --fast.
+        # The opt-out must still be present, because it is the only thing that
+        # keeps the line above true if the source ever gains a marker string.
+        src = io.open(path, encoding='utf-8').read()
+        self.assertIn('RUN_ALL_FAST_OK = True', src)
+    # MUTATION: delete the `RUN_ALL_FAST_OK = True` line AND add `import
+    # subprocess` -> is_integration returns True. Deleting the marker alone is
+    # caught only by the last assertion, which is why it is written out.
 
 
 if __name__ == '__main__':

@@ -461,35 +461,50 @@ class TestChannels(unittest.TestCase):
     # is no longer 0. MUTATION: make `_seg_shares` return False always -> `on`
     # drops to 0 and the vacuity guard fires.
 
-    def test_a_board_with_NO_copper_layers_is_not_scoped_by_layer(self):
+    def test_a_board_with_NO_copper_layers_RESOLVES_one(self):
         """If `board_info.copper_layers` is empty, `pad_copper_layers` resolves
-        NOTHING for a `*.Cu` pad -- so every cap pad would look copper-less,
-        every pair would take the off-layer fallback, and the whole board would
-        be graded at the flat scalar. Before the layer scoping existed such a
-        board only ever OVER-blocked; the fallback flips the direction, and
-        under-blocking ships a violation. So the scoping switches itself off."""
+        NOTHING for a `*.Cu` pad -- so every such pad reads copper-less and the
+        scoping would grade the board at the flat scalar. #725 handled that by
+        switching scoping OFF entirely, on the reasoning that the board only
+        ever over-blocked before.
+
+        #731 corrected the reasoning. Switching off falls back to the 'F'/'B'
+        side collapse, and check_drc does NOT switch off: it resolves the same
+        situation with a three-level fallback (filter to `.Cu`, then the layers
+        segments sit on, then ['F.Cu','B.Cu']) and still expands and grades a
+        `*.Cu` pad over the result. The side collapse drops every B.Cu and
+        inner track a through-hole pad shares copper with -- an UNDER-block,
+        which is what actually ships a violation. Measured on rp2350 with the
+        copper list cleared and cap pads made through-hole: 280 pairs check_drc
+        grades that the old fallback ignored.
+
+        So `_Repair` now resolves a copper list the same way check_drc does,
+        and `_all_cu` is never empty on a board that has any copper at all."""
         with tempfile.TemporaryDirectory() as td:
             p = _stage(td, 'nocu', classes=_default_class(0.4))
             pcb = parse_kicad_pcb(p)
+            real = list(pcb.board_info.copper_layers)
             pcb.board_info.copper_layers = []
             st = _repair(p, pcb=pcb)
             # ON THE BRANCH: the model must still be active, or nothing is
             # scoped anyway and this passes for the wrong reason.
             self.assertIsNotNone(st._floors)
-            self.assertEqual(st._all_cu, frozenset())
+            self.assertEqual(pcb.board_info.copper_layers, [])
+            # ...and the fallback reconstructed a real list from the segments.
+            self.assertTrue(st._all_cu, 'the fallback resolved no copper')
+            self.assertTrue(st._all_cu <= set(real),
+                            'the fallback invented a layer: %r'
+                            % (st._all_cu - set(real),))
             cap = st.caps[ANCHOR_CAP]
-            self.assertIsNone(st._cap_pad_layers(cap),
-                              'layer scoping stayed on with no copper layers')
+            self.assertIsNotNone(st._cap_pad_layers(cap),
+                                 'layer scoping switched itself off')
             rows = st._pad_effs(ANCHOR_CAP, cap)
             self.assertTrue(rows)
             self.assertIn(0.4, {round(v, 6) for r in rows for v in r},
                           'every pair fell back to the flat scalar -- the '
                           'board is now UNDER-blocked')
-    # MUTATION: `return pl if self._all_cu else None` -> `return pl` -> the
-    # `assertIsNone` fails. NB the effs are 0.4 either way on this board: only
-    # a `*.Cu` pad resolves empty against an empty layer list, and orangecrab's
-    # cap pads are all concrete F.Cu/B.Cu, so the under-block this guards
-    # against needs a through-hole cap pad to appear at all.
+    # MUTATION: drop the segment-derived fallback for `_all_cu` -> it is empty,
+    # `_cap_pad_layers` returns None and the assertIsNotNone fires.
 
     def test_a_relaxing_rule_REPLACES_downward(self):
         """A dru rule REPLACES, so it can lower a pair below the netclass.
