@@ -57,6 +57,38 @@ EPS = 1e-6
 # rather than -inf so nothing can produce a NaN if a caller sums a row.
 _OFF_LAYER = -1.0e9
 
+# The diameter to assume for a via whose size the board does not carry -- a
+# literal `(size 0)` token, or a padstack whose pcbnew GetFrontWidth() came back
+# 0. This is the value nudge_vias_for_unresolved hard-coded at four sites before
+# #732 named it, so nothing moves.
+#
+# Module-private on purpose. It governs how THIS pass prices a barrel it cannot
+# measure, which is an operator-facing placement decision; it is emphatically
+# not a number the DRC/connectivity graders should adopt. KiCad honours a
+# declared size literally: `(size 0)` is a hard `via_diameter` DRC error there
+# (min 0.5000mm, actual 0.0000mm) rather than a via KiCad silently sizes for
+# you, and such a barrel joins nothing -- so a grader that substituted a
+# diameter would report CONNECTED what KiCad reports OPEN. Measured; see
+# TestTheGradersStillReadTheBoard in tests/test_732_...py, which states the
+# geometry the experiment needs (perpendicular copper-to-barrel separation,
+# not stub endpoint offset) because the naive version shows nothing.
+_UNREADABLE_VIA_SIZE = 0.5  # mm
+
+
+def _via_radius(via, default_size=_UNREADABLE_VIA_SIZE) -> float:
+    """The copper radius of a via, in mm -- the ONE implementation of the rule.
+
+    #732: this was spelled `v.size if v.size and v.size > 0 else
+    default_via_size` in the grader and `(v.size or 0.5) / 2.0` at four nudger
+    sites, so the two halves of the pass priced the same barrel differently.
+    `getattr` because the nudger is public and its test harnesses pass
+    duck-typed via-likes.
+    """
+    size = getattr(via, 'size', None)
+    if not size or size <= 0:
+        size = default_size
+    return size / 2.0
+
 # These four moved to placement/legality.py, the shared home with quench.py
 # (which carried byte-identical copies of the first two). Aliased rather than
 # renamed: the names are used throughout this module and imported by tests.
@@ -487,13 +519,18 @@ class _Repair:
         # nudge_vias_for_unresolved relocates a via. A tuple that died while its
         # id entry lived would hand a recycled id ANOTHER via's radius,
         # silently.
+        #
+        # #732: the fallback is STORED rather than consumed inline and dropped,
+        # because nudge_vias_for_unresolved needs the same answer and had no way
+        # to reach it -- see via_radius() for what that cost.
+        self._default_via_size = default_via_size
         self._via_radius_by_id: Dict[int, Tuple[tuple, float]] = {}
         for v in pcb_data.vias:
-            size = v.size if v.size and v.size > 0 else default_via_size
+            r = self.via_radius(v)
             t = (v.x, v.y, v.net_id,
-                 size / 2.0 + self._item_reach(self._via_floor_for(v.net_id)))
+                 r + self._item_reach(self._via_floor_for(v.net_id)))
             self.vias.append(t)
-            self._via_radius_by_id[id(t)] = (t, size / 2.0)
+            self._via_radius_by_id[id(t)] = (t, r)
 
         # --- avoidance: foreign-net tracks the cap's pads can actually TOUCH ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
@@ -983,6 +1020,34 @@ class _Repair:
         unresolved that its own nudger then refuses to see). The via eff rows
         are built from this same call, so they cannot drift from it either."""
         return self._pair_or_flat(pad_floor, self._via_floor_for(via_net))
+
+    def via_radius(self, via) -> float:
+        """The RADIUS of one parser Via -- the one answer in this module (#732).
+
+        The only place `--default-via-size` is applied. __init__ builds the
+        keep-out list from this, and nudge_vias_for_unresolved's offender test,
+        its candidate validation and its #313 connectivity tolerance all read it
+        back through the same call, for the same reason via_required exists.
+
+        Left divergent, a via whose size the board does not carry got the
+        grader's default_via_size/2 and the nudger's hard-coded 0.25 for the
+        SAME barrel. At the CLI's 0.3 default the nudger's is LARGER, so it
+        moves vias the grader never flagged and lays connector copper for
+        nothing; above 0.5 the sign flips and the grader flags a cap whose
+        offender list then comes back EMPTY -- the `for v in offenders:` body
+        never runs, so not even the "no clear spot" line prints and the cap is
+        reported unresolved forever with nothing on screen. Both signs are
+        reachable from the GUI too: its via size is the Basic tab's spin
+        control, not the 0.5 constant (fanout_gui.py:1529 -> swig_gui.py:1739).
+
+        NOT the same question as _via_radius_by_id, and deliberately a separate
+        mechanism. That map answers "what radius did THIS 4-tuple get", which
+        for a tuple a test assigned wholesale is its own convention and must
+        stay so. This answers "how wide is this barrel" -- a fact about the
+        parser object, and the only form that works for a via injected into
+        pcb_data.vias AFTER construction, which the tests do.
+        """
+        return _via_radius(via, self._default_via_size)
 
     def _pair_or_flat(self, fa, fb):
         """model.pair for two floors, falling back to the flat scalar whenever
@@ -2067,6 +2132,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     _pad_fl = getattr(st, 'pad_floor', None)
     _via_fl = getattr(st, 'via_floor', None)
     _seg_fl = getattr(st, 'seg_floor', None)
+    _via_rad = getattr(st, 'via_radius', None)
 
     def req(fa, fb):
         return clearance if _req is None else _req(fa, fb)
@@ -2082,6 +2148,25 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     def seg_fl(net, layer):
         return None if _seg_fl is None else _seg_fl(net, layer)
+
+    def via_rad(v):
+        """This via's RADIUS, resolved by st when it can (#732), so the offender
+        test, the candidate validation and the #313 connectivity tolerance below
+        cannot disagree with the keep-out list the grader was built from. Four
+        sites here spelled it `(x.size or 0.5) / 2.0` and a fifth `v.size / 2.0`
+        with no fallback at all, while the grader used --default-via-size.
+
+        The fallback is reached ONLY on the duck-typed path -- the _FakeSt the
+        #370 and #617 harnesses pass carries no resolver -- and only for a via
+        whose size is falsy. Every via those fixtures build carries a real 0.5,
+        so it is numerically unreachable there; the #732 test file pins that.
+        defaults.UNREADABLE_VIA_SIZE rather than a bare literal so the number
+        has ONE name across this module and the two checkers. Spelled with the
+        same `and ... > 0` guard as _Repair.via_radius, not `or`, so a negative
+        size cannot take a different branch in the two."""
+        if _via_rad is not None:
+            return _via_rad(v)
+        return _via_radius(v)
 
     def cap_floors_of(cap, rects):
         """This cap's per-pad floors, index-aligned with `rects` -- or None,
@@ -2125,7 +2210,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             board_pads.append((p, pad_fl(p), not _pad_has_no_copper(p), cap_))
 
     def valid_via_pos(v, nx, ny):
-        vr = (v.size or 0.5) / 2.0
+        vr = via_rad(v)
         vfl = via_fl(v.net_id)
         # never off the board / into a cutout / inside the edge margin (#370 B3)
         if not edge_ok_point(nx, ny, vr):
@@ -2153,7 +2238,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             if ov is v:
                 continue
             d = math.hypot(nx - ov.x, ny - ov.y)
-            if ov.net_id != v.net_id and d < vr + (ov.size or 0.5) / 2.0 + \
+            if ov.net_id != v.net_id and d < vr + via_rad(ov) + \
                     req(vfl, via_fl(ov.net_id)):
                 return False
             if d < (v.drill or 0.3) / 2.0 + (ov.drill or 0.3) / 2.0 + H2H_VIA:
@@ -2210,7 +2295,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                 return False
         for ov in pcb_data.vias:
             if ov.net_id != net_id and _point_to_seg_dist(
-                    ov.x, ov.y, sx, sy, ex, ey) < (ov.size or 0.5) / 2.0 + hw \
+                    ov.x, ov.y, sx, sy, ex, ey) < via_rad(ov) + hw \
                     + req(cfl, via_fl(ov.net_id)):
                 return False
         for s2 in pcb_data.segments:
@@ -2238,7 +2323,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         pfls = cap_floors_of(cap, rects)
         offenders = []
         for v in pcb_data.vias:
-            vr = (v.size or 0.5) / 2.0
+            vr = via_rad(v)
             for i, (bx0, by0, bx1, by1, net) in enumerate(rects):
                 if v.net_id != net and _point_to_rect_dist(
                         v.x, v.y, (bx0, by0, bx1, by1)) < vr + via_req(
@@ -2256,7 +2341,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             # 1um match missed copper offset by grid quantization or a prior
             # #280 via-nudge; the via body radius is the correct connectivity
             # tolerance (a track end buried in the via is connected).
-            tol = max(1e-3, v.size / 2.0)
+            tol = max(1e-3, via_rad(v))
             for s in pcb_data.segments:
                 if s.net_id != v.net_id:
                     continue
