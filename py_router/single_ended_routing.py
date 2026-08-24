@@ -61,6 +61,57 @@ def _unblock_debug() -> bool:
 _FOREIGN_PAD_WINDOW = 5.0  # mm
 
 
+def _board_pad_local_max(pcb_data):
+    """Cached board-wide maximum pad local/footprint clearance override (mm).
+
+    A foreign pad's local_clearance above a moving net's base is SUBTRACTED
+    from its effective distance (see _pt_foreign_pad_dist), so a check against
+    `base + w/2` can still fail at a RAW distance up to `base + w/2 + local`.
+    Scan windows must therefore reach at least that far to never miss an
+    obstacle. Pads are static during a route, so this is computed once per
+    board and cached."""
+    cache = getattr(pcb_data, '_board_pad_local_max', None)
+    if cache is not None:
+        return cache
+    mx = 0.0
+    for pads in pcb_data.pads_by_net.values():
+        for p in pads:
+            lc = getattr(p, 'local_clearance', 0.0) or 0.0
+            if lc > mx:
+                mx = lc
+    pcb_data._board_pad_local_max = mx
+    return mx
+
+
+def _scan_window(pcb_data, threshold, net_clearances=None, track_clearances=None):
+    """Per-call effective scan window for a clearance check against foreign
+    copper: the largest distance at which the check could still fail.
+
+    A caller's check `dist >= threshold` (threshold = own clearance + w/2, or
+    the NPTH floor + w/2) fails when the ADJUSTED distance drops below it, and
+    each foreign object's netclass/pad-local EXCESS over the moving net's base
+    is folded into its adjusted distance. So a check can fail at a raw distance
+    up to `threshold + max_excess`. This returns that bound -- never smaller
+    than `threshold` -- so the numpy kernels skip every obstacle that cannot
+    affect the result while never missing one that could.
+
+    `net_clearances` (#436, net_id -> class clearance mm) bounds the netclass
+    excess term; `track_clearances` (#549, {obstacle_net_id: mm}) bounds the
+    seg-vs-seg track-rule term; pad-local overrides are bounded by the cached
+    board maximum.
+    """
+    cap = _board_pad_local_max(pcb_data)
+    if net_clearances:
+        m = max(net_clearances.values()) if net_clearances else 0.0
+        if m > cap:
+            cap = m
+    if track_clearances:
+        m = max(track_clearances.values()) if track_clearances else 0.0
+        if m > cap:
+            cap = m
+    return threshold + cap
+
+
 def _pad_corner_radius(pad):
     """Corner radius that turns a pad's local rect (half_x, half_y) into an
     accurate rounded-rect model for the foreign-pad distance kernels:
@@ -159,15 +210,16 @@ def _foreign_pad_arrays(pcb_data, layer):
     return arr
 
 
-def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
+def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
+                         window=_FOREIGN_PAD_WINDOW):
     """Exact min edge distance from sample points to the CUSTOM pads of other
     nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
-    ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
-    base_clearance local-override adjustment as the vectorized kernels."""
+    ~0.1um). Windowed by each pad's bbox + `window`; same base_clearance
+    local-override adjustment as the vectorized kernels."""
     if not custom:
         return 1e9
     from check_drc import point_to_pad_distance
-    R = _FOREIGN_PAD_WINDOW
+    R = window
     best = 1e9
     for nid, pad in custom:
         if nid == net_id:
@@ -217,31 +269,38 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None):
 
 
 def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
-                         net_clearances=None):
+                         net_clearances=None, window=_FOREIGN_PAD_WINDOW):
     """Min edge distance from point (x,y) on `layer` to any pad of a DIFFERENT net.
     The pad is modelled as a rounded rect (accurate for circle/oval/roundrect,
     exact rect at corner_r=0), so a round BGA ball is not over-approximated by its
-    bounding-box corner. Vectorized + windowed (see _FOREIGN_PAD_WINDOW); exact
-    for any distance within the window, which is all the callers ever look at.
+    bounding-box corner. Vectorized + windowed (see `window`); exact for any
+    distance within the window, which is all the callers ever look at.
 
     `base_clearance` (#326 B6): the clearance the CALLER will compare against
     (its config.clearance). When given, each pad's local/footprint clearance
     override above that base is SUBTRACTED from its distance, so the caller's
     unchanged `dist >= base + X` threshold enforces the pad's own requirement
-    (an "effective distance"). Overrides are bounded well below the 5mm
-    window, so windowing stays exact.
+    (an "effective distance"). Overrides are bounded well below the window, so
+    windowing stays exact.
 
     `net_clearances` (#436, net_id -> class clearance mm): folds each foreign
     pad's netclass EXCESS over `base_clearance` into the effective distance the
     same way local_clearance is (whichever is larger wins), so a caller check
     `dist >= base_clearance + w/2` enforces KiCad's pairwise max(base, classF)
-    against a pad in a wider (e.g. controlled-impedance) class. Inert when None."""
+    against a pad in a wider (e.g. controlled-impedance) class. Inert when None.
+
+    `window` (mm): the scan radius -- the largest distance at which a caller's
+    check could still fail. Callers pass a per-call effective window
+    (clearance + w/2 + max relevant obstacle half-width / netclass excess) so
+    the numpy kernels skip the bulk of the board's pads; the default keeps the
+    historical generous 5mm for callers that don't pass one."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
-    best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance)
+    best_custom = _custom_pad_min_dist(custom, net_id, ((x, y),), base_clearance,
+                                       window=window)
     if cx.size == 0:
         return best_custom
-    R = _FOREIGN_PAD_WINDOW
+    R = window
     # Expand the window by each pad's own half-extent (global axes, so tilted
     # pads window by their true bbox): a large pad's EDGE can be within R even
     # when its centre is past R. Then min edge distance is exact for anything
@@ -270,7 +329,8 @@ def _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer, base_clearance=None,
 
 
 def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          base_clearance=None, net_clearances=None):
+                          base_clearance=None, net_clearances=None,
+                          window=_FOREIGN_PAD_WINDOW):
     """Min foreign-pad edge distance sampled along a (short, terminal) segment.
     Pads are modelled as rounded rects (corner_r), so round/oval/roundrect pads --
     e.g. BGA balls -- use their true outline, not the bounding-box corner that
@@ -279,7 +339,8 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     `base_clearance` (#326 B6): see _pt_foreign_pad_dist -- subtracts each pad's
     local-clearance excess so unchanged caller thresholds honor overrides.
     `net_clearances` (#436): see _pt_foreign_pad_dist -- also folds each foreign
-    pad's netclass excess so cross-class pad grazes are enforced."""
+    pad's netclass excess so cross-class pad grazes are enforced.
+    `window` (mm): per-call scan radius (see _pt_foreign_pad_dist)."""
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
@@ -287,10 +348,10 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     sx = x1 + (x2 - x1) * _t
     sy = y1 + (y2 - y1) * _t
     best_custom = _custom_pad_min_dist(
-        custom, net_id, list(zip(sx, sy)), base_clearance)
+        custom, net_id, list(zip(sx, sy)), base_clearance, window=window)
     if cx.size == 0:
         return best_custom
-    R = _FOREIGN_PAD_WINDOW
+    R = window
     # Pad bbox (centre +/- global half-extent, true bbox for tilted pads) must
     # reach within R of the segment bbox; a pad excluded here is > R from every
     # sample point on the segment.
@@ -363,7 +424,7 @@ def _foreign_seg_arrays(pcb_data, layer):
 
 def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                           net_clearances=None, base_clearance=0.0,
-                          track_clearances=None):
+                          track_clearances=None, window=_FOREIGN_PAD_WINDOW):
     """Min edge distance from a (short, terminal) segment to any OTHER-net segment or
     via on `layer` -- the segment analogue of _seg_foreign_pad_dist. Distance is from
     the terminal centreline to the foreign copper EDGE (point-to-segment distance to
@@ -387,7 +448,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     if nid.size == 0:
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
-    R = _FOREIGN_PAD_WINDOW
+    R = window
     fminx = np.minimum(fax, fbx) - fhw; fmaxx = np.maximum(fax, fbx) + fhw
     fminy = np.minimum(fay, fby) - fhw; fmaxy = np.maximum(fay, fby) + fhw
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
@@ -444,16 +505,17 @@ def _foreign_via_arrays(pcb_data):
 
 
 def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                          net_clearances=None, base_clearance=0.0):
+                          net_clearances=None, base_clearance=0.0,
+                          window=_FOREIGN_PAD_WINDOW):
     """Min edge distance from a segment to any OTHER-net VIA (body), exact point-to-
     segment minus via radius. The via analogue of _seg_foreign_pad_dist; a negative
     result (centreline inside the via) is returned as-is. #436: `net_clearances`
     subtracts each foreign via's netclass excess over `base_clearance` (see
-    _seg_foreign_seg_dist)."""
+    _seg_foreign_seg_dist). `window` (mm): per-call scan radius."""
     nids, cx, cy, rad = _foreign_via_arrays(pcb_data)
     if cx.size == 0:
         return 1e9
-    R = _FOREIGN_PAD_WINDOW
+    R = window
     mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     near = ((np.abs(cx - mx) <= R + abs(x2 - x1) / 2.0 + rad) &
             (np.abs(cy - my) <= R + abs(y2 - y1) / 2.0 + rad) & (nids != net_id))
@@ -505,16 +567,18 @@ def _foreign_hole_capsules(pcb_data):
     return cache[1]
 
 
-def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2):
+def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                           window=_FOREIGN_PAD_WINDOW):
     """Min edge distance from a segment to any OTHER-net NPTH drill hole (the
     hole analogue of _seg_foreign_via_dist). Exact segment-to-capsule distance
     minus the hole radius; a negative result (segment over the hole) is returned
     as-is. Own-net holes are excluded (a track legitimately reaches its own
-    mounting-hole pad). 1e9 when there are no foreign holes."""
+    mounting-hole pad). 1e9 when there are no foreign holes. `window` (mm):
+    per-call scan radius."""
     nid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
     if nid.size == 0:
         return 1e9
-    R = _FOREIGN_PAD_WINDOW
+    R = window
     hminx = np.minimum(hax, hbx) - hr; hmaxx = np.maximum(hax, hbx) + hr
     hminy = np.minimum(hay, hby) - hr; hmaxy = np.maximum(hay, hby) + hr
     near = ((hmaxx >= min(x1, x2) - R) & (hminx <= max(x1, x2) + R) &
@@ -576,16 +640,20 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
             cands.append(pair)
     for vs, dr in cands:
         need = vs / 2.0 + clearance - eps
+        win = _scan_window(pcb_data, need)
         ok = True
         for layer in layers:
-            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer) < need:
+            if _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer,
+                                     window=win) < need:
                 ok = False
                 break
             if _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer,
-                                    base_clearance=clearance) < need:
+                                    base_clearance=clearance,
+                                    window=win) < need:
                 ok = False
                 break
-        if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu') < need:
+        if ok and _seg_foreign_via_dist(pcb_data, net_id, x, y, x, y, layers[0] if layers else 'F.Cu',
+                                        window=win) < need:
             ok = False
         if ok:
             return (vs, dr)
@@ -690,17 +758,21 @@ def _neck_terminal_grazes(segments, term_pts, pcb_data, net_id, config, floor=No
         # #498: a .kicad_dru layer rule replaces the pair clearance on s.layer.
         own_l = (config.layer_clearance(s.layer, own)
                  if hasattr(config, 'layer_clearance') else own)
+        win = _scan_window(pcb_data, own_l + s.width / 2.0, nc)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      base_clearance=own_l, net_clearances=nc),
+                                      base_clearance=own_l, net_clearances=nc,
+                                      window=win),
                 _seg_foreign_seg_dist(pcb_data, net_id, s.start_x, s.start_y, s.end_x, s.end_y, s.layer,
-                                      net_clearances=nc, base_clearance=own_l))
+                                      net_clearances=nc, base_clearance=own_l,
+                                      window=win))
         allowed_half = d - own_l - 1e-4  # 1e-4: stay just inside the rule
         if allowed_half < s.width / 2.0 - 1e-9:
             # Hard test BEFORE necking, on the RAW track/via distance: a
             # centreline within floor/2 of a foreign copper EDGE overlaps it
             # at any emittable width -- a physical short, not a graze.
             d_raw = _seg_foreign_seg_dist(pcb_data, net_id, s.start_x,
-                                          s.start_y, s.end_x, s.end_y, s.layer)
+                                          s.start_y, s.end_x, s.end_y, s.layer,
+                                          window=win)
             if d_raw < floor / 2.0 - 1e-6:
                 hard.append((s, d_raw))
                 continue
@@ -757,11 +829,14 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if abs(ox - fx) < 1e-9 and abs(oy - fy) < 1e-9:
         return False  # exact endpoint already is the grid cell
     margin = config.clearance + config.get_net_track_width(net_id, ol) / 2.0
+    win = _scan_window(pcb_data, margin)
     if _pt_foreign_pad_dist(pcb_data, net_id, fx, fy, ol,
-                            base_clearance=config.clearance) >= margin:
+                            base_clearance=config.clearance,
+                            window=win) >= margin:
         return False  # grid cell already clear -> nothing to fix
     if _pt_foreign_pad_dist(pcb_data, net_id, ox, oy, ol,
-                            base_clearance=config.clearance) < margin:
+                            base_clearance=config.clearance,
+                            window=win) < margin:
         return False  # exact endpoint also too close (placement) -> can't fix here
     nx, ny = pts[neighbor_idx]
     # Only relocate the endpoint of a SHORT terminal segment. simplify_path (caller,
@@ -773,7 +848,8 @@ def _merge_terminal_to_exact(path, term_idx, neighbor_idx, original, pts,
     if math.hypot(nx - fx, ny - fy) > 1.5 * config.grid_step:
         return False  # long terminal segment -> keep grid end + short stub
     if _seg_foreign_pad_dist(pcb_data, net_id, ox, oy, nx, ny, ol,
-                             base_clearance=config.clearance) < margin - 1e-6:
+                             base_clearance=config.clearance,
+                             window=win) < margin - 1e-6:
         return False  # merged terminal segment would graze -> keep grid + stub
     pts[term_idx] = (ox, oy)
     return True

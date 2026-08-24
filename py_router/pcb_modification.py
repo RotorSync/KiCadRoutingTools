@@ -474,7 +474,8 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
     from routing_constants import SOFT_JOINT_MIN_GAP
     from check_drc import point_to_pad_distance
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
-                                       _seg_foreign_via_dist, _seg_foreign_hole_dist)
+                                       _seg_foreign_via_dist, _seg_foreign_hole_dist,
+                                       _scan_window)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     clr = config.clearance if clearance is None else clearance
     # NPTH holes are graded at the higher NPTH-to-track fab floor, not the
@@ -528,11 +529,15 @@ def close_soft_joints(results, pcb_data: PCBData, scope_net_ids, config,
             dangles[(s.net_id, s.layer)].append((x, y, s.width))
 
     def clears(nid, x1, y1, x2, y2, layer, w):
+        win = _scan_window(pcb_data, clr + w / 2.0)
         d = min(_seg_foreign_pad_dist(pcb_data, nid, x1, y1, x2, y2, layer,
-                                      base_clearance=clr),
-                _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer),
-                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer))
-        hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2)
+                                      base_clearance=clr, window=win),
+                _seg_foreign_seg_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      window=win),
+                _seg_foreign_via_dist(pcb_data, nid, x1, y1, x2, y2, layer,
+                                      window=win))
+        hd = _seg_foreign_hole_dist(pcb_data, nid, x1, y1, x2, y2,
+                                    window=_scan_window(pcb_data, npth_clr + w / 2.0))
         return (d >= clr + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4)
 
@@ -1040,7 +1045,7 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
     class), so an added connector never grazes a wider (impedance) neighbour."""
     from geometry_utils import segment_to_segment_distance, point_to_segment_distance
     from check_drc import segment_to_rect_distance
-    from single_ended_routing import _seg_foreign_hole_dist
+    from single_ended_routing import _seg_foreign_hole_dist, _scan_window
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     half = width / 2
 
@@ -1059,7 +1064,8 @@ def _connector_clear(x1, y1, x2, y2, width, layer, net_id, pcb_data, clearance,
     # declared min_hole_clearance drops the `snap_stub_gaps` repair without
     # removing the violation in 99.96% of the geometries where it fires.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)
-    if _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2) \
+    if _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                              window=_scan_window(pcb_data, npth_clr + half)) \
             < npth_clr + half - 1e-4:
         return False
     for s in pcb_data.segments:
@@ -2645,7 +2651,7 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
 
     Returns (detours_welded, nets_touched, original_segments_removed)."""
     from collections import defaultdict
-    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist, _scan_window
     from check_connected import check_net_connectivity
 
     routed_seg_ids = set()
@@ -2663,11 +2669,14 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
         pairwise clearance (same metric as prune_grazing_segments.grazes)."""
         eff = _eff(nid)
         thr = eff + w / 2.0 - 1e-4
+        win = _scan_window(pcb_data, eff + w / 2.0, net_clearances)
         if _seg_foreign_pad_dist(pcb_data, nid, x0, y0, x1, y1, layer,
-                                 base_clearance=eff, net_clearances=net_clearances) < thr:
+                                 base_clearance=eff, net_clearances=net_clearances,
+                                 window=win) < thr:
             return False
         if _seg_foreign_via_dist(pcb_data, nid, x0, y0, x1, y1, layer,
-                                 base_clearance=eff, net_clearances=net_clearances) < thr:
+                                 base_clearance=eff, net_clearances=net_clearances,
+                                 window=win) < thr:
             return False
         for o in pcb_data.segments:
             if o.net_id == nid or o.layer != layer:
@@ -2970,7 +2979,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     # terminal-neck uses, so "grazes" matches what DRC flags. The circle model in
     # _prune_net_cycles.grazes only ORDERS cycle-edge drops, but here grazing GATES
     # removal, so an over-approximation would delete legitimate non-violating copper.
-    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist
+    from single_ended_routing import _seg_foreign_pad_dist, _seg_foreign_via_dist, _scan_window
 
     routed_seg_ids = set()
     for r in results:
@@ -3004,12 +3013,15 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         eff = _eff(s.net_id)
         thr = eff + s.width / 2.0 - 1e-4
+        win = _scan_window(pcb_data, eff + s.width / 2.0, net_clearances)
         if (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                   s.end_x, s.end_y, s.layer,
-                                  base_clearance=eff, net_clearances=net_clearances) < thr or
+                                  base_clearance=eff, net_clearances=net_clearances,
+                                  window=win) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=eff, net_clearances=net_clearances) < thr):
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      window=win) < thr):
             return True
         if check_foreign_segments:
             slo_x, shi_x = min(s.start_x, s.end_x), max(s.start_x, s.end_x)
@@ -3144,14 +3156,17 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                 # Removal would open a soft joint: neck to clear instead.
                 from single_ended_routing import (_seg_foreign_pad_dist as _fpd,
                                                   _seg_foreign_via_dist as _fvd,
-                                                  _fab_track_floor)
+                                                  _fab_track_floor, _scan_window)
                 eff = _eff(s.net_id)  # #436 own-net floor; foreign class folded
+                win = _scan_window(pcb_data, eff + s.width / 2.0, net_clearances)
                 d = min(_fpd(pcb_data, s.net_id, s.start_x, s.start_y,
                              s.end_x, s.end_y, s.layer,
-                             base_clearance=eff, net_clearances=net_clearances),
+                             base_clearance=eff, net_clearances=net_clearances,
+                             window=win),
                         _fvd(pcb_data, s.net_id, s.start_x, s.start_y,
                              s.end_x, s.end_y, s.layer,
-                             base_clearance=eff, net_clearances=net_clearances))
+                             base_clearance=eff, net_clearances=net_clearances,
+                             window=win))
                 if check_foreign_segments:
                     for o in pcb_data.segments:
                         if o.net_id == s.net_id or o.layer != s.layer or o is s:
@@ -3273,7 +3288,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
-                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist,
+                                      _scan_window)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
 
     # NPTH (no-copper) drill holes are graded at the higher NPTH-to-track floor,
@@ -3308,12 +3324,15 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     def grazes(s):
         eff = eff_clr(s.net_id)
         thr = eff + s.width / 2.0 - 1e-4
+        win = _scan_window(pcb_data, eff + s.width / 2.0, net_clearances)
         return (_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=eff, net_clearances=net_clearances) < thr or
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      window=win) < thr or
                 _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                       s.end_x, s.end_y, s.layer,
-                                      base_clearance=eff, net_clearances=net_clearances) < thr)
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      window=win) < thr)
 
     # A re-bent jog must also respect the board edge: the octolinear candidates
     # only clear FOREIGN COPPER, so a bend could otherwise be pushed off-board /
@@ -3347,16 +3366,21 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
         # omitting them here let a re-bend that fixed a pad graze land within
         # clearance of (or onto) a foreign via (#254 neo6502 /GPIO1 vs /GPIO2).
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
+        win = _scan_window(pcb_data, eff + w / 2.0, net_clearances)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances),
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      window=win),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff),
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      window=win),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      window=win))
         # NPTH drill holes at the higher NPTH-to-track floor (#370 B2): the
         # copper terms above never see a copper-less hole, so a re-bend could
         # land the jog across a mounting hole.
-        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                                    window=_scan_window(pcb_data, npth_clr + w / 2.0))
         return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
@@ -3566,7 +3590,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     from check_connected import check_net_connectivity
     from geometry_utils import segment_to_segment_closest_points, segments_intersect
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
-                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist,
+                                      _scan_window)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from check_drc import (board_edge_geometry, _point_on_board,
                            _segment_to_rings_distance, point_to_pad_distance)
@@ -3695,24 +3720,29 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
+        win = _scan_window(pcb_data, eff + w / 2.0, net_clearances, _trk_clr)
         pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                   base_clearance=eff, net_clearances=net_clearances)
+                                   base_clearance=eff, net_clearances=net_clearances,
+                                   window=win)
         if pd < eff + w / 2.0 - 1e-4:
             return False
         sd = _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                    net_clearances=net_clearances,
                                    base_clearance=eff,
-                                   track_clearances=_trk_clr)  # #549
+                                   track_clearances=_trk_clr,  # #549
+                                   window=win)
         if sd < eff + w / 2.0 - 1e-4:
             return False
         vd = _seg_foreign_via_dist(pcb_data, net_id,
                                    x1,y1,x2,y2,layer,
                                    net_clearances=net_clearances,
-                                   base_clearance=eff)
+                                   base_clearance=eff,
+                                   window=win)
         if vd < eff + w / 2.0 - 1e-4:
             return False
         hd = _seg_foreign_hole_dist(pcb_data,
-                                    net_id,x1,y1,x2,y2)
+                                    net_id,x1,y1,x2,y2,
+                                    window=_scan_window(pcb_data, npth_clr + w / 2.0))
         ok = (hd >= npth_clr + w / 2.0 - 1e-4 and
               edge_clears(x1,y1,x2,y2,w) and
               keepout_clears(x1,y1,x2,y2,layer,w))
@@ -3725,7 +3755,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                 del pcb_data._foreign_pad_arr_cache
             pd_fresh = _seg_foreign_pad_dist(
                 pcb_data, net_id, x1, y1, x2, y2, layer,
-                base_clearance=eff, net_clearances=net_clearances)
+                base_clearance=eff, net_clearances=net_clearances, window=win)
             if _saved is not None:
                 pcb_data._foreign_pad_arr_cache = _saved
             if abs(pd_fresh - pd) > 1e-6:
@@ -4322,7 +4352,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
-                                      _seg_foreign_via_dist, _seg_foreign_hole_dist)
+                                      _seg_foreign_via_dist, _seg_foreign_hole_dist,
+                                      _scan_window)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from obstacle_map import resolve_hole_clearance
 
@@ -4378,13 +4409,18 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
 
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = eff_clr(net_id)  # #436 own-net floor; foreign class excess folded in
+        win = _scan_window(pcb_data, eff + w / 2.0, net_clearances)
         d = min(_seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      base_clearance=eff, net_clearances=net_clearances),
+                                      base_clearance=eff, net_clearances=net_clearances,
+                                      window=win),
                 _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff),
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      window=win),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
-                                      net_clearances=net_clearances, base_clearance=eff))
-        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+                                      net_clearances=net_clearances, base_clearance=eff,
+                                      window=win))
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                                    window=_scan_window(pcb_data, npth_clr + w / 2.0))
         return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
@@ -4421,20 +4457,24 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # only on the handful that fail this.
         eff = eff_clr(s.net_id)  # #436 own floor; foreign class excess folded in
         thr = eff + s.width / 2.0 - 1e-4
+        win = _scan_window(pcb_data, eff + s.width / 2.0, net_clearances)
         if min(_seg_foreign_pad_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     base_clearance=eff),
+                                     base_clearance=eff, window=win),
                _seg_foreign_seg_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     net_clearances=net_clearances, base_clearance=eff),
+                                     net_clearances=net_clearances, base_clearance=eff,
+                                     window=win),
                _seg_foreign_via_dist(pcb_data, s.net_id, s.start_x, s.start_y,
                                      s.end_x, s.end_y, s.layer,
-                                     net_clearances=net_clearances, base_clearance=eff)) < thr:
+                                     net_clearances=net_clearances, base_clearance=eff,
+                                     window=win)) < thr:
             return True
         # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308).
         hole_thr = npth_clr + s.width / 2.0 - 1e-4
         return _seg_foreign_hole_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y) < hole_thr
+                                      s.end_x, s.end_y,
+                                      window=_scan_window(pcb_data, npth_clr + s.width / 2.0)) < hole_thr
 
     MAX_ROUNDS = 3   # a fixed worst offender can expose the second-worst
 
@@ -4661,7 +4701,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
     from collections import defaultdict
     from check_connected import check_net_connectivity
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
-                                      _seg_foreign_via_dist)
+                                      _seg_foreign_via_dist, _scan_window)
     from check_drc import (board_edge_geometry, _point_on_board,
                            _point_to_rings_distance)
     from geometry_utils import point_to_segment_distance
@@ -4751,18 +4791,19 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
         """Cheap numpy prefilter: via body sub-clearance to any foreign copper."""
         eff = eff_clr(v.net_id)
         thr = eff + v.size / 2.0 - 1e-4
+        win = _scan_window(pcb_data, eff + v.size / 2.0, net_clearances)
         if _seg_foreign_via_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
                                  copper_layers[0], base_clearance=eff,
-                                 net_clearances=net_clearances) < thr:
+                                 net_clearances=net_clearances, window=win) < thr:
             return True
         for lyr in copper_layers:
             if _seg_foreign_seg_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
                                      lyr, base_clearance=eff,
-                                     net_clearances=net_clearances) < thr:
+                                     net_clearances=net_clearances, window=win) < thr:
                 return True
             if _seg_foreign_pad_dist(pcb_data, v.net_id, v.x, v.y, v.x, v.y,
                                      lyr, base_clearance=eff,
-                                     net_clearances=net_clearances) < thr:
+                                     net_clearances=net_clearances, window=win) < thr:
                 return True
         return False
 
