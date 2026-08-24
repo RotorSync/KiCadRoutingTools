@@ -1845,11 +1845,23 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # exactly the case this warning exists to surface, and priced flat
             # it under-reported it.
             pfl = st.pad_floor(p) if _carries else None
-            for vx, vy, vnet, keepout in st.vias:
+            _radii = st._via_radius_by_id
+            for t in st.vias:
+                vx, vy, vnet, keepout = t
                 if vnet == p.net_id:
                     continue
-                ko = (keepout - st._item_reach(st.via_floor(vnet))
-                      + st.via_required(pfl, vnet))
+                # #732: the radius comes from the MAP, never from
+                # `keepout - _item_reach(...)`. That subtraction is the exact
+                # arithmetic re-derivation the map's own comment forbids, and
+                # it re-prices a tuple a test assigned wholesale with its own
+                # keep-out convention. Absent from the map -> the tuple's own
+                # keep-out slot verbatim, which is what via_penalty's flat path
+                # and _via_effs already do with such a tuple. Numerically
+                # identical for every via __init__ built, so this is inert on
+                # every real board (the #732 test file measures that).
+                _rec = _radii.get(id(t))
+                ko = (keepout if _rec is None
+                      else _rec[1] + st.via_required(pfl, vnet))
                 if _point_to_rect_dist(vx, vy, rect) < ko - EPS:
                     locked_hits.append((ref, p.pad_number, vx, vy))
     if locked_hits:
