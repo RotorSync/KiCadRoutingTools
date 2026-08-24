@@ -87,28 +87,43 @@ Conventions this file follows (#697/#725/#731/#732/#733 and CLAUDE.md):
       - the corpus bound, where the widest tracked ring 0.1500 sits 0.0500
         under the 0.2000 threshold. That IS the finding, not a fixture.
 
-A 14-mutation run over the engine gate kills 13. The survivor is named rather
-than hidden: `<` -> `<=`. Its mechanism is worth stating correctly, because the
-obvious version is wrong: it is NOT that no candidate lands on an exact tie --
-this rig generates two (XH_MOVES at r = 0.50 gives a gap of exactly 0.2000, and
-XH_SEPARATES_THE_FLOORS at r = 0.50 exactly 0.1000), they are simply never
-reached because an earlier radius wins. The real reason is stronger: the gate
-compares against `floor + vr - 1e-4`, so a gap sitting on the FLOOR is 1e-4
-clear of the COMPARISON boundary, and `<` and `<=` are therefore behaviourally
-identical for every input -- not merely for every input this file tries.
+A 17-mutation run over the engine gate kills 17. Getting there took two wrong
+explanations of ONE mutation, `<` -> `<=`, and both are recorded because the
+second is the more seductive:
 
-Dropping the `- 1e-4` was likewise measured to leave the entire suite green (it
-was predicted to break test_732's DVS_BIG rig; it does not). It is therefore
-held by the source guard in `TestTheFloorIsTheVIARuleNotTheTRACKFloor` -- the two sibling
-gates must read as one expression, which is a source property.
+  1. "no candidate lands on an exact tie" -- false. This rig generates two
+     (XH_MOVES at r = 0.50 gives a gap of exactly 0.2000, and
+     XH_SEPARATES_THE_FLOORS at r = 0.50 exactly 0.1000); they are simply never
+     REACHED, because an earlier radius wins.
+  2. "the `- 1e-4` moves the comparison boundary off the floor, so the two
+     spellings are identical for EVERY input" -- also false, and it reasons
+     about the wrong quantity. The tie that matters is at the COMPARISON
+     boundary `floor + vr - 1e-4`, not at the floor, and that boundary is
+     reachable from ordinary 1um-grid KiCad geometry.
 
-Five of those fourteen were added after review found the first version of the
-source guard defeatable, and all five die: the epsilon hidden behind a trailing
-comment, the floor hidden behind one, the CONNECTOR gate unified onto this
-gate's floor, `H2H_PAD` moved, and the staged project's declaring key mistyped.
+`TestTheComparisonIsSTRICT` builds it: an NPTH hole of drill 0.500100 at
+x = 4.499950 makes the helper return exactly 0.7998999999999999, which IS
+`clearance + vr - 1e-4` in float. The shipped `<` accepts that candidate and
+the via relocates; `<=` refuses it and the repair is lost. So the survival was
+a FIXTURE GAP, not a proof of equivalence -- and the fixture now exists.
+
+This is the one place the file's "no fixture within 0.05mm of the quantity
+under test" convention is deliberately inverted: an exact tie IS the quantity
+under test there, and the arm asserts the tie before asserting about it.
+
+Eight of the seventeen were added by successive review rounds, and all eight
+die: the epsilon hidden behind a trailing comment, the floor hidden behind one,
+the CONNECTOR gate unified onto this gate's floor, `H2H_PAD` moved, the staged
+project's declaring key mistyped, the track floor SPELT as `clearance`
+(`max(clearance, 0.20)`, which the source guard alone cannot catch), the same
+via the named constant, and a board-aware `getattr(st, 'npth_floor', 0.0)`.
 Two FALSE-POSITIVE probes -- a comment mentioning `_seg_foreign_hole_dist(`,
 and one mentioning `st.npth_floor` -- correctly change nothing, which the
-earlier raw-line version of the guard did not manage.
+earlier raw-line version of the source guard did not manage.
+
+Dropping the `- 1e-4` is killed by the source guard only; it was measured to
+leave the entire suite green on behaviour alone (it was predicted to break
+test_732's DVS_BIG rig; it does not).
 
 Runs in-process in a couple of seconds; the corpus class shells out once for
 `git ls-files`.
@@ -169,10 +184,11 @@ LANDING = (3.45, 3.0)          # the FIRST landing the walls admit
 # admitted at r = 0.50 and 0.55, both also at k = 0 -- (3.50, 3.00) and
 # (3.55, 3.00). Naming LANDING "the only one" would be false, and the refusal
 # arms do not rest on it being the only one. They rest on something stronger:
-# the hole sits ON that single admissible ray, so the copper-to-hole gap grows
-# monotonically with r, and a hole close enough to refuse (3.45) refuses every
-# candidate BEYOND it too -- which is why a refusal arm ends with an empty
-# `moves` rather than with a different landing. ALL_CANDIDATES pins the set.
+# every admissible candidate lies on the +x ray and the hole is FURTHER along
+# it, so the copper-to-hole gap SHRINKS as r grows -- (3.45) is the roomiest of
+# the three, and refusing it refuses the other two a fortiori. That is why a
+# refusal arm ends with an empty `moves` rather than with a different landing.
+# ALL_CANDIDATES pins the set, and the arms assert every member.
 ALL_CANDIDATES = ((3.45, 3.0), (3.50, 3.0), (3.55, 3.0))
 WALL_L = (0.0, 0.0, 2.625, 8.0, 2)
 WALL_T = (0.0, 3.90, 8.0, 8.0, 2)
@@ -538,6 +554,58 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
     # any fixture that could catch it would sit on the threshold.
 
 
+class TestTheComparisonIsSTRICT(unittest.TestCase):
+    """`<`, not `<=`. The only mutation this file could not kill for two
+    rounds, because both explanations offered for its survival were wrong (see
+    the module docstring). A gap exactly ON the comparison boundary
+    `clearance + vr - 1e-4` is reachable from ordinary 1um-grid geometry, and
+    the two spellings disagree there."""
+
+    #: Chosen so `_seg_foreign_hole_dist` returns the boundary EXACTLY in
+    #: float. Both are 1um-grid values a real board could carry.
+    TIE_DRILL = 0.500100
+    TIE_X = 4.499950
+
+    def _tie_board(self):
+        bi = BoardInfo(layers={}, copper_layers=['F.Cu', 'B.Cu'],
+                       board_bounds=(0.0, 0.0, 8.0, 8.0))
+        v = make_via(VIA0[0], VIA0[1], net_id=3, size=V_SIZE, drill=V_DRILL)
+        stub = make_seg(2.0, 3.0, VIA0[0], VIA0[1], width=0.2, layer='F.Cu',
+                        net_id=3)
+        hole = make_pad(net_id=0, x=self.TIE_X, y=3.0, ref='H1REF', num='H1',
+                        size_x=self.TIE_DRILL, size_y=self.TIE_DRILL,
+                        shape='circle', layers=['F.Mask', 'B.Mask'],
+                        drill=self.TIE_DRILL, pad_type='np_thru_hole')
+        pcb = make_pcb(board_info=bi, vias=[v], segments=[stub],
+                       footprints={'C1': SimpleNamespace(layer='F.Cu',
+                                                         pads=[])},
+                       pads_by_net={0: [hole]}, zones=[])
+        return v, pcb
+
+    def test_a_candidate_exactly_ON_the_boundary_is_ACCEPTED(self):
+        """Deliberately inverts this file's own no-fixture-on-a-threshold rule:
+        an exact tie IS the quantity under test here."""
+        v, pcb = self._tie_board()
+        # ON THE BRANCH: assert the tie before asserting about it. Float
+        # equality is the point, so `assertEqual`, not assertAlmostEqual.
+        boundary = CLEAR + VR - 1e-4
+        self.assertEqual(
+            _seg_foreign_hole_dist(pcb, 3, LANDING[0], LANDING[1],
+                                   LANDING[0], LANDING[1]), boundary,
+            'the fixture no longer lands on the comparison boundary, so this '
+            'arm cannot tell `<` from `<=` and proves nothing')
+        moves, segs, out = _nudge(_FakeSt(WALLS), pcb, max_shift=MAX_SHIFT)
+        self.assertEqual(len(moves), 1,
+                         'a candidate exactly ON the boundary was refused -- '
+                         'the comparison is `<=`, and a gap equal to the '
+                         'requirement is legal, not a violation')
+        self.assertAlmostEqual(v.x, LANDING[0], places=4)
+        self.assertEqual(len(segs), 1)
+        self.assertIn('moved', out)
+    # MUTATION: `<` -> `<=` -- this candidate is refused, `no clear spot`
+    # prints, and the repair is lost. Nothing else in the file catches it.
+
+
 class TestTheTwoSiblingValidatorsSeeTheSameHoles(unittest.TestCase):
     """Why the gate calls the shared helper instead of reusing `board_pads`."""
 
@@ -550,7 +618,12 @@ class TestTheTwoSiblingValidatorsSeeTheSameHoles(unittest.TestCase):
 
     def test_an_NPTH_hole_on_a_MOVABLE_CAP_is_still_seen(self):
         """`board_pads` drops the pads of movable caps; the helper keeps them.
-        This is the ONE arm that separates the two implementations."""
+        This is the one arm that separates the two implementations on
+        BEHAVIOUR. The source guard co-kills that mutation for a structural
+        reason -- any inline version necessarily removes a
+        `_seg_foreign_hole_dist(` call site -- so "the only thing that catches
+        it" would be false; this is the only thing that catches it by running
+        the pass."""
         v, pcb, moves, segs, out = _rig(XH_REFUSED_BY_BOTH, hole_ref='C1')
         # ON THE BRANCH: the pad really is invisible to a board_pads-based
         # gate, and really is visible to the helper.
@@ -566,7 +639,8 @@ class TestTheTwoSiblingValidatorsSeeTheSameHoles(unittest.TestCase):
         self.assertEqual((moves, segs), ([], []))
         self.assertEqual((v.x, v.y), VIA0)
     # MUTATION: reimplement the gate inline over `board_pads` (reusing its
-    # `cap_` capsule) -- this arm moves while every other arm still passes.
+    # `cap_` capsule) -- this arm moves. The source guard also fires, on the
+    # missing call site; this is the only BEHAVIOURAL arm that does.
 
     def test_a_hole_on_the_VIAS_OWN_NET_is_exempt(self):
         """NEGATIVE CONTROL for the net filter. A via on the hole's own net
