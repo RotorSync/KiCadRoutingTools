@@ -202,6 +202,15 @@ class _FakeSt:
     """The duck-typed `st` the #370/#617 harnesses pass: no resolvers at all,
     so every requirement in the nudger falls back to the flat scalar."""
 
+    #: A REAL `st` is a `_Repair`, which carries `npth_floor` (the board-aware
+    #: hole floor). The duck type must carry one too, or the most likely wrong
+    #: floor -- `max(clearance, getattr(st, 'npth_floor', 0.0))` -- reads 0.0
+    #: here, behaves exactly like the right one, and is caught only by the
+    #: source guard. Measured: without this attribute that mutation survives
+    #: every behavioural arm in this file. 0.40 is above every gap the rig
+    #: uses, so a gate that reads it refuses landings the checker calls clean.
+    npth_floor = 0.40
+
     def __init__(self, rects):
         self.caps = {'C1': _FakeCap(rects)}
         self.vias = []
@@ -394,9 +403,21 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
     # and `no clear spot` printed, on geometry the checker calls clean.
 
     def test_a_DECLARED_min_hole_clearance_changes_nothing(self):
-        """#617's balance, pinned behaviourally rather than by comment. A
-        board declaring 0.40 would refuse this landing if the gate read the
-        board; the flat floor accepts it, so the #130 repair is kept."""
+        """A board declaring 0.40 would refuse this landing if the gate read
+        the board; it does not, so the #130 repair is kept.
+
+        The reason the declared value must stay unread is stronger than the
+        #617 appeal it used to rest on, and it is checkable: it changes
+        nothing in check_drc's VIA arm either. The declared floor enters that
+        arm only through the `req_clr > npth_clr` THRESHOLD, so with a
+        declared 0.40 and no pad override the graded requirement is still
+        `clearance`. A gate that read the board would therefore refuse copper
+        its own checker calls clean.
+
+        `_FakeSt.npth_floor` exists for this arm: without it the
+        `max(clearance, getattr(st, 'npth_floor', 0.0))` mutation reads 0.0
+        and slips through every behavioural test in this file.
+        """
         self.assertGreater(_wall_gap(XH_MOVES), NPTH_FLOOR + 0.04,
                            'the landing does not clear the flat floor')
         self.assertLess(_wall_gap(XH_MOVES), 0.40 - 0.04,
@@ -475,9 +496,16 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
         self.assertIn('clearance', vtxt,
                       'the VIA gate does not spell `clearance`, which is what '
                       'check_drc s via-hole arm grades at')
+        # This assertion is the ONLY thing in the tree that holds the
+        # connector floor. Measured: rewriting `npth_clr + hw` to
+        # `clearance + hw` passes test_617, test_370 and test_fanout_clearance
+        # (20 tests) -- including test_617's own "UNCHANGED site" arm, which
+        # exists to pin exactly that floor. Same position as the 1e-4 above,
+        # and worth the same disclosure rather than a silent reliance.
         self.assertIn('npth_clr', ctxt,
                       'the CONNECTOR gate no longer spells npth_clr -- #617 '
-                      'set that floor deliberately')
+                      'set that floor deliberately, and NOTHING else in the '
+                      'tree catches this')
         # The tolerance too. This one is pinned HERE and nowhere else, and
         # deliberately so: measured, dropping `- 1e-4` from the via gate leaves
         # the whole suite green, because it only decides an exact tie and no

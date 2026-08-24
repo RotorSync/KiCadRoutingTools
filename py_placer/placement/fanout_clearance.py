@@ -2431,10 +2431,24 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # then keeps the #130 pad-via graze this pass exists to remove. That is
         # exactly the failure obstacle_map.resolve_hole_clearance names for
         # this function by name -- an all-or-nothing repair whose one clearing
-        # candidate must not be refused -- and the same balance #617 struck for
-        # the connector gate. At --clearance >= 0.20 the two floors are equal,
-        # so this only ever differs below the fab floor; the CLI's own --help
-        # example is --clearance 0.1, and the GUI control's minimum is 0.05.
+        # candidate must not be refused.
+        #
+        # A board's DECLARED min_hole_clearance stays unread here, and the
+        # checkable reason is better than the #617 appeal it replaces: it
+        # changes nothing in check_drc's VIA arm either. The declared floor
+        # enters that arm only through the `req_clr > npth_clr` THRESHOLD, so
+        # with hole_clearance 0.5 and no pad override the requirement is still
+        # `clearance`. (#617 is about a different move -- it declined to RAISE
+        # the connector gate above the flat fab floor; this LOWERS the via gate
+        # below it, which #617 never measured. The principle is shared, the
+        # floor is not.)
+        #
+        # At --clearance >= 0.20 the two floors are equal, so this only ever
+        # differs below the fab floor. The CLI's own --help example is
+        # --clearance 0.1 and it applies no fab floor at all; the GUI's spin
+        # minimum is 0.05 but its value passes through _fab_floored, so the
+        # reachable minimum there is the fab tier's -- 0.127 standard 2-layer,
+        # 0.10 advanced 2-layer, 0.09 advanced multilayer.
         #
         # Same helper, same own-net exemption and the same 1e-4 as
         # connector_clear's gate below, so the two cannot disagree about which
@@ -2455,12 +2469,26 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # drill-to-drill is a machine constraint, this is an etch constraint,
         # and check_drc's via arm makes the same own-net exemption.
         #
-        # KNOWN GAP, deliberately not closed here, exactly as at the cap
-        # keep-out site above: this does not honour the hole pad's OWN
-        # `local_clearance`, which check_drc does honour, so it under-blocks by
-        # `lc - clearance` on such a pad. That is #730 -- a wrong VALUE where
-        # this was a missing GATE -- and closing it here would move a number
-        # #730 needs to move in one place.
+        # KNOWN GAP, deliberately not closed here. Like the cap keep-out site
+        # above, this does not honour the hole pad's OWN `local_clearance` --
+        # but the arithmetic is NOT the same, and saying "as above" inside a
+        # comment whose whole point is that the track and via arms differ would
+        # be wrong. check_drc's via arm is a STEP, not a max:
+        # `lc if lc > npth_clr else clearance`. So the shortfall here is
+        # `lc - clearance` ONLY when `lc > npth_clr`, and exactly ZERO for
+        # `clearance < lc <= npth_clr` (measured: clearance 0.10, lc 0.15 ->
+        # checker wants 0.100, this gate charges 0.100). Choosing `clearance`
+        # over `npth_clr` WIDENS that shortfall by `npth_clr - clearance`, i.e.
+        # by up to 0.10mm at --clearance 0.1 -- stated in magnitude, not merely
+        # in kind.
+        #
+        # That is #730 -- a wrong VALUE where this was a missing GATE. Two
+        # things for whoever closes it: the obvious `max(clearance, lc)` is
+        # measured WRONG in both directions (it over-blocks by 0.05 at
+        # clearance 0.10 / lc 0.15), and an exact mirror needs check_drc's
+        # `npth_clr`, which includes the BOARD's declared min_hole_clearance --
+        # dragging back in the very read this function and its own source guard
+        # forbid.
         if _seg_foreign_hole_dist(pcb_data, v.net_id, nx, ny, nx, ny) < \
                 clearance + vr - 1e-4:
             return False
