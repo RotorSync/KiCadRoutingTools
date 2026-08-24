@@ -2145,6 +2145,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         for _v in pcb_data.vias:
             if _v.net_id in _reg_set:
                 _reg_vias.setdefault(_v.net_id, []).append(_v)
+    # #734: remember WHICH nets are mere rip candidates -- the audit gate
+    # below must not depend on the is_existing_route flag surviving in
+    # routed_results (later passes replace result dicts), so it keys on
+    # this id set instead.
+    state.preexisting_registered = set(existing_rippable)
     for nid in existing_rippable:
         state.routed_net_ids.append(nid)
         state.routed_net_paths[nid] = []
@@ -3032,11 +3037,73 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # follow-up). Filled by the sweep below and by the straggler grading at
     # summary time.
     _pad_pair_stats: Dict[int, Tuple[int, int]] = {}
+    # #734: nets this run actually DISTURBED -- the only pre-existing
+    # candidates whose brokenness is this run's to report and to hand the
+    # final reconciliation. Everything else with an is_existing_route
+    # custody entry was merely rip-ELIGIBLE.
+    _pe_reg734 = getattr(state, 'preexisting_registered', None) or set()
+    _scope734 = ({nid for _nm, nid in single_ended_nets}
+                 | set(all_net_ids_to_route or ()))
+    _pe_disturbed_audit = (set(_pe_ripped_reg)
+                           | set(getattr(state, 'casualty_custody', {}) or {})
+                           | set(state.collision_refused_net_ids or set())
+                           | {s.net_id for s in _stale_input_segs}
+                           | {v.net_id for v in stale_input_vias}
+                           | set(force_ripped or {})
+                           | {nid for nid, v in
+                              (getattr(state, 'terminal_restores', None)
+                               or {}).items() if v != 'full'})
+    if os.environ.get('KICAD_SCOPE_DEBUG'):
+        _b734 = {
+            'ripped_reg': set(_pe_ripped_reg),
+            'casualty': set(getattr(state, 'casualty_custody', {}) or {}),
+            'collision': set(state.collision_refused_net_ids or set()),
+            'stale_segs': {s.net_id for s in _stale_input_segs},
+            'stale_vias': {v.net_id for v in stale_input_vias},
+            'force': set(force_ripped or {}),
+            'trestore': {nid for nid, v in
+                         (getattr(state, 'terminal_restores', None)
+                          or {}).items() if v != 'full'},
+        }
+        for _bk, _bs in _b734.items():
+            if _bs:
+                _nmz = sorted((pcb_data.nets[n].name.split('/')[-1]
+                               if n in pcb_data.nets else str(n))
+                              for n in _bs)[:12]
+                print(f"  [scope-dbg] disturbed[{_bk}] = {len(_bs)}: {_nmz}")
     for _nid, _res in routed_results.items():
         if _nid in state.diff_pair_by_net_id:
             continue  # diff pairs report via their own path
         _pads = pcb_data.pads_by_net.get(_nid, [])
         if len(_pads) < 2:
+            continue
+        # #734 reconcile scoping: every pre-existing rip CANDIDATE gets a
+        # routed_results entry (custody registration, is_existing_route),
+        # so on a narrow --nets run this audit minted failed_pads for the
+        # WHOLE board's open stub nets and the final reconciliation then
+        # routed all of them (measured: a 2-net run on a mid-chain board
+        # routed 48 extras, with the reconcile pricing layers on its own
+        # AUTO ladder -- different economics than the requested nets).
+        # Candidacy makes a net rip-ELIGIBLE; responsibility transfers at
+        # an ACTUAL rip. An is_existing_route entry whose net this run
+        # never disturbed is neither this run's failure nor the
+        # reconcile's to route: a net the run ripped is in the
+        # _preexisting_rips registry (or its entry was replaced by the
+        # rip/restore machinery, dropping the flag) and still audits.
+        if os.environ.get('KICAD_SCOPE_DEBUG'):
+            _nm734 = (pcb_data.nets[_nid].name.split('/')[-1]
+                      if _nid in pcb_data.nets else str(_nid))
+            print(f"  [scope-dbg] audit {_nm734}: registered="
+                  f"{_nid in _pe_reg734} "
+                  f"requested={_nid in _scope734} "
+                  f"disturbed={_nid in _pe_disturbed_audit}")
+        if (_nid in _pe_reg734 and _nid not in _scope734
+                and _nid not in _pe_disturbed_audit):
+            # Clear, don't just skip: an earlier stage may have stamped
+            # failed_pads_info on this untouched candidate's entry, and
+            # the failed_multipoint export below reads the flag verbatim.
+            if _res.get('failed_pads_info'):
+                _res['failed_pads_info'] = []
             continue
         _r = check_net_connectivity(
             _nid, _segs_by_net.get(_nid, []), _vias_by_net.get(_nid, []),
@@ -3161,6 +3228,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _frag_already = {m['net_id'] for m in failed_multipoint}
     for _nid, _res in sorted(routed_results.items()):
         if _nid in _frag_already or _zones_by_net.get(_nid):
+            continue
+        # #734: an untouched pre-existing candidate's fragmented input
+        # copper (e.g. a fanout stub at each end of an unrouted net) is
+        # the CHAIN's business, not this run's -- without this gate the
+        # sweep re-enrolled every net the audit gate had just scoped out.
+        if (_nid in _pe_reg734 and _nid not in _scope734
+                and _nid not in _pe_disturbed_audit):
             continue
         _segs = _segs_by_net.get(_nid, [])
         if not _segs:
@@ -4914,6 +4988,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                   f"with NO copper yet absent from every failure bucket "
                   f"-- enrolling: {', '.join(_zero9)}")
             _rec_names.extend(_zero9)
+        if os.environ.get('KICAD_SCOPE_DEBUG'):
+            print(f"  [scope-dbg] reconcile buckets: "
+                  f"failed_single={len(failed_single)} "
+                  f"failed_multipoint={len(failed_multipoint)} "
+                  f"custody={len(_custody_nets9)} "
+                  f"victims={len(_victim_retry_names)} "
+                  f"open_single={len(open_single)} "
+                  f"zero={len(_zero9)}")
+            for _m in failed_multipoint[:6]:
+                print(f"  [scope-dbg] fm entry: {_m['net_name']} "
+                      f"oracle={_m.get('oracle_only', False)} "
+                      f"pads={len(_m.get('failed_pads', []))}")
         print(f"\nFinal reconciliation: retrying {len(_rec_names)} "
               f"incomplete/custody net(s) against the finished board: "
               f"{', '.join(_rec_names)}")
