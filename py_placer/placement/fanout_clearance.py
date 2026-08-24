@@ -1952,10 +1952,13 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     def connector_clear(net_id, layer, width, sx, sy, ex, ey):
         hw = width / 2.0
         # The connector is a TRACK on `layer`, so it resolves like one. Note
-        # this honours netclasses and .kicad_dru LAYER rules, but not #549
-        # track-scoped rules, which live in a channel PadClearanceModel does
-        # not carry (kicad_dru.read_board_track_clearances); under-blocking a
+        # this honours netclasses and .kicad_dru LAYER rules, but not
+        # TRACK-SCOPED .kicad_dru rules, which live in a channel
+        # PadClearanceModel does not carry (kicad_dru.read_board_track_clearances,
+        # applied by check_drc at the seg-seg site only). Under-blocking a
         # geometric connector that is separately DRC'd is the safe direction.
+        # Filed as #735. (check_drc.py tags that channel `#549`; GitHub #549 is
+        # a closed, unrelated issue, so this cites the tracker instead.)
         cfl = seg_fl(net_id, layer)
         # board edge / cutouts + NPTH drill holes at their floor (#370 B3):
         # a connector is drawn geometrically, not routed, so it must gate
