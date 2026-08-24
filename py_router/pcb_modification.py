@@ -3721,6 +3721,19 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     def clears(x1, y1, x2, y2, layer, net_id, w):
         eff = pair_base(net_id, layer)
         win = _scan_window(pcb_data, eff + w / 2.0, net_clearances, _trk_clr)
+        # Phase 2.5 Task 1 prefilter: if the per-stage field's lower bound over
+        # the crossed cells already exceeds every threshold, the exact kernels
+        # provably pass -- skip them. Any uncertainty (a dirty cell from an
+        # intra-stage splice commit, or a bound below threshold) falls through
+        # to the exact kernels unchanged.
+        fld = None if _cf_disabled else _cf_fields.get(layer)
+        if fld is not None:
+            dirty, dminx, dminy, dres = _cf_dirty[layer]
+            if not _cf_crosses_dirty(dirty, dminx, dminy, dres, x1, y1, x2, y2):
+                win_all = max(win, _scan_window(pcb_data, npth_clr + w / 2.0))
+                bnd = _cf_bound(fld, x1, y1, x2, y2)
+                if bnd is not None and bnd >= win_all:
+                    return True
         pd = _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                    base_clearance=eff, net_clearances=net_clearances,
                                    window=win)
@@ -3764,6 +3777,38 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                       f"w={w} cached_d={pd:.3f} fresh_d={pd_fresh:.3f}")
         return ok
 
+    def _clears_batch(layer, net_id, w, segs):
+        """Vectorized clears() over a set of legs (same net/layer/width). Returns
+        a numpy bool array of per-leg pass flags, bit-for-bit the same verdict as
+        calling clears() once per leg (pad/seg/via/hole exact kernels batched;
+        edge + keepout checks applied per leg)."""
+        import numpy as np
+        eff = pair_base(net_id, layer)
+        win = _scan_window(pcb_data, eff + w / 2.0, net_clearances, _trk_clr)
+        hwin = _scan_window(pcb_data, npth_clr + w / 2.0)
+        x1s = np.array([s[0] for s in segs]); y1s = np.array([s[1] for s in segs])
+        x2s = np.array([s[2] for s in segs]); y2s = np.array([s[3] for s in segs])
+        nids = [net_id] * len(segs)
+        pd = _cf_pad_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
+                       base_clearance=eff, net_clearances=net_clearances,
+                       window=win)
+        sd = _cf_seg_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
+                       net_clearances=net_clearances, base_clearance=eff,
+                       track_clearances=_trk_clr, window=win)
+        vd = _cf_via_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
+                       net_clearances=net_clearances, base_clearance=eff,
+                       window=win)
+        hd = _cf_hole_b(pcb_data, nids, x1s, y1s, x2s, y2s, window=hwin)
+        ok = ((pd >= eff + w / 2.0 - 1e-4) &
+              (sd >= eff + w / 2.0 - 1e-4) &
+              (vd >= eff + w / 2.0 - 1e-4) &
+              (hd >= npth_clr + w / 2.0 - 1e-4))
+        for _k, (_x1, _y1, _x2, _y2) in enumerate(segs):
+            if ok[_k] and not (edge_clears(_x1, _y1, _x2, _y2, w) and
+                               keepout_clears(_x1, _y1, _x2, _y2, layer, w)):
+                ok[_k] = False
+        return ok
+
     def vk(x, y):
         return (round(x, 3), round(y, 3))
 
@@ -3794,6 +3839,34 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     stats = {'nets': 0, 'nets_skipped_large': 0, 'chains': 0, 'spans': 0,
              'segs_removed': 0, 'segs_added': 0, 'saved_mm': 0.0,
              'chains_reverted': 0}
+
+    # Phase 2.5 Task 1: per-layer all-copper clearance field built once per
+    # stage, plus dirty-region tracking so intra-stage splice commits never make
+    # the prefilter unsafe (any candidate crossing a dirty cell falls through to
+    # exact). The field is a valid lower bound on FOREIGN distance everywhere
+    # (own copper only ever lowers it), so pruning is safe whenever it fires.
+    from clearance_field import (build_field as _cf_build,
+                                 field_lower_bound as _cf_bound,
+                                 new_dirty_grid as _cf_new_dirty,
+                                 stamp_dirty as _cf_stamp_dirty,
+                                 segment_crosses_dirty as _cf_crosses_dirty)
+    from clearance_batch import (_seg_foreign_pad_dist_batch as _cf_pad_b,
+                                 _seg_foreign_seg_dist_batch as _cf_seg_b,
+                                 _seg_foreign_via_dist_batch as _cf_via_b,
+                                 _seg_foreign_hole_dist_batch as _cf_hole_b)
+    import os as _cfo2
+    _cf_disabled = bool(_cfo2.environ.get('KICAD_CF_DISABLE'))
+    _cf_fields = {}   # layer -> LayerField (built lazily, once per stage)
+    _cf_dirty = {}    # layer -> (dirty_grid, minx, miny, res)
+    _CF_GROUP = 10    # j-values per batched clears group (Task 2)
+
+    def _cf_get(layer):
+        f = _cf_fields.get(layer)
+        if f is None:
+            f = _cf_build(pcb_data, layer)
+            _cf_fields[layer] = f
+            _cf_dirty[layer] = _cf_new_dirty(pcb_data, layer)
+        return f
 
     for net_id in sorted(segs_by_net.keys()):
         if net_id in skip_net_ids:
@@ -3989,33 +4062,75 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                     return False
                         return True
 
-                    # Greedy farthest-reachable-vertex shortcutting.
+                    # Phase 2.5 Task 2: batched candidate evaluation. For each
+                    # greedy start vertex i we walk j in DESCENDING order in groups
+                    # of _CF_GROUP j-values; within each group we evaluate candidate
+                    # legs PHASE BY PHASE across all candidates of that group -- one
+                    # vectorized clears batch per leg position -- short-circuiting
+                    # any candidate whose earlier leg failed (exactly what the
+                    # per-candidate all(clears(...)) loop does), and stop at the
+                    # first group containing a passing candidate (the farthest
+                    # passing j). This evaluates essentially the same legs as the
+                    # per-candidate loop while running the exact kernels on
+                    # candidate SETS. pcb_data.segments is unchanged during this
+                    # chain's candidate evaluation (all spans are found before any
+                    # splice commit), so batching is exact.
                     spans = {}
                     i = 0
                     while i < n - 1:
                         found = None
-                        for j in range(n, i + 1, -1):
-                            sub_len = cum[j] - cum[i]
-                            if sub_len <= min_gain:
-                                break                 # closer spans only shrink
-                            if not span_free(i, j):
-                                continue
-                            A, B = vpts[i], vpts[j]
-                            for inter in _octolinear_bends(A, B):
-                                pts = [A] + inter + [B]
-                                new_len = sum(math.hypot(pts[q + 1][0] - pts[q][0],
-                                                         pts[q + 1][1] - pts[q][1])
-                                              for q in range(len(pts) - 1))
-                                if new_len > sub_len - min_gain:
+                        _jtop = n
+                        while _jtop > i:
+                            cand_meta = []   # (j, pts, gain)
+                            cand_pts = []    # pts list per candidate
+                            _jlo = max(i + 1, _jtop - _CF_GROUP + 1)
+                            _broke_min_gain = False
+                            for _j in range(_jtop, _jlo - 1, -1):
+                                sub_len = cum[_j] - cum[i]
+                                if sub_len <= min_gain:
+                                    _broke_min_gain = True
+                                    break       # closer spans only shrink
+                                if not span_free(i, _j):
                                     continue
-                                if all(clears(pts[q][0], pts[q][1],
-                                              pts[q + 1][0], pts[q + 1][1],
-                                              layer, net_id, w)
-                                       for q in range(len(pts) - 1)):
-                                    found = (j, pts, sub_len - new_len)
+                                A, B = vpts[i], vpts[_j]
+                                for inter in _octolinear_bends(A, B):
+                                    pts = [A] + inter + [B]
+                                    new_len = sum(math.hypot(pts[q + 1][0] - pts[q][0],
+                                                             pts[q + 1][1] - pts[q][1])
+                                                  for q in range(len(pts) - 1))
+                                    if new_len > sub_len - min_gain:
+                                        continue
+                                    cand_meta.append((_j, pts, sub_len - new_len))
+                                    cand_pts.append(pts)
+                            if not cand_meta:
+                                if _broke_min_gain:
                                     break
-                            if found:
+                                _jtop = _jlo - 1
+                                continue
+                            alive = [True] * len(cand_meta)
+                            max_legs = max(len(p) - 1 for p in cand_pts)
+                            for _li in range(max_legs):
+                                segs = []
+                                cand_idx = []
+                                for _ci in range(len(cand_meta)):
+                                    if alive[_ci] and _li < len(cand_pts[_ci]) - 1:
+                                        p = cand_pts[_ci]
+                                        segs.append((p[_li][0], p[_li][1],
+                                                     p[_li + 1][0], p[_li + 1][1]))
+                                        cand_idx.append(_ci)
+                                if not segs:
+                                    break
+                                leg_pass = _clears_batch(layer, net_id, w, segs)
+                                for _k, _ci in enumerate(cand_idx):
+                                    if not leg_pass[_k]:
+                                        alive[_ci] = False
+                            for _ci, (_j, _pts, _gain) in enumerate(cand_meta):
+                                if alive[_ci]:
+                                    found = (_j, _pts, _gain)
+                                    break
+                            if found or _broke_min_gain:
                                 break
+                            _jtop = _jlo - 1
                         if found:
                             spans[i] = found
                             i = found[0]
@@ -4092,6 +4207,15 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                          if id(s) not in _rm] + new_chain_segs
                     if hasattr(pcb_data, '_foreign_seg_arr_cache'):
                         pcb_data._foreign_seg_arr_cache = None
+                    # Mark the spliced-in copper dirty so the per-stage field
+                    # prefilter never prunes a candidate near freshly moved
+                    # foreign copper (staleness safety).
+                    if layer in _cf_dirty:
+                        dirty, dminx, dminy, dres = _cf_dirty[layer]
+                        for _ns in new_chain_segs:
+                            _cf_stamp_dirty(dirty, dminx, dminy, dres,
+                                            _ns.start_x, _ns.start_y,
+                                            _ns.end_x, _ns.end_y)
                     net_segs = trial
                     net_changed = True
         if net_changed:
