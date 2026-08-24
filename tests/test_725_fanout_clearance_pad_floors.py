@@ -68,9 +68,28 @@ ANCHOR_NET = 69
 ANCHOR_GAP = 0.1346
 MOVER_A, MOVER_B = 'C49', 'C62'
 
-# The inert board's recorded result, which #725 must not move.
-INERT_UNRESOLVED = ['C16', 'C17', 'C18', 'C19', 'C22', 'C23', 'C24']
-INERT_PLACEMENTS = 2
+# The inert board's recorded result. #725 did not move it; #731 did, on
+# purpose and by a lot -- 2 placements and 7 unresolved caps became 1 and 1.
+#
+# rp2350 declares no netclass, no .kicad_dru and no pad override, so the
+# clearance model is INERT and the pre-#731 layer side-channels were both
+# empty here. It is also 6 copper layers, and 2342 of its 4331 pruned
+# pad x track pairs were OFF-LAYER, carrying 4.6685mm of phantom seed graze
+# against 0.0142mm of real. Per-cap seed track graze, on-layer / off-layer:
+#
+#   C16  0.0000 / 0.7046      C20  0.0000 / 0.2900
+#   C17  0.0000 / 0.4913      C22  0.0000 / 0.9160
+#   C18  0.0106 / 0.0000      C23  0.0036 / 0.5836
+#   C19  0.0000 / 0.7851      C24  0.0000 / 0.8979
+#
+# So six of the eight caps were violators purely on phantom, and only C18 and
+# C23 have anything real. C18 is resolved; C23 is not, and is the one cap that
+# legitimately remains unresolved. The old run also SHIPPED a violation for
+# this: it moved C19 to clear a phantom and put its GND pad 0.145mm inside a
+# real F.Cu track, so check_drc flagged a PAD-SEGMENT on the output of a board
+# that is clean as it ships. It is clean again now.
+INERT_UNRESOLVED = ['C23']
+INERT_PLACEMENTS = 1
 
 
 def _repair(path, clearance=CLEAR, prefix='C,R,FB', pcb=None):
@@ -385,31 +404,46 @@ class TestChannels(unittest.TestCase):
     # MUTATION: scope the segment floor to `self._all_cu` -> the F.Cu and
     # In1.Cu arms return 0.5 too.
 
-    def test_an_OFF_LAYER_track_pair_keeps_the_flat_scalar(self):
-        """`cap_segs` is pruned on the F/B side collapse, which files an
-        In1.Cu track under 'F' -- so it contains cap-pad/inner-track pairs that
-        cannot touch and that check_drc never grades at all. The dru term
-        scopes itself away from them (empty shared set), but the NETCLASS term
-        is layer-blind, so charging it there would raise a PHANTOM and move
-        caps to clear copper on a layer their pads do not occupy.
+    def test_an_OFF_LAYER_track_pair_is_not_in_cap_segs_AT_ALL(self):
+        """#725 charged an off-layer pair the FLAT scalar so a netclass could
+        not amplify it; #731 removed the pair instead, which is what check_drc
+        does (check_pad_segment_overlap returns early off-layer).
 
-        Measured before this guard, on this board at a Default class of 0.3:
+        This test used to assert the flat price and to REQUIRE such a pair to
+        exist (`assertGreater(off, 0)`). Under #731 that is structurally
+        impossible, so the spy moved: it recomputes the OLD 'F'/'B' side prune
+        and asserts THAT still admits off-layer pairs, then asserts the real
+        `cap_segs` admits none. Without the recomputed spy this test would pass
+        just as well on a build that had deleted track grading outright, which
+        is why the on-layer arm below is kept unchanged.
+
+        Measured on this board at a Default class of 0.3 before #731:
         R17/R18/R5's entire graze WAS the phantom -- 0.0821mm each flat,
         0.6991/0.6991/0.5686 raised."""
         with tempfile.TemporaryDirectory() as td:
             p = _stage(td, 'offlayer', classes=_default_class(0.4))
             st = _repair(p)
+            # ON THE BRANCH: the OLD side prune really did admit off-layer
+            # pairs on this board, so "0 now" is a change, not a tautology.
+            old_off = 0
+            for ref, cap in st.caps.items():
+                for t in st.segments:
+                    if st._seg_side(t[6]) != cap.side:
+                        continue
+                    if not any(t[6] in pl for pl in cap.pad_layers):
+                        old_off += 1
+            self.assertGreater(old_off, 0,
+                               'the OLD side prune admitted no off-layer pair '
+                               'on this board -- the spy proves nothing')
             checked = off = on = 0
             for ref, cap in st.caps.items():
                 rows = st._seg_effs(ref, cap)
                 if rows is None:
                     continue
-                for i in range(len(cap.pad_floors)):
+                for i in range(len(cap.pad_layers)):
                     mine = cap.pad_layers[i]
                     for j, t in enumerate(st.cap_segs[ref]):
-                        layer = st._seg_layer_by_id.get(id(t))
-                        if layer is None:
-                            continue
+                        layer = t[6]
                         half = t[5] - st._item_reach(
                             st._seg_floor_by_id.get(id(t)))
                         checked += 1
@@ -417,16 +451,15 @@ class TestChannels(unittest.TestCase):
                             on += rows[i][j] > half + CLEAR + 1e-9
                         else:
                             off += 1
-                            self.assertAlmostEqual(
-                                rows[i][j], half + CLEAR, places=9,
-                                msg='%s pad %d vs an off-layer %s track was '
-                                    'charged above the flat scalar'
-                                    % (ref, i, layer))
-            # ON THE BRANCH: both kinds must be present, or this proves nothing
-            self.assertGreater(off, 0, 'no off-layer pair in any pruned list')
+            self.assertEqual(off, 0,
+                             '%d off-layer pair(s) survived the prune' % off)
+            # ON THE BRANCH: on-layer pairs must still be raised, or the whole
+            # track channel is simply gone and `off == 0` is vacuous.
             self.assertGreater(on, 0, 'no on-layer pair was raised')
-    # MUTATION: drop the off-layer test in `_seg_effs` -> the off-layer rows
-    # come back at the netclass 0.4.
+            self.assertGreater(checked, 0, 'no pair was examined at all')
+    # MUTATION: revert the prune to `if seg[6] != cap.side: continue` -> `off`
+    # is no longer 0. MUTATION: make `_seg_shares` return False always -> `on`
+    # drops to 0 and the vacuity guard fires.
 
     def test_a_board_with_NO_copper_layers_is_not_scoped_by_layer(self):
         """If `board_info.copper_layers` is empty, `pad_copper_layers` resolves
@@ -1175,12 +1208,19 @@ class TestReport(unittest.TestCase):
 
     def test_the_report_never_names_an_OFF_LAYER_track_pair(self):
         """`required_rows` must MIRROR what was charged, not re-derive it.
-        `_seg_effs` prices a cap-pad/track pair that shares no copper layer at
-        the flat scalar (the F/B side collapse puts such pairs in `cap_segs` at
-        all); a report that resolves the requirement independently names them
-        anyway, at the netclass. check_drc grades no such pair, so every one of
-        those rows sends the reader after a violation that does not exist --
-        measured at up to 43% of the disclosure on rp2350."""
+        Before #731 the F/B side collapse put pairs sharing no copper layer
+        into `cap_segs` at all, `_seg_effs` priced them at the flat scalar, and
+        a report resolving the requirement independently named them anyway, at
+        the netclass -- up to 43% of the disclosure on rp2350, every row
+        sending the reader after a violation check_drc does not grade.
+
+        #731 removes the pair rather than repricing it, so the guard in
+        `best()` is now belt-and-braces for the real prune and load-bearing
+        only for a MIXED-layer cap (an SMD pad beside a through-hole one),
+        where the union prune keeps a track only some pads share. The spy that
+        used to require an off-layer pair to exist therefore moved to the OLD
+        side prune; the per-row `shared` assertion below is unchanged and is
+        what still discriminates."""
         with tempfile.TemporaryDirectory() as td:
             p = _stage(td, 'offrep', classes=_default_class(0.4), src=INERT)
             pcb = parse_kicad_pcb(p)
@@ -1189,28 +1229,36 @@ class TestReport(unittest.TestCase):
             by_name = {v: k for k, v in names.items()}
             rows = st.required_rows(names)
             tracks = [r for r in rows if r[1].startswith('track ')]
-            # ON THE BRANCH: there must BE track rows and there must be
-            # off-layer pairs in reach, or this proves nothing.
+            # ON THE BRANCH: there must BE track rows, or this proves nothing.
             self.assertTrue(tracks, 'no track rows at all on this fixture')
+            # ...and the OLD prune must have admitted off-layer pairs here, or
+            # the phantom this guard is about never existed on this fixture.
+            old_off = sum(
+                1 for ref, cap in st.caps.items()
+                for t in st.segments
+                if st._seg_side(t[6]) == cap.side
+                and not any(t[6] in pl for pl in cap.pad_layers))
+            self.assertGreater(old_off, 0, 'the OLD side prune admitted no '
+                                           'off-layer pair -- spy proves nothing')
+            # ...and the NEW prune must admit none.
             off_pairs = sum(
                 1 for ref, cap in st.caps.items()
                 for t in st.cap_segs[ref]
-                if not any(st._seg_layer_by_id.get(id(t)) in pl
-                           for pl in cap.pad_layers))
-            self.assertGreater(off_pairs, 0, 'no off-layer pair in any pruned '
-                                             'list -- this would pass vacuously')
+                if not any(t[6] in pl for pl in cap.pad_layers))
+            self.assertEqual(off_pairs, 0,
+                             '%d off-layer pair(s) survived the prune' % off_pairs)
             for ref, who, mm, src in tracks:
                 nid = by_name.get(who[6:])
                 cap = st.caps[ref]
                 shared = any(
-                    any(st._seg_layer_by_id.get(id(t)) in pl
-                        for pl in cap.pad_layers)
+                    any(t[6] in pl for pl in cap.pad_layers)
                     for t in st.cap_segs[ref] if t[4] == nid)
                 self.assertTrue(shared,
                                 '%s <-> %s shares no copper layer, so it is '
-                                'priced flat and must not be reported' % (ref, who))
-    # MUTATION: drop the `layer not in cap_layers[i]` guard in
-    # `required_rows`' `best()` -> phantom rows come back.
+                                'not charged and must not be reported' % (ref, who))
+    # MUTATION: drop the `_seg_shares` guard in `required_rows`' `best()` ->
+    # a mixed-layer cap's phantom rows come back. MUTATION: revert the prune to
+    # the side collapse -> `off_pairs` is no longer 0.
 
     def test_an_unreadable_declaration_is_disclosed_not_silent(self):
         """A FAILED read is exactly what makes a model look INERT, so the notes
