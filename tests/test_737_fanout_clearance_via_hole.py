@@ -6,46 +6,60 @@ drill holes; `valid_via_pos` had NO equivalent for the via it relocates. Its
 only drilled-pad gate is drill-to-drill at the JLC `H2H_PAD` floor, which
 measures the DRILL -- so it covered the annular ring only while
 
-    ring = (size - drill) / 2  <=  H2H_PAD - npth_clr
+    ring = (size - drill) / 2  <=  H2H_PAD - clearance
 
-That bound is NOT the constant 0.25 the issue quotes: `npth_clr` is
-`max(clearance, NPTH_TO_TRACK_CLEARANCE)`, so it is 0.25 only at clearance
-<= 0.20, **0.20 at the shipped `--clearance` 0.25**, and 0 at clearance >= 0.45.
-Past it the pass parks ring copper inside a mounting hole's keep-out -- and it
-WRITES that via (placement/writer.py on the CLI, the plugin's own pcbnew mirror
-in the GUI).
+which is **0.20 at the shipped `--clearance` 0.25** and 0 at clearance >= 0.45,
+where every via binds. (The issue quotes a constant 0.25; that is the value for
+the TRACK floor, and this gate is not charged at the track floor -- see below.)
+Past that bound the pass parks ring copper inside a mounting hole's keep-out --
+and it WRITES that via (placement/writer.py on the CLI, the plugin's own pcbnew
+mirror in the GUI).
 
 Measured at HEAD before the fix, on the rig below (`--clearance 0.1`, a 1.4/0.3
 via boxed so its only escape is +x): the via relocates to (3.4500, 3.0000),
-0.0500mm of copper-to-hole-WALL gap where 0.2000 is required, and `check_drc`
-grades that board with its own via arm of the same rule:
+0.0500mm of copper-to-hole-WALL gap where the graded requirement is 0.1000, and
+`check_drc` grades that board with its own via arm of the same rule:
 
     VIA-HOLE violations (1):
       Hole:net_0 (MH1.H1) <-> Via:net_1 (copper-to-hole)
         Overlap: 0.050mm    Hole: (4.70,3.00)    Via: (3.45,3.00)
 
-After the fix no candidate validates, `via-nudge: no clear spot` prints, and the
-via stays put. A via with real room still relocates.
+The overlap IS the proof of the requirement: 0.1000 - 0.0500. After the fix no
+candidate validates, `via-nudge: no clear spot` prints, and the via stays put. A
+via with real room still relocates.
 
-WHY THE FLOOR IS `npth_clr` AND NOT A BARE `clearance`, decided by measurement
-rather than by argument. Both candidates were run over all 27 tracked boards at
-`--clearance` 0.25 AND 0.1, comparing placements with coordinates, the
-unresolved list, `via_moves`, `new_segments` and stdout: **0 boards differ, on
-either arm, at either clearance.** Both are inert everywhere this repo can
-measure, so the conservative one ships. Two facts make that cheap:
+WHY THE FLOOR IS `clearance` AND NOT THE SIBLING'S `npth_clr`. The asymmetry is
+the point, not an oversight, and it was decided by measurement after a first
+version of this file shipped the sibling's floor.
 
-  * At every shipped default they are the SAME NUMBER. `routing_defaults`
-    CLEARANCE is 0.25 and `npth_clr` is `max(clearance, 0.20)`, so on the CLI,
-    GUI and animator path `npth_clr == clearance` exactly and this gate IS
-    check_drc's `via-hole` arm. The choice bites only below clearance 0.20.
-  * `npth_clr >= clearance` always, so the pass can never emit a via its own
-    checker then flags -- a one-way invariant a bare `clearance` gives only as
-    equality.
+`npth_clr` is `max(clearance, NPTH_TO_TRACK_CLEARANCE)` -- a routing policy for
+TRACKS, which is what `connector_clear` gates. `check_drc` grades a VIA against
+a plain NPTH hole at `clearance` instead
+(`kicad_req = req_clr if req_clr > npth_clr else clearance`) and records why:
+charging a via the track floor "invents items kicad-cli never reports" (crkbd,
+7 phantoms at 0.016-0.023mm). `obstacle_map` stamps the same asymmetry -- a
+plain NPTH is a track keep-out, not a via-copper one.
 
-NOT A REVERSAL OF #617, and `TestTheFloorIsTheFlatFabFloor` pins that
-behaviourally. #617 measured that RAISING this pass's hole floor to a board's
-DECLARED `min_hole_clearance` turns 1 move / 1 connector into 0 / 0; #737 ADDS a
-missing gate at the flat fab floor and leaves the declared value unread.
+Charging `npth_clr` here does not merely cost search room, it COSTS THE REPAIR.
+Measured, and pinned by `TestTheTrackFloorWouldAbandonARepair`: at
+`--clearance 0.1` a landing 0.1500mm off the hole wall is graded CLEAN by
+check_drc (`NO DRC VIOLATIONS FOUND`), the track floor refuses it, no other
+candidate validates, and the cap keeps the #130 pad-via graze this pass exists
+to remove. That is the exact failure `obstacle_map.resolve_hole_clearance`
+names for this function BY NAME -- an all-or-nothing repair whose one clearing
+candidate must not be refused -- and it is the same balance #617 struck for the
+connector gate.
+
+The two floors are EQUAL at `--clearance >= 0.20`, so this only ever differs
+below the fab floor. That is not hypothetical: `place_fanout_clearance.py`'s own
+`--help` example is `--clearance 0.1`, and the GUI control's minimum is 0.05.
+
+NOT A REVERSAL OF #617, and `TestTheFloorIsTheVIARuleNotTheTRACKFloor` pins it
+behaviourally: #617 measured that RAISING this pass's hole floor -- to a board's
+DECLARED `min_hole_clearance` -- turns 1 move / 1 connector into 0 / 0. The
+declared value is still unread here, and the floor charged is the LOWER of the
+two candidates, so this pass refuses strictly less than the version review
+rejected.
 
 DELIBERATELY NOT CLOSED HERE: neither hole gate honours the hole pad's own
 `local_clearance`, which check_drc does honour -- that is #730, a wrong VALUE
@@ -73,7 +87,7 @@ Conventions this file follows (#697/#725/#731/#732/#733 and CLAUDE.md):
       - the corpus bound, where the widest tracked ring 0.1500 sits 0.0500
         under the 0.2000 threshold. That IS the finding, not a fixture.
 
-A 9-mutation run over the engine gate kills 8. The survivor is named rather
+A 14-mutation run over the engine gate kills 13. The survivor is named rather
 than hidden: `<` -> `<=`. Its mechanism is worth stating correctly, because the
 obvious version is wrong: it is NOT that no candidate lands on an exact tie --
 this rig generates two (XH_MOVES at r = 0.50 gives a gap of exactly 0.2000, and
@@ -85,15 +99,16 @@ identical for every input -- not merely for every input this file tries.
 
 Dropping the `- 1e-4` was likewise measured to leave the entire suite green (it
 was predicted to break test_732's DVS_BIG rig; it does not). It is therefore
-held by the SOURCE guard in `TestTheFloorIsTheFlatFabFloor` -- the two sibling
+held by the source guard in `TestTheFloorIsTheVIARuleNotTheTRACKFloor` -- the two sibling
 gates must read as one expression, which is a source property.
 
-A second round of four mutations, added after a review found the first version
-of that guard defeatable, kills all four: the epsilon hidden behind a trailing
-comment, the floor hidden behind one, `H2H_PAD` moved, and the staged project's
-declaring key mistyped. Two FALSE-POSITIVE probes -- a comment mentioning
-`_seg_foreign_hole_dist(`, and one mentioning `st.npth_floor` -- correctly
-change nothing, which the earlier raw-line version of the guard did not manage.
+Five of those fourteen were added after review found the first version of the
+source guard defeatable, and all five die: the epsilon hidden behind a trailing
+comment, the floor hidden behind one, the CONNECTOR gate unified onto this
+gate's floor, `H2H_PAD` moved, and the staged project's declaring key mistyped.
+Two FALSE-POSITIVE probes -- a comment mentioning `_seg_foreign_hole_dist(`,
+and one mentioning `st.npth_floor` -- correctly change nothing, which the
+earlier raw-line version of the guard did not manage.
 
 Runs in-process in a couple of seconds; the corpus class shells out once for
 `git ls-files`.
@@ -136,7 +151,8 @@ from placement import fanout_clearance as FC
 from placement.fanout_clearance import nudge_vias_for_unresolved
 
 # --- the rig ---------------------------------------------------------------
-CLEAR = 0.1                    # -> npth_clr 0.20; every other requirement 0.10
+CLEAR = 0.1                    # the VIA gate's floor, and check_drc's
+                               # -> npth_clr 0.20, the SIBLING's floor
 NPTH_FLOOR = defaults.NPTH_TO_TRACK_CLEARANCE       # 0.20
 H2H_PAD = 0.45                 # the function's own literal, mirrored here
 V_SIZE, V_DRILL = 1.4, 0.3     # vr 0.70, ring 0.55 -- past the masking bound
@@ -166,7 +182,8 @@ WALLS = [WALL_L, WALL_T, WALL_B]
 # Hole x positions. Distance from the landing is XH - 3.45; the gate measures
 # to the hole WALL, so the requirement is `floor + VR` on `XH - 3.45 - HR`.
 XH_REFUSED_BY_BOTH = 4.70      # wall gap 0.050 -- refused at either floor
-XH_SEPARATES_THE_FLOORS = 4.80  # wall gap 0.150 -- refused at 0.20, not at 0.10
+XH_SEPARATES_THE_FLOORS = 4.80  # wall gap 0.150 -- MOVES at 0.10, refused at
+                               # 0.20; check_drc grades this landing CLEAN
 XH_MOVES = 4.90                # wall gap 0.250 -- moves at 0.20, not at 0.40
 
 
@@ -238,8 +255,8 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
     def test_a_via_whose_RING_reaches_into_a_mounting_hole_is_refused(self):
         # ON THE BRANCH 1: the ring must be past the bound the DRILL test
         # masks, or this rig is a statement about some other geometry.
-        self.assertGreater((V_SIZE - V_DRILL) / 2.0, H2H_PAD - NPTH_FLOOR,
-                           'the via ring does not exceed H2H_PAD - npth_clr, '
+        self.assertGreater((V_SIZE - V_DRILL) / 2.0, H2H_PAD - CLEAR,
+                           'the via ring does not exceed H2H_PAD - clearance, '
                            'so the drill test would reject this landing on '
                            'its own and the new gate is not what is measured')
         # ON THE BRANCH 2: the landing is DRILL-test-legal, so the refusal
@@ -248,7 +265,7 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
         self.assertGreaterEqual(d_axis, V_DRILL / 2.0 + HR + H2H_PAD + 0.05,
                                 'the landing is inside the drill-to-drill '
                                 'keep-out, so the drill test refuses it too')
-        self.assertLess(_wall_gap(XH_REFUSED_BY_BOTH), NPTH_FLOOR - 0.05,
+        self.assertLess(_wall_gap(XH_REFUSED_BY_BOTH), CLEAR - 0.04,
                         'the landing is not inside the copper-to-hole band')
         # ON THE BRANCH 3: an empty `moves` means EVERY admissible candidate was
         # refused, not just the first. The walls admit three, all on the +x ray,
@@ -257,7 +274,7 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
         # would silently become a statement about the search budget.
         for cand in ALL_CANDIDATES:
             self.assertLess(_wall_gap(XH_REFUSED_BY_BOTH, at=cand),
-                            NPTH_FLOOR - 0.04,
+                            CLEAR - 0.04,
                             'candidate %s clears the gate, so a refusal here '
                             'would be about the 0.55mm budget, not the gate'
                             % (cand,))
@@ -270,24 +287,28 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
         self.assertEqual(segs, [], 'connector copper was drawn for no move')
         self.assertEqual((v.x, v.y), VIA0, 'the via was mutated in place')
     # MUTATION: delete the `_seg_foreign_hole_dist` gate in valid_via_pos --
-    # the via is parked at (3.4500, 3.0000) with 0.0500mm of copper-to-hole
-    # gap and stdout says "moved" (check_drc: VIA-HOLE, overlap 0.050mm).
+    # the via is parked at (3.4500, 3.0000) with 0.0500mm of copper-to-hole gap
+    # against a 0.1000 requirement, and stdout says "moved" (check_drc:
+    # VIA-HOLE, overlap 0.050mm -- which IS 0.1000 - 0.0500).
 
     def test_a_via_with_real_room_still_moves(self):
         """The over-rejection guard, and the negative control for every
         refusal in this file: the same rig with the hole 0.20mm further off."""
-        self.assertGreaterEqual(_wall_gap(XH_MOVES), NPTH_FLOOR + 0.04,
+        # Clear of BOTH candidate floors, so it is a control whichever one
+        # the gate charges -- it cannot be quietly invalidated by that choice.
+        self.assertGreaterEqual(_wall_gap(XH_MOVES),
+                                max(CLEAR, NPTH_FLOOR) + 0.04,
                                 'the control landing is not clear of the gate')
         v, _pcb, moves, segs, out = _rig(XH_MOVES)
         self.assertEqual(len(moves), 1,
                          'a via with 0.25mm of copper-to-hole gap was refused '
-                         'at a 0.20mm requirement -- the gate over-rejects')
+                         'at a 0.10mm requirement -- the gate over-rejects')
         self.assertAlmostEqual(v.x, LANDING[0], places=4)
         self.assertAlmostEqual(v.y, LANDING[1], places=4)
         self.assertEqual([(s['layer'], s['width']) for s in segs],
                          [('F.Cu', 0.2)])
         self.assertIn('moved', out)
-    # MUTATION: `npth_clr + vr` -> `npth_clr + 2 * vr` -- the gate
+    # MUTATION: `clearance + vr` -> `clearance + 2 * vr` -- the gate
     # over-rejects and this move disappears.
 
     def test_the_gate_prices_the_BARREL_not_the_DRILL(self):
@@ -299,35 +320,78 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
         # A drill-priced gate would need only 0.15 + 0.50 + 0.20 = 0.85 of
         # centre distance; the landing has 1.25, so it would accept.
         self.assertGreater(abs(LANDING[0] - XH_REFUSED_BY_BOTH),
-                           V_DRILL / 2.0 + HR + NPTH_FLOOR + 0.05,
+                           V_DRILL / 2.0 + HR + CLEAR + 0.05,
                            'a drill-priced gate would refuse this landing too')
         self.assertEqual(moves, [])
-    # MUTATION: `npth_clr + vr` -> `npth_clr + (v.drill or 0.3) / 2.0` -- the
-    # requirement falls to 0.85 of centre distance and the via moves.
+    # MUTATION: `clearance + vr` -> `clearance + (v.drill or 0.3) / 2.0` -- the
+    # requirement falls to 0.75 of centre distance and the via moves.
 
 
-class TestTheFloorIsTheFlatFabFloor(unittest.TestCase):
-    """Brackets the floor from BOTH sides: above a bare `clearance`, and not
-    raised by a board's declared `min_hole_clearance` (the #617 pin)."""
+class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
+    """The via gate charges `clearance`; its sibling charges `npth_clr`. That
+    asymmetry is deliberate -- check_drc grades a track and a via against a
+    plain NPTH hole at different values, and so does obstacle_map -- and these
+    arms are what stop a later reader unifying the two."""
 
-    def test_the_floor_is_not_the_bare_clearance(self):
-        # ON THE BRANCH: above clearance 0.20 the two candidates coincide and
-        # this arm asserts nothing.
+    def test_the_floor_is_NOT_the_siblings_track_floor(self):
+        # ON THE BRANCH: at clearance >= 0.20 the two coincide and this arm
+        # asserts nothing at all.
         self.assertLess(CLEAR, NPTH_FLOOR,
                         'at this clearance npth_clr == clearance, so this '
                         'test cannot separate the two conventions')
         gap = _wall_gap(XH_SEPARATES_THE_FLOORS)
         self.assertGreater(gap, CLEAR + 0.04,
-                           'the landing is inside the bare-clearance band '
-                           'too, so a `clearance` floor would refuse it as '
-                           'well and this arm proves nothing')
+                           'the landing is inside the via floor too, so it '
+                           'would be refused either way and this arm proves '
+                           'nothing')
         self.assertLess(gap, NPTH_FLOOR - 0.04,
-                        'the landing is outside the npth_clr band')
-        _v, _pcb, moves, segs, out = _rig(XH_SEPARATES_THE_FLOORS)
-        self.assertIn('no clear spot', out)
-        self.assertEqual((moves, segs), ([], []))
-    # MUTATION: `npth_clr + vr` -> `clearance + vr` -- the requirement drops
-    # to a 0.10mm wall gap and the via moves to (3.4500, 3.0000).
+                        'the landing clears the track floor as well, so the '
+                        'two conventions are not being separated here')
+        v, _pcb, moves, segs, out = _rig(XH_SEPARATES_THE_FLOORS)
+        self.assertEqual(len(moves), 1,
+                         'the via gate is charging the TRACK floor: it '
+                         'refused a landing check_drc grades clean')
+        self.assertAlmostEqual(v.x, LANDING[0], places=4)
+        self.assertEqual(len(segs), 1)
+        self.assertIn('moved', out)
+    # MUTATION: `clearance + vr` -> `npth_clr + vr` -- the requirement rises to
+    # a 0.20mm wall gap, this landing is refused, and (see the next arm) the
+    # repair is abandoned rather than merely relocated.
+
+    def test_the_track_floor_would_ABANDON_a_repair_check_drc_calls_clean(self):
+        """Why the asymmetry is not pedantry. `nudge_vias_for_unresolved` is an
+        all-or-nothing repair -- obstacle_map.resolve_hole_clearance names this
+        function BY NAME as one whose single clearing candidate must not be
+        refused. On this rig the track floor refuses every candidate, so the
+        cap would keep the #130 pad-via graze the pass exists to remove.
+
+        check_drc's own requirement for a via against a plain NPTH hole is
+        `hr + via.size/2 + clearance`, i.e. a wall gap of `clearance`.
+        Reproduced with the real checker on the equivalent board:
+
+            python3 py_router/check_drc.py rig48.kicad_pcb --clearance 0.1
+            -> NO DRC VIOLATIONS FOUND
+        """
+        self.assertGreaterEqual(
+            _wall_gap(XH_SEPARATES_THE_FLOORS), CLEAR,
+            'this landing is NOT clean at check_drc s via requirement, so '
+            'refusing it costs nothing and this arm is not about what it says')
+        # EVERY candidate the walls admit is inside the TRACK floor, so
+        # charging it loses the repair outright rather than moving it.
+        for cand in ALL_CANDIDATES:
+            self.assertLess(_wall_gap(XH_SEPARATES_THE_FLOORS, at=cand),
+                            NPTH_FLOOR,
+                            'candidate %s clears the track floor, so charging '
+                            'it would relocate rather than abandon, and this '
+                            'arm overstates the cost' % (cand,))
+        moves = _rig(XH_SEPARATES_THE_FLOORS)[2]
+        self.assertEqual(len(moves), 1,
+                         'the repair was abandoned on a landing check_drc '
+                         'grades CLEAN -- the exact failure mode '
+                         'obstacle_map.resolve_hole_clearance warns about for '
+                         'this function by name')
+    # MUTATION: `clearance + vr` -> `npth_clr + vr` -- 0 moves, 0 connectors,
+    # and `no clear spot` printed, on geometry the checker calls clean.
 
     def test_a_DECLARED_min_hole_clearance_changes_nothing(self):
         """#617's balance, pinned behaviourally rather than by comment. A
@@ -369,10 +433,13 @@ class TestTheFloorIsTheFlatFabFloor(unittest.TestCase):
     # MUTATION: `npth_clr` -> `st.npth_floor` (or a resolve_hole_clearance
     # read) -- this arm refuses while the project-less arm above still moves.
 
-    def test_both_hole_gates_in_the_nudger_spell_the_same_floor(self):
-        """A source guard, because the two sibling validators drifting apart
-        IS this issue. Reports the offending LINES, never assertIn over the
-        whole source (test_732 measured a 393KB failure message)."""
+    def test_the_two_hole_gates_keep_their_DIFFERENT_floors(self):
+        """A source guard. The two sibling validators drifting apart IS
+        this issue -- but they must agree about which HOLES exist, not
+        about what one COSTS: a track is charged npth_clr and a via
+        clearance, and unifying them in either direction is a defect.
+        Reports the offending LINES, never assertIn over the whole source
+        (test_732 measured a 393KB failure message)."""
         # CODE only. `l.lstrip().startswith('#')` drops a full-line comment
         # but not a trailing one, and the engine's comment block around this
         # very gate names `_seg_foreign_hole_dist`, `npth_clr`, `st.npth_floor`
@@ -389,11 +456,28 @@ class TestTheFloorIsTheFlatFabFloor(unittest.TestCase):
                          'expected exactly two copper-to-hole gates (the via '
                          'and the connector); found %d at function-relative '
                          'line(s) %s' % (len(calls), [i + 1 for i in calls]))
-        bad = [i + 1 for i in calls
-               if 'npth_clr' not in ' '.join(src[i:i + 3])]
-        self.assertEqual(bad, [],
-                         'a hole gate does not spell npth_clr, at '
-                         'function-relative line(s) %s' % bad)
+        # The two gates must spell DIFFERENT floors, and this is the guard
+        # that stops a later reader "tidying" them into one. The via gate
+        # (`v.net_id`) charges `clearance`; the connector gate (`net_id`, `hw`)
+        # charges `npth_clr`.
+        via_gate = [i for i in calls if 'v.net_id' in src[i]]
+        conn_gate = [i for i in calls if i not in via_gate]
+        self.assertEqual((len(via_gate), len(conn_gate)), (1, 1),
+                         'could not tell the via gate from the connector gate '
+                         'at function-relative line(s) %s'
+                         % [i + 1 for i in calls])
+        vtxt = ' '.join(src[via_gate[0]:via_gate[0] + 3])
+        ctxt = ' '.join(src[conn_gate[0]:conn_gate[0] + 3])
+        self.assertNotIn('npth_clr', vtxt,
+                         'the VIA gate spells npth_clr -- that is the TRACK '
+                         'floor, and charging it abandons repairs check_drc '
+                         'grades clean')
+        self.assertIn('clearance', vtxt,
+                      'the VIA gate does not spell `clearance`, which is what '
+                      'check_drc s via-hole arm grades at')
+        self.assertIn('npth_clr', ctxt,
+                      'the CONNECTOR gate no longer spells npth_clr -- #617 '
+                      'set that floor deliberately')
         # The tolerance too. This one is pinned HERE and nowhere else, and
         # deliberately so: measured, dropping `- 1e-4` from the via gate leaves
         # the whole suite green, because it only decides an exact tie and no
@@ -525,15 +609,15 @@ class TestTheDrillTestIsUnchanged(unittest.TestCase):
         0.5/0.3 via the DRILL test is the stricter of the two, so the new gate
         can never be the binding one there."""
         drill_need = 0.3 / 2.0 + self.ND / 2.0 + H2H_PAD          # 0.70
-        gate_need = 0.5 / 2.0 + self.ND / 2.0 + NPTH_FLOOR        # 0.55
-        self.assertGreater(drill_need, gate_need + 0.10,
+        gate_need = 0.5 / 2.0 + self.ND / 2.0 + CLEAR             # 0.45
+        self.assertGreater(drill_need, gate_need + 0.20,
                            'the two requirements are close enough that the '
                            'new gate could become the binding one here')
         v, pcb = self._rig617()
         _nudge(_FakeSt([self.BAR]), pcb)
         d = math.hypot(v.x - self.NPTH[0], v.y - self.NPTH[1])
-        self.assertGreater(d, gate_need + 0.10,
-                           'the achieved landing has less than 0.10mm of '
+        self.assertGreater(d, gate_need + 0.20,
+                           'the achieved landing has less than 0.20mm of '
                            'headroom on the new gate')
         self.assertAlmostEqual(d, 0.706588, places=5)
     # MUTATION: none kills these -- they are the measurement that licenses the
@@ -588,7 +672,7 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
         self.assertGreater(total, 500,
                            'only %d sized vias across the corpus -- the bound '
                            'below would be vacuous' % total)
-        bound = H2H_PAD - max(defaults.CLEARANCE, NPTH_FLOOR)      # 0.20
+        bound = H2H_PAD - defaults.CLEARANCE                       # 0.20
         # Compared against the bound ITSELF, with the margin reported. An
         # arbitrary safety subtraction here would be the tightest number in
         # the file (0.1500 against 0.1600) while LOOKING like the loosest --
@@ -619,7 +703,7 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
     def test_every_via_this_pipeline_CREATES_is_below_the_bound(self):
         """The corpus is a snapshot; these are the sizes the tool itself
         emits, and they are what keep the gate inert on boards it produces."""
-        bound = H2H_PAD - max(defaults.CLEARANCE, NPTH_FLOOR)
+        bound = H2H_PAD - defaults.CLEARANCE
         for name, size, drill in (
                 ('BGA_VIA', defaults.BGA_VIA_SIZE, defaults.BGA_VIA_DRILL),
                 ('VIA', defaults.VIA_SIZE, defaults.VIA_DRILL),
