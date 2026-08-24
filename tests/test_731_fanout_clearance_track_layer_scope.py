@@ -392,14 +392,37 @@ class TestTheInertPath(unittest.TestCase):
     # MUTATION: source `board_copper` from a `PadClearanceModel.for_board`
     # call instead of `self._all_cu` -> hits > 0.
 
-    def test_an_ON_layer_inert_cell_is_the_tuples_own_half_width_BIT_EXACTLY(self):
-        """`t[5] - clearance + clearance` is not float-identical to `t[5]`, and
-        this file's contract is that an inert board is BYTE-identical. Asserted
-        with assertEqual, not assertAlmostEqual."""
+    def test_an_ON_layer_inert_cell_NEVER_REACHES_THE_RESOLVER(self):
+        """On the inert path the eff cell is the tuple's own over-reach, taken
+        directly rather than rebuilt as `halves[j] + clearance`.
+
+        The point is the CALL, not the rounding. Rebuilding it routes every
+        inert cell through `_pair_or_flat`, which is the funnel the clearance
+        model hangs off -- a board that declares nothing would start consulting
+        the resolver once per pair. Spied directly, because the arithmetic
+        round-trip is float-exact on every cell measured (0 of 1063 on rp2350),
+        so an equality check alone cannot tell the two forms apart: a mutation
+        replacing this arm left the value assertion GREEN."""
         st = self.st
+        calls = []
+        orig = _Repair._pair_or_flat
+
+        def spy(self_, fa, fb):
+            calls.append((fa, fb))
+            return orig(self_, fa, fb)
+        _Repair._pair_or_flat = spy
+        try:
+            st._cap_seg_eff.clear()
+            rows_by_ref = {ref: st._seg_effs(ref, cap)
+                           for ref, cap in st.caps.items()}
+        finally:
+            _Repair._pair_or_flat = orig
+        self.assertEqual(calls, [],
+                         'the resolver was consulted %d time(s) building the '
+                         'TRACK eff matrix on an inert board' % len(calls))
         checked = 0
         for ref, cap in st.caps.items():
-            rows = st._seg_effs(ref, cap)
+            rows = rows_by_ref[ref]
             self.assertIsNotNone(rows, '%s got no eff matrix' % ref)
             for i in range(len(cap.pads)):
                 for j, t in enumerate(st.cap_segs[ref]):
@@ -410,9 +433,11 @@ class TestTheInertPath(unittest.TestCase):
                                      '%s pad %d vs track %d: %r != %r'
                                      % (ref, i, j, rows[i][j], t[5]))
                     checked += 1
+        # ON THE BRANCH: there must BE inert cells, or "0 calls" is vacuous.
         self.assertGreater(checked, 0, 'no inert pair was examined')
-    # MUTATION: replace the `t[5]` arm with `halves[j] + self.clearance` -> the
-    # assertEqual fails on the pairs where the float round-trip is lossy.
+    # MUTATION: replace the `fa is None and floors[j] is None` arm with `False`
+    # -> every inert cell falls through to `_pair_or_flat` and `calls` is no
+    # longer empty.
 
     def test_the_inert_boards_recorded_result_is_the_NEW_one(self):
         """Six of rp2350's eight caps were violators purely on phantom. Only
@@ -521,23 +546,45 @@ class TestTheOffSwitches(unittest.TestCase):
 class TestShapeAndClassification(unittest.TestCase):
 
     def test_the_Cap_constructor_takes_board_copper_POSITIONALLY(self):
-        """`board_copper` must be a real parameter, not a defaulted one that a
-        3-positional caller silently skips: with a default of `()`, every
-        `*.Cu` pad would resolve to the EMPTY set and read as copper-less --
-        the fix would look present and grade nothing."""
+        """`board_copper` must default to None, NOT to `()`.
+
+        With `()` the fallback to the model's own copper list never fires, so a
+        3-positional `_Cap(fp, lb, model)` -- which `test_725` uses -- resolves
+        `pad_copper_layers(p, [])`. That still resolves a CONCRETE `F.Cu` pad,
+        which is why a naive fixture cannot see it: only a `*.Cu` pad collapses
+        to the empty set, and an empty set is the "copper-less, grade flat"
+        marker. So the board would silently stop scoping its through-hole pads
+        while every visible signal looked fine. Measured: with a plain
+        signature check plus a 4-positional construction, that mutation
+        SURVIVED the whole suite."""
         names = list(inspect.signature(_Cap.__init__).parameters)
         self.assertEqual(names[1:5],
                          ['fp', 'courtyard_local', 'model', 'board_copper'])
+        self.assertIsNone(
+            inspect.signature(_Cap.__init__).parameters['board_copper'].default,
+            'board_copper defaults to something other than None, so the '
+            'fallback to model.board_copper cannot fire')
         pcb = parse_kicad_pcb(BOARD)
-        fp = pcb.footprints[CAP]
+        fp = copy.deepcopy(pcb.footprints[CAP])
+        for p in _copper_pads(fp):
+            _as_through(p)                      # now a `*.Cu` pad
         cu = pcb.board_info.copper_layers
+        # (a) 4-positional, no model at all: layers still resolve.
         cap = _Cap(fp, (-0.5, -0.5, 0.5, 0.5), None, cu)
-        # Built with NO model at all, and still resolves real layers.
         self.assertEqual(cap.pad_floors, [])
-        self.assertEqual(sorted(cap.pad_layers[0]), ['F.Cu'])
         self.assertEqual(len(cap.pad_layers), len(cap.pads))
-    # MUTATION: gate the pad_layers build on `model is not None` -> pad_layers
-    # is [] here. MUTATION: rename or reorder the parameter -> the name list
+        self.assertEqual(len(cap.pad_layers[0]), len(cu))
+        # (b) 3-positional with only a model, the shape test_725 uses: the
+        # fallback to model.board_copper must carry the layers.
+        model = PadClearanceModel.for_board(pcb, CLEAR, BOARD)
+        cap3 = _Cap(fp, (-0.5, -0.5, 0.5, 0.5), model)
+        self.assertEqual(len(cap3.pad_layers[0]), len(cu),
+                         'a 3-positional _Cap resolved %r for a *.Cu pad -- '
+                         'board_copper is shadowing the model fallback'
+                         % (cap3.pad_layers[0],))
+    # MUTATION: `board_copper=()` -> arm (b) resolves the empty set.
+    # MUTATION: gate the pad_layers build on `model is not None` -> arm (a) has
+    # no pad_layers. MUTATION: rename or reorder the parameter -> the name list
     # differs.
 
     def test_the_segment_tuple_is_still_SEVEN_wide_and_carries_a_LAYER(self):

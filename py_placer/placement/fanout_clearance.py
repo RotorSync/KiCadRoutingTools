@@ -1084,10 +1084,16 @@ class _Repair:
                     # gate costs the innermost loop nothing at all.
                     row.append(_OFF_LAYER)
                 elif fa is None and floors[j] is None:
-                    # Bit-exact: t[5] itself, not (t[5] - clearance) + clearance,
-                    # so an INERT board grades every surviving pair to the same
-                    # float it did before, and an injected tuple grades exactly
-                    # as injected. The model is never consulted on this arm.
+                    # Neither side has a floor: the pair is worth exactly the
+                    # tuple's own over-reach. Taking t[5] directly rather than
+                    # rebuilding it as halves[j] + clearance keeps the
+                    # resolver OUT of the inert path entirely -- _pair_or_flat
+                    # is not called, so an inert board cannot start consulting
+                    # a model, and an injected tuple grades exactly as
+                    # injected. (The arithmetic round-trip happens to be
+                    # float-exact on every cell measured -- 0 of 1063 on
+                    # rp2350 -- so this is about the call, not about the
+                    # rounding.)
                     row.append(t[5])
                 elif flat_pad:
                     row.append(halves[j] + self.clearance)
