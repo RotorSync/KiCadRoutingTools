@@ -56,20 +56,44 @@ Conventions this file follows (#697/#725/#731/#732/#733 and CLAUDE.md):
   * Every assertion names the single-line MUTATION that must kill it.
   * Assert you are ON THE BRANCH before asserting about it.
   * Every "is refused" is paired with a NEGATIVE CONTROL that still moves.
-  * No fixture sits within 0.05mm of the quantity under test. The ONE
-    sub-0.05 boundary in the rig is the CAP gate (0.025 either side of
-    nx = 3.425); that is the sweep's own 0.05mm radial quantum, it is stated
-    here rather than left for a reviewer to find, and it is not the quantity
-    any assertion below measures.
+  * No fixture in the rig below sits within 0.05mm of the quantity its
+    assertion measures -- the three hole positions sit at gaps 0.050 / 0.150 /
+    0.250 against a 0.200 floor, i.e. exactly 0.05 clear on both sides. Four
+    tighter boundaries exist and are named here rather than left for a reviewer
+    to find, because a blanket claim that ignored them would be false:
+      - the CAP gate, 0.025 either side of nx = 3.425. That is the sweep's own
+        0.05mm radial quantum, and no assertion here measures it.
+      - #617's INHERITED rig, whose landing clears the drill gate by 0.006588
+        (0.706588 vs 0.700000) -- that margin is what CHOOSES the landing, and
+        it is #617's geometry, not a fixture this file picked. The arm that
+        reads it asserts the landing exactly, so it is a change detector for
+        precisely that.
+      - the same rig's connector, 0.0200 clear of the connector's own floor
+        (0.3200 vs 0.3000) -- again inherited, and asserted exactly (0.2200).
+      - the corpus bound, where the widest tracked ring 0.1500 sits 0.0500
+        under the 0.2000 threshold. That IS the finding, not a fixture.
 
 A 9-mutation run over the engine gate kills 8. The survivor is named rather
-than hidden: `<` -> `<=`. It, and dropping the `- 1e-4`, were both measured to
-leave the ENTIRE suite green on behaviour alone -- they decide an exact tie, and
-the 0.05mm spiral produces no candidate that sits on one. The 1e-4 is therefore
-held by the SOURCE guard in `TestTheFloorIsTheFlatFabFloor` (the two sibling
-gates must read as one expression, which is a source property); `<=` is held by
-nothing, because any fixture that could catch it would have to sit on the
-threshold this file's own convention forbids.
+than hidden: `<` -> `<=`. Its mechanism is worth stating correctly, because the
+obvious version is wrong: it is NOT that no candidate lands on an exact tie --
+this rig generates two (XH_MOVES at r = 0.50 gives a gap of exactly 0.2000, and
+XH_SEPARATES_THE_FLOORS at r = 0.50 exactly 0.1000), they are simply never
+reached because an earlier radius wins. The real reason is stronger: the gate
+compares against `floor + vr - 1e-4`, so a gap sitting on the FLOOR is 1e-4
+clear of the COMPARISON boundary, and `<` and `<=` are therefore behaviourally
+identical for every input -- not merely for every input this file tries.
+
+Dropping the `- 1e-4` was likewise measured to leave the entire suite green (it
+was predicted to break test_732's DVS_BIG rig; it does not). It is therefore
+held by the SOURCE guard in `TestTheFloorIsTheFlatFabFloor` -- the two sibling
+gates must read as one expression, which is a source property.
+
+A second round of four mutations, added after a review found the first version
+of that guard defeatable, kills all four: the epsilon hidden behind a trailing
+comment, the floor hidden behind one, `H2H_PAD` moved, and the staged project's
+declaring key mistyped. Two FALSE-POSITIVE probes -- a comment mentioning
+`_seg_foreign_hole_dist(`, and one mentioning `st.npth_floor` -- correctly
+change nothing, which the earlier raw-line version of the guard did not manage.
 
 Runs in-process in a couple of seconds; the corpus class shells out once for
 `git ls-files`.
@@ -121,11 +145,19 @@ H_DRILL = 1.0                  # hr 0.50
 HR = H_DRILL / 2.0
 MAX_SHIFT = 0.55
 VIA0 = (3.0, 3.0)              # the offending via, net 3
-LANDING = (3.45, 3.0)          # the ONLY landing the walls admit
+LANDING = (3.45, 3.0)          # the FIRST landing the walls admit
 
-# Foreign-net (2) walls that box the search to +x, so the landing is
-# deterministic and one-dimensional: T/B admit only |dy| <= 0.10, and L needs
-# nx >= 3.425, so the first admissible ring is r = 0.45 -> (3.45, 3.00).
+# Foreign-net (2) walls that box the search to +x, so the search is
+# one-dimensional: T/B admit only |dy| <= 0.10, and L needs nx >= 3.425, so the
+# first admissible ring is r = 0.45 -> (3.45, 3.00). Two further candidates are
+# admitted at r = 0.50 and 0.55, both also at k = 0 -- (3.50, 3.00) and
+# (3.55, 3.00). Naming LANDING "the only one" would be false, and the refusal
+# arms do not rest on it being the only one. They rest on something stronger:
+# the hole sits ON that single admissible ray, so the copper-to-hole gap grows
+# monotonically with r, and a hole close enough to refuse (3.45) refuses every
+# candidate BEYOND it too -- which is why a refusal arm ends with an empty
+# `moves` rather than with a different landing. ALL_CANDIDATES pins the set.
+ALL_CANDIDATES = ((3.45, 3.0), (3.50, 3.0), (3.55, 3.0))
 WALL_L = (0.0, 0.0, 2.625, 8.0, 2)
 WALL_T = (0.0, 3.90, 8.0, 8.0, 2)
 WALL_B = (0.0, 0.0, 8.0, 2.10, 2)
@@ -218,6 +250,17 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
                                 'keep-out, so the drill test refuses it too')
         self.assertLess(_wall_gap(XH_REFUSED_BY_BOTH), NPTH_FLOOR - 0.05,
                         'the landing is not inside the copper-to-hole band')
+        # ON THE BRANCH 3: an empty `moves` means EVERY admissible candidate was
+        # refused, not just the first. The walls admit three, all on the +x ray,
+        # so the gap grows monotonically with r and the far ones are the ones
+        # that could plausibly escape. Assert they do not -- otherwise this arm
+        # would silently become a statement about the search budget.
+        for cand in ALL_CANDIDATES:
+            self.assertLess(_wall_gap(XH_REFUSED_BY_BOTH, at=cand),
+                            NPTH_FLOOR - 0.04,
+                            'candidate %s clears the gate, so a refusal here '
+                            'would be about the 0.55mm budget, not the gate'
+                            % (cand,))
         v, _pcb, moves, segs, out = _rig(XH_REFUSED_BY_BOTH)
         # The PRINT first: assert it before the counts and no mutation can
         # make the silence be the reported failure.
@@ -305,6 +348,17 @@ class TestTheFloorIsTheFlatFabFloor(unittest.TestCase):
                                      {'rules': {'min_hole_clearance': 0.40}}}},
                           f)
             v, pcb = _board(XH_MOVES, source_path=pcb_path)
+            # VERIFY THE INPUT before trusting the output (CLAUDE.md's
+            # run_utils.evidence rule). The assertion below is an ABSENCE --
+            # "the declared value changed nothing" -- so a fixture that
+            # declares nothing passes it forever, for the wrong reason. Mistype
+            # the key and resolve_hole_clearance returns 0.0; this line is what
+            # makes that a failure instead of a green.
+            from obstacle_map import resolve_hole_clearance
+            self.assertAlmostEqual(
+                resolve_hole_clearance(pcb, None), 0.40, places=6,
+                msg='the staged project does not actually declare 0.40, so '
+                    'this arm would pass even if the gate DID read the board')
             moves, segs, out = _nudge(_FakeSt(WALLS), pcb, max_shift=MAX_SHIFT)
         self.assertEqual(len(moves), 1,
                          'the declared 0.40 reached this gate -- #617 '
@@ -319,10 +373,18 @@ class TestTheFloorIsTheFlatFabFloor(unittest.TestCase):
         """A source guard, because the two sibling validators drifting apart
         IS this issue. Reports the offending LINES, never assertIn over the
         whole source (test_732 measured a 393KB failure message)."""
-        src = inspect.getsource(FC.nudge_vias_for_unresolved).splitlines()
+        # CODE only. `l.lstrip().startswith('#')` drops a full-line comment
+        # but not a trailing one, and the engine's comment block around this
+        # very gate names `_seg_foreign_hole_dist`, `npth_clr`, `st.npth_floor`
+        # and `1e-4` repeatedly -- so reading raw lines both invented gates
+        # (measured: one `# see _seg_foreign_hole_dist(` line took the count to
+        # 3) and let a real one hide behind `npth_clr + vr:  # the 1e-4 was
+        # here`, which passed every arm of this file.
+        src = [l.split('#')[0]
+               for l in inspect.getsource(FC.nudge_vias_for_unresolved)
+               .splitlines()]
         calls = [i for i, l in enumerate(src)
-                 if '_seg_foreign_hole_dist(' in l
-                 and not l.lstrip().startswith('#')]
+                 if '_seg_foreign_hole_dist(' in l]
         self.assertEqual(len(calls), 2,
                          'expected exactly two copper-to-hole gates (the via '
                          'and the connector); found %d at function-relative '
@@ -344,12 +406,19 @@ class TestTheFloorIsTheFlatFabFloor(unittest.TestCase):
                          'a hole gate dropped the 1e-4 the other one carries, '
                          'at function-relative line(s) %s' % eps)
         drift = [i + 1 for i, l in enumerate(src)
-                 if ('npth_floor' in l or 'resolve_hole_clearance' in l)
-                 and not l.lstrip().startswith('#')]
+                 if 'npth_floor' in l or 'resolve_hole_clearance' in l]
         self.assertEqual(drift, [],
                          'the nudger reads a BOARD-AWARE hole floor at '
                          'function-relative line(s) %s -- #617 refused that'
                          % drift)
+        # And the one constant this file HAND-MIRRORS. `H2H_PAD` is a
+        # function-local literal, so it cannot be imported; three ON-THE-BRANCH
+        # guards above reason about the drill test using the mirror, and would
+        # silently reason about the wrong number if the engine's changed.
+        self.assertIn('H2H_PAD = %s' % H2H_PAD, ' '.join(src),
+                      "the engine's H2H_PAD is no longer %s, so this file's "
+                      'mirror -- and the drill-test arithmetic in every '
+                      'ON-THE-BRANCH guard here -- is stale' % H2H_PAD)
     # MUTATION: re-spell either gate's floor, drop either 1e-4, or add a third
     # gate -- the count, the `bad` list or the `eps` list changes. This arm is
     # the ONLY thing that kills the 1e-4 mutation; `<` -> `<=` is killed by
@@ -475,12 +544,25 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
     """A self-expiring bound. The gate is UNREACHABLE on every board this repo
     tracks, which is why the demonstration above is synthetic on purpose."""
 
-    @staticmethod
-    def _tracked():
-        out = subprocess.run(['git', 'ls-files', '-z', '*.kicad_pcb'],
-                             cwd=_ROOT, capture_output=True, text=True)
-        return [os.path.join(_ROOT, p) for p in out.stdout.split('\0')
-                if p.endswith('.kicad_pcb')]
+    def _tracked(self):
+        """The boards git TRACKS. A checkout with no git, or a source export
+        outside a repo, cannot identify that set at all -- and must SKIP rather
+        than grade against a set it cannot name. Before this, a `git ls-files`
+        that exited 128 with empty output failed the count assertion below and
+        reported the gitignored-build-products reason, which is the WRONG
+        cause: `out.returncode` was captured and never read."""
+        try:
+            out = subprocess.run(['git', 'ls-files', '-z', '*.kicad_pcb'],
+                                 cwd=_ROOT, capture_output=True, text=True)
+        except OSError as e:
+            self.skipTest('SKIP: cannot run git to identify the tracked '
+                          'corpus: %s' % e)
+        if out.returncode != 0:
+            self.skipTest('SKIP: git ls-files exited %d (%s) -- the tracked '
+                          'corpus cannot be identified here'
+                          % (out.returncode, out.stderr.strip()[:120]))
+        return [os.path.join(_ROOT, q) for q in out.stdout.split(chr(0))
+                if q.endswith('.kicad_pcb')]
 
     def test_no_tracked_via_is_fat_enough_for_the_gate_to_bind(self):
         boards = self._tracked()
@@ -507,13 +589,22 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                            'only %d sized vias across the corpus -- the bound '
                            'below would be vacuous' % total)
         bound = H2H_PAD - max(defaults.CLEARANCE, NPTH_FLOOR)      # 0.20
-        self.assertLess(widest, bound - 0.04,
+        # Compared against the bound ITSELF, with the margin reported. An
+        # arbitrary safety subtraction here would be the tightest number in
+        # the file (0.1500 against 0.1600) while LOOKING like the loosest --
+        # and it is the bound, not a safety band, that the claim is about.
+        self.assertLess(widest, bound,
                         'a tracked board now carries a via ring of %.4f (%s), '
-                        'at or near the %.4f bound where this gate starts to '
+                        'at or over the %.4f bound where this gate starts to '
                         'bind at the shipped --clearance %.2f. The "provably '
                         'inert on the corpus" claim in this PR must be '
                         're-measured.' % (widest, where, bound,
                                           defaults.CLEARANCE))
+        self.assertGreater(bound - widest, 0.04,
+                           'the widest tracked ring %.4f is now within 0.04mm '
+                           'of the %.4f bound -- still inert, but the margin '
+                           'this PR reported as 0.0500 has shrunk'
+                           % (widest, bound))
         # The boards carrying BOTH vias and copper-less holes are the only
         # ones where this gate could ever fire; name them, so a change there
         # is visible rather than silent.
