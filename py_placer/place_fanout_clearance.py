@@ -62,8 +62,12 @@ Examples:
                         help=f"DRC clearance in mm (default: {defaults.CLEARANCE})")
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Position snap in mm (default: {defaults.GRID_STEP})")
-    parser.add_argument("--board-edge-clearance", type=float, default=0.55,
-                        help="Hard clearance from board edge in mm (default: 0.55)")
+    parser.add_argument("--board-edge-clearance", type=float, default=None,
+                        help="Hard clearance from board edge in mm (default: the "
+                             "board's own min_copper_edge_clearance when it asks "
+                             "for MORE than 0.55, else 0.55). #733: resolved by "
+                             "the shared engine, so the GUI plugin and "
+                             "animate_fanout_clearance.py get the same answer.")
     parser.add_argument("--capture-radius", type=float, default=2.0,
                         help="Max distance over which a same-net ball attracts "
                              "a cap pad in mm (default: 2.0)")

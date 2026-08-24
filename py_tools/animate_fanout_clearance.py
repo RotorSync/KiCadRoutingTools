@@ -230,7 +230,10 @@ def main():
                    "(default: input_capmove.gif)")
     p.add_argument("--clearance", type=float, default=defaults.CLEARANCE)
     p.add_argument("--grid-step", type=float, default=defaults.GRID_STEP)
-    p.add_argument("--board-edge-clearance", type=float, default=0.55)
+    # None, not 0.55 (#733): the engine resolves it, so the GIF frames the
+    # same usable box the run it visualises actually used. A private copy
+    # here would be a third notion of the margin -- the defect #733 closed.
+    p.add_argument("--board-edge-clearance", type=float, default=None)
     p.add_argument("--capture-radius", type=float, default=2.0)
     p.add_argument("--default-via-size", type=float, default=DEFAULT_VIA_SIZE)
     p.add_argument("--near-margin", type=float, default=1.0)

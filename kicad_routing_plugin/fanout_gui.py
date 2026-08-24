@@ -1605,6 +1605,10 @@ class FanoutTab(wx.Panel):
                 # Advanced cap-placement knobs (#130) so the inline checkbox
                 # path honours them too, not just defaults.
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
+                # #733: the cap repair's edge margin. AFTER the cap_* spread, so
+                # the shared Basic-tab override wins over any same-named panel
+                # key. None = the engine resolves it (CLI parity).
+                'cap_board_edge_clearance': shared.get('cap_board_edge_clearance'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -1929,6 +1933,11 @@ class FanoutTab(wx.Panel):
                 pcb_file=self.board_filename,
                 clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
+                # #733: the plugin used to pass NOTHING here, so it silently took
+                # the signature default whatever the board or the operator said,
+                # while the cap mover insets by max(clearance, this). None = the
+                # engine resolves it, which is what an omitted CLI flag does too.
+                board_edge_clearance=fanout_config.get('cap_board_edge_clearance'),
                 default_via_size=fanout_config.get('via_size', defaults.BGA_VIA_SIZE),
                 # Advanced cap-placement knobs from the BGA fanout tab (#130)
                 capture_radius=fanout_config.get('cap_capture_radius', 2.0),
@@ -2057,6 +2066,8 @@ class FanoutTab(wx.Panel):
             'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+            # #733, as in the inline path above.
+            'cap_board_edge_clearance': shared.get('cap_board_edge_clearance'),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones
         with redirect_prints_to_log(self.append_log):
