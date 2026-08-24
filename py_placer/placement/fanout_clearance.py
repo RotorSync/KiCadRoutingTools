@@ -74,6 +74,87 @@ _OFF_LAYER = -1.0e9
 # not stub endpoint offset) because the naive version shows nothing.
 _UNREADABLE_VIA_SIZE = 0.5  # mm
 
+# The cap-placement margin from Edge.Cuts when the operator names none and the
+# board declares none. A PLACEMENT margin (keep a decap off the rim so it can be
+# assembled and reworked), not a DRC floor -- which is why it is 0.55 and not one
+# of routing_defaults' two edge numbers: BOARD_EDGE_CLEARANCE is 0.0, the SIGNAL
+# sentinel meaning "no edge rule, use the copper-copper clearance" (list_nets.py
+# :507-511), and adopting it here would collapse this margin to `clearance`;
+# PLANE_EDGE_CLEARANCE 0.5 belongs to pours. list_nets.board_floor_knobs already
+# spells this same 0.55 as its `edge_default` for the sibling placement CLIs.
+CAP_EDGE_CLEARANCE = 0.55  # mm
+
+
+def resolve_cap_edge_clearance(pcb_file, explicit=None):
+    """The cap-placement edge margin, resolved ONCE. Returns ``(mm, source)``.
+
+    THE ONE ANSWER for every front end (#733). The CLI, the GUI plugin and the
+    animator each carried their own hard-coded 0.55 and only the CLI exposed a
+    flag, so a board declaring a real copper-to-edge rule reached three different
+    margins depending on which front invoked the same engine.
+
+    TIGHTEN-ONLY, and that is deliberate rather than a softer form of the
+    board-first rule `list_nets.board_floor` implements. `board_floor` is
+    explicitly NOT raise-only, which is correct for a routing floor and wrong
+    here, because the value it would read back is one THIS pipeline wrote:
+    `fix_project_for_output` PINS `min_copper_edge_clearance` UP to the fab
+    copper-to-edge floor 0.20 on every board it writes (fix_kicad_drc_settings.py
+    :608 -> :749-754, the one raise-allowed key), and `bga_fanout.py` calls it
+    (bga_fanout/__init__.py:4328) -- as does place_fanout_clearance.py itself.
+    The documented pipeline is `bga_fanout.py -> place_fanout_clearance.py`, so
+    EVERY board this pass is handed in a real chain declares >= 0.20 even when its
+    author declared nothing. Read plainly board-first, that 0.20 comes back tagged
+    "board constraint" -- our own default wearing the board's name -- and the cap
+    margin silently drops 0.55 -> max(clearance, 0.20). 80/184 corpus boards
+    declare below 0.20 (fix_kicad_drc_settings.py:356), so that is the common case,
+    not a corner. Raising only is immune to the pin and still honours a board that
+    genuinely wants MORE room than 0.55.
+
+    An EXPLICIT POSITIVE value is honoured as given, in both directions: that is
+    the operator overriding the pass, and --board-edge-clearance 0.2 must mean
+    0.2 even though it is below the default.
+
+    A NON-POSITIVE explicit value is UNSET, not a margin of zero. Cite the right
+    precedent for that, because there are two rules in this codebase and they
+    differ exactly here: `board_floor` / `board_floor_knobs` apply the
+    non-positive-is-unset rule to a DECLARED value only and honour an explicit
+    one unconditionally (`if explicit is not None: return float(explicit)`,
+    list_nets.py:450), while `effective_board_edge_clearance` applies it to the
+    CLI value too (`cli_value if (cli_value and cli_value > 0) else ...`,
+    fix_kicad_drc_settings.py:357). This follows the latter, and deliberately
+    diverges from `board_floor` on this one point. Not pedantry: the GUI's Min
+    Edge Clearance spin control is
+    CREATED at defaults.BOARD_EDGE_CLEARANCE, which is 0.0, with a range minimum
+    of 0.0 -- so an operator who ticks the override box and types nothing hands
+    this function a 0. Honoured literally that would drop the cap margin to
+    max(clearance, 0) = the bare clearance: the exact 0.30mm under-block #733
+    exists to close, re-opened through a different door and LOOSER than the
+    0.55 the plugin used before this change. Caught by the #733 review.
+
+    `source` is for disclosure only: 'cli' | 'board constraint, raised' |
+    'fixed default'. There is deliberately NO 'unreadable project' source, unlike
+    board_floor's -- `board_constraint` swallows its own read errors and
+    `read_design_rules` swallows JSONDecodeError/OSError (list_nets.py:199), so a
+    corrupt project is genuinely indistinguishable here from one that declares
+    nothing. Both report 'fixed default'. Stated rather than papered over with a
+    label that could never print; the VALUE is 0.55 either way, which is the safe
+    direction for a raise-only rule.
+    """
+    if explicit is not None and explicit > 0:
+        return float(explicit), 'cli'
+    try:
+        from list_nets import board_constraint
+        declared = board_constraint(pcb_file, 'min_copper_edge_clearance')
+    except Exception:                                          # noqa: BLE001
+        declared = None    # e.g. pcb_file is not a path at all (an unsaved GUI
+                           # board): no declaration to raise to, take the default
+    # A declaration below the default cannot LOWER this margin (see above), and a
+    # non-positive one is UNSET rather than a floor of zero -- KiCad writes 0 into
+    # these fields for "not configured". `> CAP_EDGE_CLEARANCE` subsumes both.
+    if declared is not None and declared > CAP_EDGE_CLEARANCE:
+        return float(declared), 'board constraint, raised'
+    return CAP_EDGE_CLEARANCE, 'fixed default'
+
 
 def _via_radius(via, default_size=_UNREADABLE_VIA_SIZE) -> float:
     """The copper radius of a via, in mm -- the ONE implementation of the rule.
@@ -387,13 +468,12 @@ class _Repair:
         self.board = bounds
         # Copper-to-EDGE, not a different-net pair requirement, so #725 leaves
         # it alone: it is KiCad's `min_copper_edge_clearance`, a separate rule
-        # a netclass cannot express. Two caveats worth stating rather than
-        # implying: `board_edge_clearance` is a plain CLI flag (default 0.55)
-        # and is NOT auto-read from the board the way the routing steps read
-        # their edge constraint, and the GUI never passes it, so the plugin
-        # always gets the 0.55 signature default. Separately,
-        # nudge_vias_for_unresolved's own edge tests use bare `clearance`
-        # instead of this margin -- both pre-existing, both filed.
+        # a netclass cannot express. #733 closed the three gaps this comment
+        # used to list as filed: `board_edge_clearance` now reaches every front
+        # end through resolve_cap_edge_clearance (the GUI passed nothing and got
+        # the signature default; the animator had its own copy), and
+        # nudge_vias_for_unresolved reads `self.edge_margin` below instead of
+        # gating its own emitted copper at bare `clearance`.
         margin = max(clearance, board_edge_clearance)
         self.usable = (bounds[0] + margin, bounds[1] + margin,
                        bounds[2] - margin, bounds[3] - margin)
@@ -406,7 +486,9 @@ class _Repair:
         # touch a ring pay for the exact test. The gate itself now lives in
         # placement/legality.py, shared with quench (#456 item 2).
         self.edge_gate = BoardOutlineGate(pcb_data.board_info, margin)
-        self._edge_margin = margin
+        # (the board-edge requirement is read back through the `edge_margin`
+        # property below, which delegates to the gate rather than keeping a
+        # second copy of `margin` -- see its docstring for why, #733)
         # ref -> the milled rings this mover's own pads sit inside (#628), the
         # same exemption quench takes. Needed HERE and not only at the margin-0
         # gates because this one runs at max(clearance, board_edge_clearance)
@@ -1020,6 +1102,50 @@ class _Repair:
         unresolved that its own nudger then refuses to see). The via eff rows
         are built from this same call, so they cannot drift from it either."""
         return self._pair_or_flat(pad_floor, self._via_floor_for(via_net))
+
+    @property
+    def edge_margin(self) -> float:
+        """THE copper-to-Edge.Cuts requirement of this run -- max(clearance,
+        board_edge_clearance) -- and the one answer in this module (#733).
+
+        Public, and read from OUTSIDE the class, for the same reason
+        via_radius and via_required are: nudge_vias_for_unresolved gates the
+        vias it RELOCATES and the connector segments it DRAWS, and those two
+        gates must not be weaker than the one a cap pad has to pass.
+
+        Left divergent, they were. The cap mover inset `usable` and built
+        `edge_gate` at max(clearance, board_edge_clearance) while the nudger's
+        edge_ok_point / edge_ok_seg spelled a bare `clearance`, so at the CLI
+        defaults (0.55 / 0.25) the pass parked a relocated via and its
+        connector 0.30mm closer to Edge.Cuts than any cap is allowed to sit --
+        an under-block on copper the pass itself created and the writer keeps
+        (place_fanout_clearance.py:138). Identically 0.30mm on the GUI path,
+        which passes no flag at all.
+
+        DELEGATES to the gate instead of storing the number a second time.
+        `edge_gate` is what the cap mover's real-outline rect tests actually
+        measure against, so a private duplicate here would be this very defect
+        in miniature -- two names for one requirement, one refactor from
+        drifting. (It replaces `_edge_margin`, which this module read nowhere.)
+
+        What is NOT shared with the gate is its #628 owned-milled-ring
+        exemption -- and read legality.py:512-525 before restoring it here,
+        because the obvious reading is wrong. That exemption is not a
+        rect-modelling workaround limited to the swallow probe; it covers the
+        EDGE-MARGIN test too, and exists because a part whose own PADS caused a
+        contour to be reclassified as an inner milled edge would otherwise have
+        every pose inside its own relief vetoed (run 20's SW2: 0 legal poses of
+        14884). Ownership is defined by pads, and a via has none -- it can never
+        be the part that owns a ring, so there is nothing here to exempt. A
+        barrel 0.30mm from a milled slot is a real copper-to-edge violation
+        whichever way the parser's slot-vs-inner-outline ambiguity resolves, so
+        the nudger should stand off. The cost is that it may decline a move near
+        such a ring; it prints "no clear spot", which is visible and recoverable,
+        unlike silent sub-margin copper. No tracked board carries a milled
+        contour at all -- tests/test_733_*.py asserts that, so the claim expires
+        loudly rather than quietly.
+        """
+        return self.edge_gate.margin
 
     def via_radius(self, via) -> float:
         """The RADIUS of one parser Via -- the one answer in this module (#732).
@@ -1729,7 +1855,7 @@ class _Repair:
 def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
                             clearance: float = 0.2,
                             grid_step: float = 0.1,
-                            board_edge_clearance: float = 0.55,
+                            board_edge_clearance: Optional[float] = None,
                             near_margin: float = 1.0,
                             capture_radius: float = 2.0,
                             default_via_size: float = 0.3,
@@ -1763,6 +1889,11 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     deliberately NOT exposed on the CLI / GUI -- flip this argument in code to
     disable.
 
+    board_edge_clearance (#733) defaults to None meaning "resolve it" -- see
+    resolve_cap_edge_clearance: the board's own min_copper_edge_clearance when it
+    declares MORE room than CAP_EDGE_CLEARANCE, else that 0.55. A value passed in
+    is honoured exactly as given, in both directions.
+
     on_move, if given, is a callback invoked with the internal _Repair state
     once at the seed placement and again after every accepted cap move. It is
     used purely for visualization (animate_fanout_clearance.py) and has no
@@ -1774,6 +1905,23 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
         for ref in pcb_data.footprints:
             if any(fnmatch.fnmatch(ref, pat) for pat in lock_refs):
                 extra_locked.add(ref)
+
+    # #733: ONE board-edge margin for every front end. Resolved HERE, in the
+    # shared engine rather than in a CLI main(), because the GUI plugin
+    # re-implements the main() layer and would otherwise keep silently taking
+    # the signature default whatever the board declares. Printed for the same
+    # reason the #725 clearance disclosure is printed from the engine: both
+    # fronts inherit it.
+    #
+    # UNCONDITIONAL, including when the caller named a value. The number governs
+    # where cap copper may sit relative to Edge.Cuts, and an operator reading a
+    # transcript should never have to know which of three fronts invoked this to
+    # know which margin it used -- printing only the resolved case would disclose
+    # exactly the branch that needs no explaining.
+    board_edge_clearance, _edge_src = resolve_cap_edge_clearance(
+        pcb_file, board_edge_clearance)
+    print(f"  board-edge margin for caps: {board_edge_clearance}mm "
+          f"({_edge_src})")
 
     st = _Repair(pcb_data, pcb_file, clearance, grid_step,
                  board_edge_clearance, near_margin, capture_radius,
@@ -2107,7 +2255,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
 
     def edge_ok_point(x, y, r):
-        need = r + clearance
+        need = r + edge_margin
         if edge_rings:
             if not _point_on_board(x, y, edge_outer, edge_cutouts):
                 return False
@@ -2118,7 +2266,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         return True
 
     def edge_ok_seg(sx, sy, ex, ey, hw):
-        need = hw + clearance
+        need = hw + edge_margin
         if edge_rings:
             if not (_point_on_board(sx, sy, edge_outer, edge_cutouts) and
                     _point_on_board(ex, ey, edge_outer, edge_cutouts)):
@@ -2145,6 +2293,32 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     _via_fl = getattr(st, 'via_floor', None)
     _seg_fl = getattr(st, 'seg_floor', None)
     _via_rad = getattr(st, 'via_radius', None)
+    # #733: the board-edge requirement comes from st, so the two edge helpers
+    # below cannot gate the copper this function EMITS more weakly than the cap
+    # mover gates a cap pad.
+    #
+    # max(), not a bare read, for the same reason _item_reach never returns below
+    # `self.clearance`: the flat argument is this function's own floor, and an st
+    # must never LOWER this test below the clearance the caller passed.
+    #
+    # Defensive, and say so precisely rather than overstate it: no LIVE caller
+    # can currently hand this a sub-clearance margin. `_Repair` is constructed at
+    # one site, its margin is already max(clearance, ...), and the margin-ZERO
+    # outline gate render_placement builds is a shallow COPY it keeps beside
+    # `state.edge_gate` rather than a `_Repair` -- the #733 review checked, after
+    # an earlier version of this comment claimed otherwise. A duck-typed st CAN,
+    # and the #733 test exercises exactly that.
+    #
+    # The fallback is EXACTLY `clearance`, not CAP_EDGE_CLEARANCE -- the duck-typed
+    # _FakeSt the #370/#617 harnesses pass carries no margin, and this function's
+    # own flat scalar is the honest stand-in for one. Worth stating plainly: those
+    # two harnesses do NOT in fact pin this. Every landing they exercise clears
+    # 0.80mm, so a 0.55 fallback passes all five of their arms unchanged. That is
+    # exactly why tests/test_733_*.py brackets the fallback to (0.20, 0.30] on a
+    # rig built for it -- the regression a later reader would introduce by
+    # "tidying" this line is one nothing else would catch.
+    _edge_m = getattr(st, 'edge_margin', None)
+    edge_margin = clearance if _edge_m is None else max(clearance, _edge_m)
 
     def req(fa, fb):
         return clearance if _req is None else _req(fa, fb)
