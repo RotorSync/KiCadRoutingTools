@@ -69,6 +69,11 @@ def refresh() -> None:
     g['BUS_MULTIPOINT_SPAN'] = _on_default('KICAD_BUS_MULTIPOINT_SPAN')
     g['BARE_BALL_ZONE_EXEMPT'] = _on_default('KICAD_BARE_BALL_ZONE_EXEMPT')
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
+    # Phase B Task 2: plan-informed net ordering (most-congested corridors
+    # first). Default OFF; KICAD_PLANNER_ORDERING=1 turns it on. No CLI flag
+    # this phase -- the env knob is how the A/B harness toggles the engine
+    # kwarg without a flag.
+    g['PLANNER_ORDERING'] = _s('KICAD_PLANNER_ORDERING', '0') == '1'
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     # #648 oracle source union: kicad-cli DRC gates the demand set, the
