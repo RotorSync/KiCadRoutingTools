@@ -50,10 +50,14 @@ this file lie:
     the correct output are THE SAME STRING. The only Type-VII example in the
     repo is the inline `REAL_VIA` string in tests/test_489_via_tenting.py,
     which is not a board.
-  * A `synth.make_pcb()` board CANNOT reproduce the defect at all. It leaves
-    `net_id_to_name` empty, so `placement/writer.py`'s `n2n` is falsy, `nm` is
-    None, and `via_protection_sexpr` returns "" -- nothing is emitted either
-    way. An arm built that way is green today and proves nothing.
+  * A `synth.make_pcb()` board leaves `net_id_to_name` empty, so
+    `placement/writer.py`'s `n2n` is falsy and every via is emitted with a
+    NUMERIC net token. Note what that does and does not break, because the
+    obvious reading is wrong: a real spec is still emitted (the `net_name`
+    gate guards only the DEFAULT), so half one would appear to work -- but the
+    numeric-net parser defect described below then drops the whole via at
+    re-parse, and the spec-less half collapses to silence. An arm built that
+    way grades a via that is not in the model.
   * The vias MUST carry `(uuid "...")`. `kicad_parser
     ._extract_via_protection_attrs` keys specs by uuid and `continue`s on a
     uuid-less via, so the spec would arrive `{}` and every assertion below
@@ -112,16 +116,24 @@ TWO HAZARDS this file must not fall into, both measured:
     the "nothing else changed" arm diffs `_strip_via_blocks(out)` against
     `_strip_via_blocks(inp)` instead.
 
-THE BATTERY: 20 mutations, with the killer named beside each arm and the full
-table at the bottom of this file. One is DECLARED UNKILLABLE rather than
-papered over; two overlap tests/test_489_via_tenting.py, which owns those
-values, and are kept only as end-to-end change detectors.
+THE BATTERY: 28 mutations, RUN rather than reasoned about, with the killer
+named beside each arm and the full table at the bottom of this file. 25 killed,
+THREE declared survivors -- recorded, not papered over. Two further survivors
+were found by an adversarial review of this file and a mutation run, and were
+CLOSED by arms added afterwards rather than declared away. Three arms overlap
+tests/test_489_via_tenting.py, which owns those values; they are kept only as
+end-to-end change detectors and are marked as such.
 
 RUNTIME: ~20-30s. One subprocess (the CLI arm), one memoised rig per clearance,
 and the corpus spec arm is a TEXT scan rather than a parse.
 """
 
-RUN_ALL_FAST_OK = True
+# NO RUN_ALL_FAST_OK. Measured six runs: 54-67s, of which
+# TestInertOnTheTrackedCorpus is ~50s -- it drives the whole engine over 22
+# boards x 2 clearances. run_all.py's own rule is that a test which drives a
+# routing chain belongs in the integration bucket whatever it imports, and the
+# opt-out is documented for ~4s unit tests. Declaring both the opt-out and a
+# 900s timeout would have been the two declarations disagreeing out loud.
 RUN_ALL_TIMEOUT = 900
 
 import contextlib
@@ -479,7 +491,11 @@ class TestATypeVIIViaSurvivesTheNudge(unittest.TestCase):
         # VACUITY GUARD: the INPUT really carries a spec. Without the uuid,
         # _extract_via_protection_attrs skips the via and every assertion below
         # would pass on {} == {}.
-        src = _via_by_net(self.rig.pcb, 'VF1')
+        # Re-parsed from disk, NOT rig.pcb: the pass mutates that object in
+        # place (v.x, v.y = nx, ny), so calling it "the input" would be reading
+        # post-pass state and asserting a spec is unmutated on the very object
+        # a mutation could have mutated.
+        src = _via_by_net(parse_kicad_pcb(self.rig.src), 'VF1')
         self.assertEqual(src.tenting_attrs, TYPE_VII)
         self.assertNotIn('tenting', src.tenting_attrs)
 
@@ -525,8 +541,15 @@ class TestATypeVIIViaSurvivesTheNudge(unittest.TestCase):
         self.assertEqual(len(self.rig.out_pcb.vias), 3,
                          'the moved via was appended without removing the '
                          'original: a stacked same-net barrel pair')
-        got = re.search(r'\(uuid "([^"]+)"\)',
-                        _via_block(self.rig.out_text, 'VF1')).group(1)
+        blk = _via_block(self.rig.out_text, 'VF1')
+        m = re.search(r'\(uuid "([^"]+)"\)', blk)
+        # presence FIRST: without it, deleting the (uuid ...) line reports an
+        # AttributeError on None instead of this arm's authored reason.
+        self.assertIsNotNone(m, 'the re-emitted via carries NO uuid, so it can '
+                                'never receive a protection spec at the next '
+                                'parse (_extract_via_protection_attrs keys by '
+                                'uuid)')
+        got = m.group(1)
         self.assertTrue(got)
         self.assertNotEqual(got, UUID_VF1,
                             'the re-emitted via reuses the input uuid; two '
@@ -562,9 +585,11 @@ class TestASpecLessViaEmitsNothingAndInherits(unittest.TestCase):
         self.assertIn('via-nudge: moved VF2 via (11.175,10.500) -> '
                       '(11.325,10.500) to free C2', self.rig.out)
         self.assertTrue(self.rig.wrote)
-        self.assertEqual(_via_by_net(self.rig.pcb, 'VF2').tenting_attrs, {},
-                         'the INPUT via gained a spec; this is no longer the '
-                         'spec-less case')
+        # re-parsed from disk; see the note in the headline class's setUp
+        self.assertEqual(
+            _via_by_net(parse_kicad_pcb(self.rig.src), 'VF2').tenting_attrs,
+            {}, 'the INPUT via gained a spec; this is no longer the spec-less '
+                'case')
 
     def test_a_via_that_inherited_still_inherits(self):
         v = _via_by_net(self.rig.out_pcb, 'VF2')
@@ -633,6 +658,51 @@ class TestTheHash489DefaultDidNotMove(unittest.TestCase):
                 'a %s of the sentinel no longer inherits: it either raised or '
                 'fell through to the front+back default' % how)
 
+    def test_a_spec_the_TEXT_parser_never_touched_is_still_collapsed(self):
+        """KILLS the whitespace-collapse survivor. `via_protection_sexpr._one`
+        collapses its inner text onto one line -- and NO fixture in this file
+        or in test_489 could see that, because `_balanced_token_text` already
+        collapses on the way IN, so a spec that came from the text parser is
+        one line before the writer ever sees it.
+
+        The pcbnew path does not go through that parser, and neither does a
+        hand-built spec. Build one with real newlines and tabs, which is what
+        a caller assembling a spec by hand produces.
+
+        Found by a mutation run: dropping the collapse left this file AND
+        test_489_via_tenting.py green."""
+        ragged = {'covering': '(front no)\n\t\t\t(back no)',
+                  'capping': '\n\t\tyes\n\t'}
+        out = generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
+                                 net_name='GND', tenting_attrs=ragged)
+        self.assertIn('(covering (front no) (back no))', out, out)
+        self.assertIn('(capping yes)', out, out)
+        for line in out.splitlines():
+            self.assertLessEqual(
+                line.count('('), 3,
+                'a protection token spilled across lines: %r' % line)
+    # MUTATION 15: drop `inner = " ".join((inner or '').split())` in _one.
+
+    def test_a_token_KiCad_adds_LATER_is_re_emitted_rather_than_dropped(self):
+        """KILLS the unrecognised-token survivor. `via_protection_sexpr` emits
+        spec keys outside VIA_PROTECTION_TOKEN_ORDER after the known ones,
+        deliberately -- losing a spec is the bug this whole area exists to
+        prevent, and a KiCad that adds a sixth protection token must not have
+        it silently dropped by a re-placement.
+
+        No board in the corpus and no fixture in this file carries such a
+        token, so the line was uncovered. Found by a mutation run."""
+        spec = dict(TYPE_VII)
+        spec['electroplating'] = 'yes'      # a token this repo does not know
+        out = generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
+                                 net_name='GND', tenting_attrs=spec)
+        self.assertIn('(electroplating yes)', out, out)
+        self.assertEqual(_prot_tokens(out),
+                         ['covering', 'plugging', 'capping', 'filling'],
+                         'the KNOWN tokens must still lead, in canonical '
+                         'order, with the unknown one appended after')
+    # MUTATION B: delete the `parts += [...]` unrecognised-token line.
+
     def test_the_sentinel_emits_nothing_and_a_real_spec_still_wins(self):
         self.assertEqual(
             _prot_tokens(generate_via_sexpr(
@@ -680,16 +750,33 @@ class TestTheHash489DefaultDidNotMove(unittest.TestCase):
                          'DEFAULT_VIA_TENTING changed. test_489_via_tenting.py '
                          'owns this value; re-read #489 s8 and re-measure this '
                          'file before touching it.')
-        self.assertEqual(VIA_PROTECTION_TOKEN_ORDER,
-                         ('tenting', 'covering', 'plugging', 'capping',
-                          'filling'))
+        # Deliberately NOT re-pinning VIA_PROTECTION_TOKEN_ORDER as a literal
+        # tuple. test_489 owns the EMITTED order; moving 'tenting' within that
+        # constant is an in-scope #489 change that would have turned this file
+        # red and left test_489 green -- a value this class says it does not
+        # own, pinned in the one direction its owner cannot cover. Assert only
+        # the property this file depends on: that the four Type-VII tokens
+        # keep a stable relative order.
+        self.assertEqual(
+            [t for t in VIA_PROTECTION_TOKEN_ORDER if t in TYPE_VII],
+            ['covering', 'plugging', 'capping', 'filling'])
 
 
 class TestAViaTheNudgeNeverTouchedIsUnchanged(unittest.TestCase):
     """VF3 sits 18mm away and is nobody's offender."""
 
+    def setUp(self):
+        self.rig = _rig(CLEAR)
+        # ON THE BRANCH. Without this, an engine that never reached the nudger
+        # satisfies every assertion below -- measured: with
+        # nudge_vias_for_unresolved neutered to `return [], []` this class
+        # alone passed in 0.29s. Found by an adversarial review of this file.
+        self.assertIn('via-nudge: moved VF1 via', self.rig.out)
+        self.assertEqual(len(self.rig.res['via_moves']), 2, self.rig.out)
+        self.assertTrue(self.rig.wrote)
+
     def test_the_control_vias_block_is_BYTE_identical(self):
-        rig = _rig(CLEAR)
+        rig = self.rig
         self.assertEqual(_via_block(rig.out_text, 'VF3'),
                          _via_block(rig.in_text, 'VF3'),
                          'a via nobody moved was rewritten -- including its '
@@ -697,8 +784,17 @@ class TestAViaTheNudgeNeverTouchedIsUnchanged(unittest.TestCase):
         v = _via_by_net(rig.out_pcb, 'VF3')
         self.assertEqual(v.tenting_attrs, TYPE_VII)
         self.assertEqual((round(v.x, 4), round(v.y, 4)), CTRL_XY)
-    # MUTATION 11b: net-agnostic removal in _remove_vias_at_positions.
     # MUTATION: a writer that re-emits every via instead of the moved ones.
+    #
+    # NOT this arm: net-agnostic removal (dropping net_ids=/net_names= from
+    # writer.py). MEASURED to leave this file entirely green, because nothing
+    # on the rig sits within _remove_vias_at_positions' 2e-3 tolerance of a
+    # moved via's old position -- and a coincident via cannot be ADDED to the
+    # rig, because at 0.15mm it fails the hole-to-hole gate and the nudge then
+    # refuses (measured: VF1 stops moving). That mutation is owned by
+    # tests/test_via_move_removal_net_name.py, which drives
+    # _remove_vias_at_positions directly with a positive and a negative net
+    # match -- the #344 stacked-via regression.
 
 
 class TestTheMoveDictCarriesTheSpecForTheGUI(unittest.TestCase):
@@ -735,6 +831,9 @@ class TestTheMoveDictCarriesTheSpecForTheGUI(unittest.TestCase):
         shape of code where a shared reference eventually bites."""
         src = _via_by_net(self.rig.pcb, 'VF1')
         d = self.by['VF1']
+        # presence FIRST: without it, mutation 1 (drop the key) reports a bare
+        # KeyError traceback here instead of this arm's authored reason.
+        self.assertIn('tenting_attrs', d)
         self.assertEqual(d['tenting_attrs'], src.tenting_attrs)
         self.assertIsNot(d['tenting_attrs'], src.tenting_attrs)
     # MUTATION 5: `dict(getattr(v,'tenting_attrs',{}) or {})` ->
@@ -753,13 +852,24 @@ class TestTheMoveDictCarriesTheSpecForTheGUI(unittest.TestCase):
                           'the contract docstring no longer names %r' % k)
     # MUTATION: rename the key; add a second, differently-spelled one.
 
-    def test_the_value_matches_a_real_parser_Via_field(self):
-        """Built with tests/synth.py's canonical builder rather than a
-        hand-rolled literal, so a change to Via's field shape fails HERE instead
-        of drifting."""
+    def test_a_synth_Via_round_trips_through_the_writer_and_parser(self):
+        """The previous version of this arm asserted
+        `Via(tenting_attrs=X).tenting_attrs == X` -- a value compared to itself
+        through a constructor, which no change to any of the three files under
+        test could break. Replaced with the round trip it was pretending to
+        be: synth Via -> generate_via_sexpr -> _extract_via_protection_attrs.
+        Found by an adversarial review of this file."""
         probe = make_via(0.0, 0.0, net_id=1, size=V_SIZE, drill=V_DRILL,
                          tenting_attrs=dict(TYPE_VII))
-        self.assertEqual(probe.tenting_attrs, TYPE_VII)
+        probe.uuid = 'deadbeef-0000-0000-0000-00000000ffff'
+        text = generate_via_sexpr(probe.x, probe.y, probe.size, probe.drill,
+                                  probe.layers, probe.net_id, net_name='NB1',
+                                  tenting_attrs=probe.tenting_attrs)
+        back = KP._extract_via_protection_attrs(text)
+        self.assertEqual(len(back), 1, text)
+        self.assertEqual(list(back.values())[0], TYPE_VII, text)
+    # MUTATION A: `_one` emits `({token})` and drops the inner text.
+    # MUTATION A2: `parts = parts[:1]` -- emit only the first token.
 
 
 class TestARefusedNudgeLeavesTheBoardTextAlone(unittest.TestCase):
@@ -777,9 +887,12 @@ class TestARefusedNudgeLeavesTheBoardTextAlone(unittest.TestCase):
         self.assertEqual(rig.res['new_segments'], [])
         for net, spec in (('VF1', TYPE_VII), ('VF2', {}), ('VF3', TYPE_VII)):
             self.assertEqual(_via_by_net(rig.pcb, net).tenting_attrs, spec)
-        if rig.wrote:
-            self.assertEqual(_strip_via_blocks(rig.out_text),
-                             _strip_via_blocks(rig.in_text))
+        self.assertTrue(rig.wrote,
+                        'the writer refused, so the text comparison below '
+                        'would silently vanish while the printed-refusal half '
+                        'still looked satisfied')
+        self.assertEqual(_strip_via_blocks(rig.out_text),
+                         _strip_via_blocks(rig.in_text))
     # MUTATION 19: weaken the draw gate so a boxed via moves anyway.
 
     def test_the_NEGATIVE_control_at_the_shipped_clearance_still_moves(self):
@@ -797,6 +910,14 @@ class TestTheShippedCLIPathKeepsTheSpec(unittest.TestCase):
     other copper is name-style, AND via_protection_sexpr goes silent entirely.
     Every in-process arm passes pcb_data itself and cannot see it.
 
+    MEASURED, because my first statement of the mechanism was backwards: the
+    spec is NOT silenced. `via_protection_sexpr`'s `net_name` gate guards only
+    the DEFAULT, so a real spec is still emitted -- next to a numeric net
+    token, which is the shape `extract_vias`' KiCad-9 pattern cannot match, so
+    the via VANISHES from the re-parse. The arm below therefore asserts the via
+    is still THERE before asserting anything about its spec, or the failure
+    arrives as a bare helper assertion instead of this arm's own reason.
+
     Note the CLI's own guard is `if result['placements'] or
     result.get('via_moves') or ...`, and on this rig `placements == []` -- so
     via_moves alone is what triggers the write, which is exactly the path under
@@ -813,6 +934,13 @@ class TestTheShippedCLIPathKeepsTheSpec(unittest.TestCase):
         self.assertIn('via-nudge: moved VF1 via', (r.stdout or '') + (r.stderr or ''))
         run_utils.evidence(dst, 'the CLI output board')
         out = parse_kicad_pcb(dst)
+        self.assertEqual(
+            sorted(out.nets[v.net_id].name for v in out.vias),
+            ['VF1', 'VF2', 'VF3'],
+            'a via is MISSING from the re-parse. The likeliest cause is a via '
+            'emitted with a numeric net token AND a protection spec, which '
+            "extract_vias' KiCad-9 pattern cannot match -- so the barrel is "
+            'gone from the model, not merely its spec.')
         self.assertEqual(_via_by_net(out, 'VF1').tenting_attrs, TYPE_VII)
         self.assertEqual(_via_by_net(out, 'VF2').tenting_attrs, {})
         self.assertEqual(_via_by_net(out, 'VF3').tenting_attrs, TYPE_VII)
@@ -927,17 +1055,27 @@ class TestOneEmitSiteOneSpecArgument(unittest.TestCase):
         """FALSE-POSITIVE PROBE. placement/writer.py's comment block names
         `generate_via_sexpr` and `_remove_vias_at_positions` in prose; the
         stripper must drop them (#737's lesson)."""
-        probe = ["    x = 1  # generate_via_sexpr(a, b) and via_moves.append(",
-                 "    # 'tenting_attrs': dict(getattr(v, 'tenting_attrs', {}))"]
-        stripped = [l.split('#')[0] for l in probe]
+        def _probe():
+            x = 1  # generate_via_sexpr(a, b) and via_moves.append(
+            # 'tenting_attrs': dict(getattr(v, 'tenting_attrs', {}))
+            return x
+
+        # Through the REAL helper. Re-implementing the stripper inline left a
+        # change to _code invisible to its own probe.
+        stripped = _code(_probe)
         self.assertEqual(_calls(stripped, 'generate_via_sexpr'), [])
         self.assertEqual([l for l in stripped if "'tenting_attrs'" in l], [])
 
     def test_the_sentinel_branch_is_tested_before_the_truthiness_branch(self):
-        """The sentinel is truthy, so branch ORDER is what makes it safe. A
-        source guard rather than a fixture, because reordering the branches
-        raises rather than mis-emits, and a crash is not what this file is
-        for."""
+        """A SOURCE guard, and the reason is the opposite of the obvious one.
+        Reordering the two branches does not raise and does not mis-emit: the
+        sentinel is an empty DICT, so it survives the truthiness branch and the
+        token loop and produces the identical file. MEASURED -- with the
+        branches swapped, this arm is the ONLY thing in the suite that fails.
+
+        That is precisely why it exists. The ordering is load-bearing for the
+        NEXT person, who may make the sentinel something that is not a dict;
+        no fixture can see it today."""
         import kicad_writer as KW
         src = _code(KW.via_protection_sexpr)
         ident = [i for i, l in enumerate(src)
@@ -998,7 +1136,7 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
         relocates carries a spec the writer would have produced anyway."""
         boards = self._boards()
         self._skip_without_git(boards)
-        full, moved, specs = set(), 0, set()
+        full, moved, specs, blew = set(), 0, set(), []
         for b in boards:
             for clr in (0.25, 0.10):
                 try:
@@ -1008,7 +1146,13 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                             pcb, b, clearance=clr, max_displacement=0.0,
                             max_displacement_cap=0.0, max_passes=1,
                             allow_rotations=False, via_clear_fallback=False)
-                except Exception:
+                except Exception as e:
+                    # COLLECTED, not swallowed. `continue` alone meant an
+                    # engine regression that started raising on 20 of the 22
+                    # boards left both corpus arms green. Measured today: zero.
+                    blew.append('%s @ %s: %s: %s'
+                                % (os.path.basename(b), clr,
+                                   type(e).__name__, e))
                     continue
                 # The two EARLY-RETURN dicts (no BGA / no movable cap) carry no
                 # 'via_moves' key at all, so only a board that ran the whole
@@ -1025,15 +1169,23 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                                   '%s @ %s: the move dict lost the key on a '
                                   'REAL board' % (b, clr))
                     specs.add(tuple(sorted((d['tenting_attrs'] or {}).items())))
+        self.assertEqual(blew, [], 'the pass RAISED on tracked board(s); '
+                                   'that is a finding, not something to skip')
         self.assertGreaterEqual(len(full), 2,
                                 'only %d tracked BOARD(s) ran the full pass '
                                 '(2 measured, over 4 board-clearance pairs); '
                                 'this arm is no longer measuring anything'
                                 % len(full))
-        self.assertGreaterEqual(moved, 9,
-                                'the corpus moved %d vias, down from the 9 '
-                                'measured: the arm below now grades an empty '
-                                'set' % moved)
+        # A FLOOR OF ONE, not of nine. Nine is what the corpus moves today
+        # (orangecrab_ext_pll @ 0.10) and it is disclosed rather than asserted:
+        # pinning it would turn a *tenting* test red for a *geometry* reason
+        # the day a legitimate nudge change relocates eight vias instead.
+        print('corpus disclosure: %d via(s) moved across %d board(s); '
+              'today that is 9 on orangecrab_ext_pll @ 0.10'
+              % (moved, len(full)))
+        self.assertGreaterEqual(moved, 1,
+                                'the corpus moved NO vias, so the spec '
+                                'assertion below grades an empty set')
         self.assertEqual(
             specs, {tuple(sorted(DEFAULT_VIA_TENTING.items()))},
             'a tracked board now MOVES a via whose spec is not the writer '
@@ -1087,54 +1239,98 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
         self.assertIn('rp2350_fpga_eensy_prePlane.kicad_pcb', counts, counts)
 
 
-# THE BATTERY, as RUN. The killer per row is named in the trailing
-# `# MUTATION n:` comment beside the arm that kills it.
+# THE BATTERY, as RUN -- every row below was applied to the tree and the file
+# re-run, not reasoned about. 28 mutations, 25 killed, 3 survivors, 0 BROKEN
+# (no mutation made this file die before it checked anything). The killer per
+# row is also named in the trailing `# MUTATION n:` comment beside the arm.
 #
-#    1  drop the move-dict key .................. headline / move-dict / source
-#    2  drop tenting_attrs= at the emit ......... headline / source guard
-#    3  pass None at the emit ................... headline ONLY (the source
-#                                                  guard sees the kwarg)
-#    4  pass {} at the emit .................... headline / move-dict
-#   4b  set the key only when non-empty ......... the present-and-empty arm
-#    5  share the dict instead of copying ....... TestTheDictHoldsACOPY, ALONE
-#    6  drop the `or {}` ...................... DECLARED UNKILLABLE, below
-#    7  copy the spec onto the wrong via ........ headline + spec-less together
-#    8  emit no uuid ........................... headline (the spec vanishes)
-#    9  re-emit the input uuid .................. the uuid arm
-#   10  skip _remove_vias_at_positions .......... via count 3 / whole-file diff
-#   11  drop net_name=nm ....................... the (net "VF2") arm
-#  11b  net-agnostic removal .................... the untouched-control arm
-#   12  drop `or INHERIT_VIA_PROTECTION` ........ spec-less arm / source guard
-#   13  reorder via_protection_sexpr's branches   489-default arms + the
-#                                                  branch-order source arm
-#   14  reorder VIA_PROTECTION_TOKEN_ORDER ...... canonical-order arm (overlaps
-#                                                  test_489; kept as an
-#                                                  end-to-end detector)
-#   15  drop the whitespace collapse ............ the collapse arm (same
-#                                                  overlap)
-#   16  a second emit site under py_placer/ ..... source guard, ALONE
-#   17  rename any guarded identifier ........... the anti-rot arm, ALONE
-#   18  drop pcb_data= in the CLI main .......... the CLI subprocess arm, ALONE
-#   19  weaken the draw gate ................... the refusal arm
-#   20  any geometry change from the fix ........ the exact landings in every
-#                                                  setUp
-#   22  strip the pattern out of plane_io ....... the house-pattern arm
+#    1  drop the move-dict key ......... headline, collapse, move-dict x4, the
+#                                         source arm, the CLI arm, the corpus arm
+#    2  drop tenting_attrs= at the emit  headline, collapse, spec-less, source,
+#                                         anti-rot, CLI
+#    3  pass None at the emit .......... the same six as 2 -- the source arm DOES
+#                                         fire, because it requires the SENTINEL
+#                                         in the argument text, not just the kwarg
+#    4  pass {} at the emit ............ the same six as 2. NOT the move-dict
+#                                         arms: a writer-side mutation cannot
+#                                         reach the engine dict
+#   4b  key only when spec non-empty ... the present-and-empty arm, ALONE
+#    5  share the dict, don't copy ..... TestTheDictHoldsACOPY, ALONE
+#    6  drop the `or {}` .............. SURVIVES -- declared, see below
+#    7  copy the spec to the wrong via . headline + spec-less together
+#    8  emit no uuid .................. headline + the uuid arm
+#   10  skip _remove_vias_at_positions . the uuid/count arm, the whole-file diff,
+#                                         and five more
+#   11  drop net_name=nm ............... the (net "VF2") arm + 5
+#   12  drop `or INHERIT_VIA_PROTECTION` spec-less, source, anti-rot, CLI
+#  12b  pass the sentinel UNCONDITIONALLY  headline, collapse, CLI
+#  13a  truthiness branch above identity  the branch-order SOURCE arm, ALONE --
+#                                         behaviourally inert, which is the
+#                                         point of that arm
+#  13b  sentinel falls through to default  spec-less, both sentinel arms, CLI
+#  13c  make the sentinel FALSY ........ the identity/truthiness arm + the
+#                                         copy/pickle arm
+#   14  reorder VIA_PROTECTION_TOKEN_ORDER  the canonical-order arm + 2
+#   15  drop the whitespace collapse ... the ragged-spec arm (ADDED after a
+#                                         mutation run showed this file AND
+#                                         test_489 both green without it)
+#   16  a second emit site in py_placer/  the source arm, ALONE
+#   17  rename any guarded identifier .. the anti-rot arm, ALONE
+#   18  drop pcb_data= in the CLI main .. the CLI subprocess arm, ALONE
+#   19  weaken the draw gate ........... the refusal arm, ALONE
+#   20  spiral step 0.05 -> 0.1 ........ SURVIVES -- declared, see below
+#    A  _one drops the inner text ...... headline, collapse, both #489 default
+#                                         arms, CLI
+#   A2  emit only the FIRST token ...... headline, collapse, CLI (the VF1-only
+#                                         mutation: VF2 emits nothing either
+#                                         way and every #489 arm has one token)
+#    B  drop the unrecognised-token line  the later-token arm (ADDED; it
+#                                         survived before)
+#    C  change the emitted indentation .. SURVIVES -- declared, see below
+#   22  strip the pattern out of plane_io  the house-pattern arm
 #
-# DECLARED UNKILLABLE, recorded rather than papered over -- #6. `Via
-# .tenting_attrs` is `field(default_factory=dict)` and the pcbnew builder passes
-# `_pcbnew_via_protection_attrs(track)`, which returns `{}` or a dict. NO parse
-# path in this repo produces None, so `dict(getattr(v, 'tenting_attrs', {}))`
-# and `dict(getattr(v, 'tenting_attrs', {}) or {})` are identical everywhere
-# reachable. A killer could be manufactured with a via-like carrying None, but
-# that would assert about a state no caller produces -- the phantom fixture
-# #731 removed from a different report. The `or {}` stays because plane_io.py
-# spells it that way, and one spelling is worth more than one branch.
+# NOT IN THIS FILE, and named so it does not read as uncovered: net-agnostic
+# removal (dropping net_ids=/net_names= at the writer). It leaves this file
+# green -- nothing on the rig is within _remove_vias_at_positions' 2e-3
+# tolerance of a moved via's old position, and a coincident via CANNOT be added
+# to the rig because at 0.15mm it fails the hole-to-hole gate and the nudge
+# then refuses (measured). It is owned by tests/test_via_move_removal_net_name
+# .py, the #344 stacked-via regression, which drives that function directly
+# with a positive and a negative net match.
 #
-# RECORDED AS UNCOVERED, named rather than silently missing: the GUI mirror
-# (fanout_gui.py's nudge block -> gui_utils.apply_via_protection) needs pcbnew,
-# and tests/gui_parity/** is not collected by run_all.py's flat glob.
-# TestTheMoveDictCarriesTheSpecForTheGUI pins the CONTRACT that block reads;
-# the pcbnew half is not exercised here.
+# THE THREE SURVIVORS, recorded rather than papered over. Two FURTHER
+# survivors -- #15 (the whitespace collapse) and #B (the unrecognised-token
+# emit) -- were found by an adversarial review of this file and a mutation run,
+# and are NOT in this list: arms were added to kill them, and both kills are
+# verified. Rows 15 and B name those arms.
+#
+#   #6, drop the `or {}` in dict(getattr(v, 'tenting_attrs', {}) or {}).
+#   Via.tenting_attrs is field(default_factory=dict) and
+#   _pcbnew_via_protection_attrs returns {} or a dict, so NO parse path in this
+#   repo produces None and the two spellings are identical everywhere
+#   reachable. A killer could be manufactured with a via-like carrying None,
+#   but that asserts about a state no caller produces -- the phantom fixture
+#   #731 removed from a different report. The spelling stays because
+#   plane_io.py spells it that way, and one spelling beats one branch.
+#
+#   #20, the spiral quantum (r += 0.05 -> 0.1). The rig's clear spot is at
+#   radius exactly 0.15, which both step sizes reach, and the 0.7 refusal is
+#   unchanged because 0.65 still exceeds max_shift 0.6. So the landings this
+#   file asserts are genuinely identical. On a REAL board a via whose clear
+#   spot is at 0.10 would be pushed to 0.15 -- a geometry change this rig
+#   cannot see. The claim in row 20 is therefore narrowed: the landings catch a
+#   change that MOVES the landing, not every geometry change.
+#
+#   #C, the indentation of the emitted fragment. Semantically the same s-expr;
+#   uncovered in the "records what is pinned" sense only.
+#
+#   Net-agnostic removal is NOT in this list either: see the note above -- it
+#   is owned by tests/test_via_move_removal_net_name.py rather than uncovered.
+#
+# RECORDED AS UNCOVERED: the GUI mirror (fanout_gui.py's nudge block ->
+# gui_utils.apply_via_protection) needs pcbnew, and tests/gui_parity/** is not
+# collected by run_all.py's flat glob. TestTheMoveDictCarriesTheSpecForTheGUI
+# pins the CONTRACT that block reads; the pcbnew half is not exercised here.
 
 
 if __name__ == '__main__':
