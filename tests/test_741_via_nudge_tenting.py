@@ -116,8 +116,8 @@ TWO HAZARDS this file must not fall into, both measured:
     the "nothing else changed" arm diffs `_strip_via_blocks(out)` against
     `_strip_via_blocks(inp)` instead.
 
-THE BATTERY: 28 mutations, RUN rather than reasoned about, with the killer
-named beside each arm and the full table at the bottom of this file. 25 killed,
+THE BATTERY: 31 mutations, RUN rather than reasoned about, with the killer
+named beside each arm and the full table at the bottom of this file. 28 killed,
 THREE declared survivors -- recorded, not papered over. Two further survivors
 were found by an adversarial review of this file and a mutation run, and were
 CLOSED by arms added afterwards rather than declared away. Three arms overlap
@@ -872,6 +872,111 @@ class TestTheMoveDictCarriesTheSpecForTheGUI(unittest.TestCase):
     # MUTATION A2: `parts = parts[:1]` -- emit only the first token.
 
 
+class TestANoNetViaIsNotTurnedIntoInvisibleCopper(unittest.TestCase):
+    """THE REGRESSION THIS FIX ITSELF INTRODUCED, caught by an independent
+    reachability review rather than by me.
+
+    `via_protection_sexpr` picks the net dialect from `net_name` and the
+    protection tokens from `tenting_attrs` INDEPENDENTLY. So a via emitted with
+    a numeric `(net N)` token AND a spec is a shape `kicad_parser.extract_vias`
+    cannot match -- its KiCad-9 pattern has strict field ordering and no gap
+    for the protection tokens, while its KiCad-10 twin was given one. Such a
+    via does not merely lose its spec: it VANISHES from the model. Invisible
+    copper the router then plans tracks through, which is the hazard PR #534
+    was written against, and strictly worse than the wrong-tenting bug #741
+    set out to fix.
+
+    Before this fix the placement writer passed no `tenting_attrs`, so it could
+    never produce that pairing. After it, one input does: a via whose net id
+    does not resolve to a name. That is not hypothetical -- `extract_nets`
+    records `name_to_id[""] = 0` but never creates a `Net` for id 0, so a
+    legitimate no-net `(net "")` via misses the lookup on EVERY board.
+    Measured: kicad_files/orangecrab_ext_pll.kicad_pcb resolves 169 nets and
+    has no key 0.
+
+    MEASURED on the call below, one via move with net_id 0 and a Type-VII
+    spec, on a pcb_data whose map has had key 0 removed to match a real board:
+
+        0cdafd7a  (before #741)      (net 0)   no tokens    3 in file, 3 parsed
+        the #741 fix, no guard       (net 0)   4 tokens     3 in file, 2 PARSED
+        with the guard               (net "")  4 tokens     3 in file, 3 parsed
+
+    The middle row is the regression. The third keeps the spec AND the via.
+
+    Driven through `write_placed_output` directly rather than the rig, because
+    the rig declares a numeric net table and therefore HAS a key 0 -- it cannot
+    reach this at all, which is exactly why the defect survived the first
+    review round."""
+
+    def _emit(self, net_id, spec):
+        d, src = _stage('net0-%s' % net_id)
+        pcb = parse_kicad_pcb(src)
+        # Match a real KiCad-10 board: nets resolved by name, no entry for 0.
+        pcb.net_id_to_name.pop(0, None)
+        self.assertNotIn(0, pcb.net_id_to_name,
+                         'the map still has a key 0, so this arm is not '
+                         'reproducing a real board and proves nothing')
+        move = (VIA_X, 9.5, {'x': LAND_VF1[0], 'y': LAND_VF1[1],
+                             'size': V_SIZE, 'drill': V_DRILL,
+                             'layers': ['F.Cu', 'B.Cu'], 'net_id': net_id,
+                             'tenting_attrs': dict(spec)})
+        dst = os.path.join(d, 'out.kicad_pcb')
+        with contextlib.redirect_stdout(io.StringIO()):
+            wrote = write_placed_output(src, dst, [], via_moves=[move],
+                                        new_segments=[], pcb_data=pcb)
+        self.assertTrue(wrote)
+        text = _read(dst)
+        moved = [b for b, _n in _via_blocks(text)
+                 if ('%.6f' % LAND_VF1[0]) in b]
+        self.assertEqual(len(moved), 1, text)
+        return text, moved[0], parse_kicad_pcb(dst)
+
+    def test_a_no_net_via_with_a_spec_survives_the_round_trip(self):
+        text, blk, out = self._emit(0, TYPE_VII)
+        n_in_file = len(_via_blocks(text))
+        self.assertEqual(
+            len(out.vias), n_in_file,
+            'the written board has %d vias and the parser reads back %d. A '
+            'via was emitted in a dialect our own parser cannot match, so it '
+            'is invisible copper -- worse than the spec loss #741 fixes.'
+            % (n_in_file, len(out.vias)))
+    # MUTATION 23: neutralise BOTH guards (the net-0 naming AND the belt)
+    # -> (net 0) plus four protection tokens, and the via is gone: 3 in file,
+    # 2 parsed. Either guard alone still saves it, which is why 24 and 25 are
+    # separate rows.
+
+    def test_it_is_emitted_in_the_NAME_dialect_and_keeps_its_spec(self):
+        """The guard must not buy the via back by throwing the spec away --
+        that would re-open #741 for exactly this via."""
+        text, blk, out = self._emit(0, TYPE_VII)
+        self.assertIn('(net "")', blk, blk)
+        self.assertNotIn('(net 0)', blk, blk)
+        self.assertEqual(_prot_tokens(blk),
+                         ['covering', 'plugging', 'capping', 'filling'], blk)
+        v = [x for x in out.vias if x.net_id == 0]
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].tenting_attrs, TYPE_VII)
+    # MUTATION 24: make the guard suppress the spec instead of naming the net
+    # (nm stays None, spec -> INHERIT) -> the via survives but ships bare.
+
+    def test_the_belt_never_emits_a_numeric_net_ALONGSIDE_a_spec(self):
+        """The residue guard, for an id that is not 0 and does not resolve.
+        No board produces this today -- per-via protection is a KiCad-10
+        feature and those boards are name-net -- so it is asserted at the
+        writer rather than through a fixture. Losing the spec here is the
+        deliberate trade: losing the VIA is worse."""
+        text, blk, out = self._emit(9999, TYPE_VII)
+        numeric = '(net 9999)' in blk
+        if numeric:
+            self.assertEqual(_prot_tokens(blk), [],
+                             'a numeric net token was emitted ALONGSIDE a '
+                             'protection spec -- the exact pairing extract_'
+                             'vias cannot read back')
+        self.assertEqual(len(out.vias), len(_via_blocks(text)),
+                         'a via was lost at re-parse')
+    # MUTATION 25: drop the `if nm is None and spec is not INHERIT...` belt.
+
+
 class TestARefusedNudgeLeavesTheBoardTextAlone(unittest.TestCase):
     """The same board at clearance 0.7, where no clear spot exists inside the
     0.6mm search. This licenses the framing: a via's spec is only ever at risk
@@ -978,13 +1083,22 @@ class TestOneEmitSiteOneSpecArgument(unittest.TestCase):
             'tenting_attrs= argument, so via_protection_sexpr falls through to '
             'DEFAULT_VIA_TENTING and every nudged via ships tented (#489 s8, '
             '#741).' % bad)
-        noinherit = [ln for ln, args in calls
-                     if 'INHERIT_VIA_PROTECTION' not in args]
-        self.assertEqual(
-            noinherit, [],
-            'the emit at line(s) %s passes a spec but no inherit sentinel, so '
-            'a via that carried NO spec is stamped with front+back tenting it '
-            'never had -- the second half of #741.' % noinherit)
+        # The sentinel is resolved a few lines ABOVE the call now (the net-0
+        # guard needs it before the emit), so look for it in the enclosing
+        # function rather than in the call's argument text -- and require BOTH
+        # uses: the `or` that answers the spec-less case, and the belt that
+        # refuses to pair a numeric net with a spec.
+        uses = [i + 1 for i, l in enumerate(self.writer)
+                if 'INHERIT_VIA_PROTECTION' in l and 'import' not in l]
+        self.assertGreaterEqual(
+            len(uses), 2,
+            'placement/writer.py references INHERIT_VIA_PROTECTION on %d code '
+            'line(s) (%s); expected at least two -- the `or` that answers the '
+            'spec-less case (the second half of #741) and the belt that will '
+            'not pair a numeric net token with a protection spec (the via-loss '
+            'regression that fix introduced).' % (len(uses), uses))
+        nospec = [ln for ln, args in calls if 'tenting_attrs=' not in args]
+        self.assertEqual(nospec, [], nospec)
     # MUTATIONS 2, 12, 16.
 
     def test_no_OTHER_file_under_py_placer_emits_a_via(self):
@@ -1240,7 +1354,7 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
 
 
 # THE BATTERY, as RUN -- every row below was applied to the tree and the file
-# re-run, not reasoned about. 28 mutations, 25 killed, 3 survivors, 0 BROKEN
+# re-run, not reasoned about. 31 mutations, 28 killed, 3 survivors, 0 BROKEN
 # (no mutation made this file die before it checked anything). The killer per
 # row is also named in the trailing `# MUTATION n:` comment beside the arm.
 #
@@ -1288,6 +1402,17 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
 #                                         survived before)
 #    C  change the emitted indentation .. SURVIVES -- declared, see below
 #   22  strip the pattern out of plane_io  the house-pattern arm
+#   23  drop BOTH net-0 guards .......... all three no-net arms -- the via is
+#                                          LOST (3 in file, 2 parsed). This is
+#                                          the REGRESSION the #741 fix itself
+#                                          introduced. Removing only ONE guard
+#                                          does not lose the via, because the
+#                                          other still catches it; that is the
+#                                          point of having two, and it is why
+#                                          rows 24 and 25 exist separately.
+#   24  net-0 guard does nothing ........ the name-dialect arm (the belt then
+#                                          saves the via but it ships BARE)
+#   25  drop the numeric+spec belt ...... the belt arm
 #
 # NOT IN THIS FILE, and named so it does not read as uncovered: net-agnostic
 # removal (dropping net_ids=/net_names= at the writer). It leaves this file

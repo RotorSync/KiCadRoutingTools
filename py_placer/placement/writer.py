@@ -266,6 +266,27 @@ def write_placed_output(input_file: str, output_file: str,
             for m in via_moves:
                 v = m[2]
                 nm = n2n.get(v['net_id']) if n2n else None
+                if nm is None and n2n:
+                    # A NAME-net board on which this via's id did not resolve.
+                    # Emitting the numeric dialect here is not a cosmetic
+                    # fallback: combined with a protection spec it produces a
+                    # via `kicad_parser.extract_vias` CANNOT read back -- its
+                    # KiCad-9 pattern has strict field ordering and no gap for
+                    # the protection tokens, so the barrel disappears from the
+                    # model entirely. Invisible copper the router then plans
+                    # tracks through, which is the hazard PR #534 was written
+                    # against and strictly worse than the wrong-tenting bug
+                    # #741 set out to fix.
+                    #
+                    # net 0 is the case that actually occurs, and it is a hole
+                    # in the map rather than an unknown net: `extract_nets`
+                    # records `name_to_id[""] = 0` but never creates a Net for
+                    # id 0, so a legitimate no-net `(net "")` via -- which the
+                    # parser models and this writer emits -- misses the lookup
+                    # on every board. Measured: orangecrab_ext_pll resolves 169
+                    # nets and has no key 0. Name it explicitly.
+                    if v['net_id'] == 0:
+                        nm = ''
                 # Every via in via_moves came OFF this board a few lines up,
                 # so its OWN spec is the whole answer. That much is
                 # plane_io.py:862-866's form -- the rip-up restore, which is
@@ -297,11 +318,19 @@ def write_placed_output(input_file: str, output_file: str,
                 # a dict with no 'x'/'net_id' is not a via and SHOULD raise,
                 # while a dict with no spec is a via nobody recorded one for --
                 # a meaning this line has an answer for.
+                spec = v.get('tenting_attrs') or INHERIT_VIA_PROTECTION
+                if nm is None and spec is not INHERIT_VIA_PROTECTION:
+                    # Belt for the residue of the same hazard: a numeric-net
+                    # emission that still carries a spec. Losing the spec is
+                    # the #741 bug; losing the VIA is worse, so this trades
+                    # back deliberately and only where the two conflict. Not
+                    # reachable from any board today -- per-via protection is
+                    # a KiCad-10 feature and those boards are name-net, so a
+                    # numeric-dialect via never has a spec to begin with.
+                    spec = INHERIT_VIA_PROTECTION
                 elements.append(generate_via_sexpr(
                     v['x'], v['y'], v['size'], v['drill'], v['layers'],
-                    v['net_id'], net_name=nm,
-                    tenting_attrs=(v.get('tenting_attrs')
-                                   or INHERIT_VIA_PROTECTION)))
+                    v['net_id'], net_name=nm, tenting_attrs=spec))
         for nsd in (new_segments or []):
             nm = n2n.get(nsd['net_id']) if n2n else None
             elements.append(generate_segment_sexpr(
