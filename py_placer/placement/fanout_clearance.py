@@ -643,13 +643,12 @@ class _Repair:
         # clearance model, which is what made the layer truth vanish on the
         # boards carrying the most phantom -- see _cap_seg_scope.)
         self._seg_floor_by_id: Dict[int, PadFloor] = {}
+        # #736: through _register_segment, which is also what the connector
+        # copper this pass DRAWS goes through -- so a track filed later cannot
+        # be priced or scoped differently from one present at construction.
         for s in pcb_data.segments:
-            fl = self._seg_floor_for(s.net_id, s.layer)
-            t = (s.start_x, s.start_y, s.end_x, s.end_y, s.net_id,
-                 s.width / 2.0 + self._item_reach(fl), s.layer)
-            self.segments.append(t)
-            if fl is not None:
-                self._seg_floor_by_id[id(t)] = fl
+            self._register_segment(s.start_x, s.start_y, s.end_x, s.end_y,
+                                   s.net_id, s.width, s.layer)
 
         # --- attraction: BGA balls grouped by net ---
         # A cap pad is pulled toward the nearest ball of its own net, so a via
@@ -709,6 +708,10 @@ class _Repair:
         # must NOT be deleted as dead: the id-keyed floor maps below depend on
         # those tuples staying alive, and a recycled id would return ANOTHER
         # item's floor, silently, with no error.
+        # #736: self.segments does GAIN entries after __init__ (the connector
+        # copper this pass draws, filed by register_new_segments). It is
+        # APPENDED to, never rebuilt -- precisely so the aliveness this note is
+        # about survives the gain. self.foreign_pads is unchanged.
         self.foreign_pad_floors: List[Optional[PadFloor]] = []
         self.foreign_pad_mf: List[float] = []
         self.caps: Dict[str, _Cap] = {}
@@ -811,6 +814,15 @@ class _Repair:
             cx, cy = (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0
             span = math.hypot(r[2] - cx, r[3] - cy)
             cap_geom[ref] = (cx, cy, span, r)
+        # #736: KEPT, not consumed and dropped with the frame. Every prune
+        # reach below is anchored on the cap's SEED pose -- which is what this
+        # dict holds, because a cap's x/y/rot still equal its seed_* here --
+        # and register_new_segments re-runs that same prune for copper that
+        # appears AFTER construction, by which time cap.rect() is no longer the
+        # seed. Stored rather than re-derived there for the reason _seg_shares
+        # and via_required exist: a second derivation is a second thing to keep
+        # in step.
+        self._cap_geom = cap_geom
 
         self.cap_foreign_pads: Dict[str, List[
             Tuple[float, float, float, float, int, Optional[str]]]] = {}
@@ -864,41 +876,12 @@ class _Repair:
                     near_caps.append(oref)
             self.cap_caps[ref] = near_caps
 
-            near_segs = []
-            # seg[5] already carries the segment's own over-reach, so adding
-            # this cap's excess over the flat scalar bounds the pair.
-            seg_reach = (max_displacement_cap + 2 * span + clearance
-                         + max(0.0, cap_mf - clearance))
-            # #731: keep a track only if SOME pad of this cap shares its copper
-            # layer. The union is a superset of every per-pad set (see
-            # _seg_shares), so this can never drop a chargeable pair -- the
-            # list stays EXACT, as TestPruneRadiiStayExact requires. The
-            # per-pad half is applied in _seg_effs, and matters only for a cap
-            # whose pads differ (an SMD pad beside a through-hole one).
-            #
-            # The `_union is None` arm is a fallback for a cap that offers no
-            # copper pad at all -- cap detection admits n_copper == 0 (a
-            # paste-only C-prefixed part). Such a cap has an empty pad_rects,
-            # so NOTHING it keeps is ever graded and the arm cannot change an
-            # outcome; it keeps the old side filter purely so the pruned list
-            # stays the size it always was. It is NOT reachable for an empty
-            # copper list any more: `_all_cu` above resolves through
-            # check_drc's own three-level fallback and is never empty, which
-            # is deliberate -- falling back to the side collapse there would
-            # DROP the B.Cu and inner tracks a through-hole cap pad shares
-            # copper with, an under-block (measured: 280 pairs on rp2350).
-            _pl, _union = self._cap_seg_scope(cap)
-            for seg in self.segments:
-                layer = seg[6]
-                if _union is None:
-                    if self._seg_side(layer) != cap.side:
-                        continue
-                elif layer in self._all_cu and layer not in _union:
-                    continue
-                d = _point_to_seg_dist(ccx, ccy, seg[0], seg[1], seg[2], seg[3])
-                if d <= seg_reach + seg[5]:
-                    near_segs.append(seg)
-            self.cap_segs[ref] = near_segs
+            # #736: through _prune_segs, the ONE spelling of this predicate.
+            # It carries the comment block that used to live here, including
+            # why the reach is anchored on the SEED pose and why the #731 layer
+            # union keeps the list exact.
+            self.cap_segs[ref] = self._prune_segs(cap, cap_geom[ref],
+                                                  self.segments)
 
             near_vias = []
             # v[3] = via_radius + its own keep-out; a via that can reach a pad
@@ -1262,6 +1245,170 @@ class _Repair:
         pf = getattr(cap, 'pad_floors', None)
         return (self._floors is not None and pf is not None
                 and len(pf) == len(getattr(cap, 'pads', ())))
+
+    # ---- #736: THE one way a track enters this grader --------------------
+    # Two private helpers plus one public registrar, and every track this
+    # module grades goes through them: the ones present at construction, and
+    # the connector copper nudge_vias_for_unresolved DRAWS afterwards. Before
+    # #736 both halves were inline in __init__ and existed nowhere else, so
+    # the post-nudge re-grade had no way to register what the pass had just
+    # created -- it re-graded against the construction-time snapshot and could
+    # report a cap RESOLVED while a connector this same run emitted grazed one
+    # of its pads. Same shape, and the same reason, as via_radius /
+    # via_required / edge_margin above: ONE answer per pair kind in this
+    # module.
+
+    def _register_segment(self, x1, y1, x2, y2, net_id, width, layer):
+        """Grade one track into the track view, and return its tuple.
+
+        THE only construction site for a track tuple, and the only writer of
+        the id-keyed floor map -- both pinned by the source guard in
+        tests/test_736_fanout_clearance_regrade_view.py, which reports
+        offending line numbers rather than dumping the module.
+
+        Takes PRIMITIVE fields rather than a parser Segment because its two
+        callers hold different things: __init__ has real Segments, and
+        register_new_segments has the writer-shaped dicts the nudger returns.
+        A builder that accepted only one of those would have left the other
+        re-deriving the tuple, which is the defect being fixed.
+
+        It files the tuple BEFORE returning, on purpose. The floor map is
+        keyed on the tuple's identity, so a tuple that died while its id entry
+        lived would hand a recycled id ANOTHER track's floor -- silently, with
+        no error. That is the hazard the NB above self.foreign_pad_floors
+        names, and a factory that only BUILT would let a caller drop the
+        reference and arm it. Build-and-file is one operation here because the
+        invariant says it is.
+
+        Element 5 is the OVER-REACH -- half width plus this track's own upper
+        bound (#725), which _seg_effs strips back with the same _item_reach.
+        Element 6 is the track's REAL layer, never an 'F'/'B' side collapse
+        (#731).
+        """
+        fl = self._seg_floor_for(net_id, layer)
+        t = (x1, y1, x2, y2, net_id,
+             width / 2.0 + self._item_reach(fl), layer)
+        self.segments.append(t)
+        if fl is not None:
+            self._seg_floor_by_id[id(t)] = fl
+        return t
+
+    def _prune_segs(self, cap, geom, source):
+        """The tracks in `source` this cap could EVER be charged against --
+        THE one spelling of the per-cap track prune.
+
+        `geom` is the cap's SEED-pose (cx, cy, span, rect) from self._cap_geom,
+        never its current rect. The bound below is the reachable-DISK argument:
+        a cap moves at most max_displacement_cap from its SEED, so anything
+        whose seed gap already exceeds that can never constrain it -- which is
+        what makes this prune EXACT rather than an approximation
+        (TestPruneRadiiStayExact). A MOVED pose would silently redefine what
+        "exact" means, and it would be wrong for required_rows, which grades
+        the seed pose as well as the final one.
+
+        seg[5] already carries the segment's own over-reach, so adding this
+        cap's excess over the flat scalar bounds the pair.
+
+        #731: keep a track only if SOME pad of this cap shares its copper
+        layer. The union is a superset of every per-pad set (see _seg_shares),
+        so this can never drop a chargeable pair -- the list stays EXACT, as
+        TestPruneRadiiStayExact requires. The per-pad half is applied in
+        _seg_effs, and matters only for a cap whose pads differ (an SMD pad
+        beside a through-hole one).
+
+        The `_union is None` arm is a fallback for a cap that offers no copper
+        pad at all -- cap detection admits n_copper == 0 (a paste-only
+        C-prefixed part). Such a cap has an empty pad_rects, so NOTHING it
+        keeps is ever graded and the arm cannot change an outcome; it keeps the
+        old side filter purely so the pruned list stays the size it always was.
+        It is NOT reachable for an empty copper list any more: `_all_cu`
+        resolves through check_drc's own three-level fallback and is never
+        empty, which is deliberate -- falling back to the side collapse there
+        would DROP the B.Cu and inner tracks a through-hole cap pad shares
+        copper with, an under-block (measured: 280 pairs on rp2350).
+
+        Returns a NEW list. A caller must ASSIGN it and must never extend a
+        cap's existing list in place: _seg_effs memoises on the source list's
+        IDENTITY, so an in-place append leaves a memo that still passes the
+        identity test while being one column short, and _seg_shortfalls then
+        indexes past the end of its row.
+        """
+        ccx, ccy, span, _crect = geom
+        seg_reach = (self._max_disp_cap + 2 * span + self.clearance
+                     + max(0.0, cap.max_floor - self.clearance))
+        _pl, _union = self._cap_seg_scope(cap)
+        near_segs = []
+        for seg in source:
+            layer = seg[6]
+            if _union is None:
+                if self._seg_side(layer) != cap.side:
+                    continue
+            elif layer in self._all_cu and layer not in _union:
+                continue
+            d = _point_to_seg_dist(ccx, ccy, seg[0], seg[1], seg[2], seg[3])
+            if d <= seg_reach + seg[5]:
+                near_segs.append(seg)
+        return near_segs
+
+    def register_new_segments(self, seg_dicts) -> int:
+        """Take copper that appeared AFTER construction into the PAD-SEGMENT
+        channel; return how many tracks were filed (#736).
+
+        The one caller is repair_fanout_clearance, with the `new_segments` list
+        nudge_vias_for_unresolved returns: the connectors that restore
+        continuity to each relocated via. That copper is drawn by the pass
+        itself, milliseconds before the pass grades its own work, and both
+        front ends WRITE it (placement/writer.py on the CLI, the plugin's
+        pcbnew mirror in the GUI). Without this the final `unresolved` list and
+        required_rows' disclosure are computed against the track snapshot
+        __init__ took, so a cap can be reported RESOLVED while a connector this
+        same run emitted grazes one of its pads.
+
+        Takes the writer-shaped dicts the nudger already returns
+        ({'start', 'end', 'width', 'layer', 'net_id'}) rather than a tail
+        slice of pcb_data.segments, so nothing here depends on that list being
+        append-only.
+
+        INCREMENTAL, not a rebuild from the board, and the reason is not only
+        cost. The nudger leaves the ORIGINAL attached segments exactly where
+        they are (its own docstring says so), so every tuple already filed
+        still describes real copper at the same coordinates and every pruned
+        membership is as valid as it was. A rebuild would additionally REPLACE
+        the tuples the floor map is keyed on: the originals die, their ids can
+        be recycled by the replacements, and a track is handed ANOTHER track's
+        floor -- the hazard __init__'s own NB names. Appending cannot.
+
+        Each cap that keeps new copper is REASSIGNED a new list; a cap that
+        keeps none is left alone, so it keeps its list identity and therefore
+        its _seg_effs memo. That is what makes this O(caps x new tracks)
+        instead of a second pass over the whole board.
+
+        Deliberately NOT called from nudge_vias_for_unresolved. That function
+        is duck-typed on `st` -- the #370/#617/#732/#733/#737 harnesses pass a
+        stand-in carrying only `caps`, `vias` and `graze_penalty` -- so every
+        `st` read there goes through getattr with a flat fallback. A RESOLVER
+        has an honest flat fallback; a MUTATION does not, because "silently do
+        nothing" is precisely the staleness this fixes. repair_fanout_clearance
+        holds a real _Repair, so the call needs no escape hatch at all.
+
+        A connector on a layer this board never declared is KEPT and CHARGED
+        rather than dropped: `_all_cu` was resolved at construction, so such a
+        layer reads as UNKNOWN and _seg_shares charges it. Over-blocking is the
+        only direction that can never ship a violation.
+
+        Not idempotent, and does not need to be: one caller, one call.
+        """
+        fresh = [self._register_segment(sd['start'][0], sd['start'][1],
+                                        sd['end'][0], sd['end'][1],
+                                        sd['net_id'], sd['width'], sd['layer'])
+                 for sd in seg_dicts]
+        if not fresh:
+            return 0
+        for ref, cap in self.caps.items():
+            kept = self._prune_segs(cap, self._cap_geom[ref], fresh)
+            if kept:
+                self.cap_segs[ref] = self.cap_segs[ref] + kept
+        return len(fresh)
 
     def _pad_effs(self, ref, cap):
         """[cap pad i][pruned foreign pad j] required clearance, or None for
@@ -2167,8 +2314,55 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     if unresolved:
         via_moves, new_segs = nudge_vias_for_unresolved(st, pcb_data, clearance)
         if via_moves:
+            # #736: absorb the connector tracks the nudger just DREW. They went
+            # into pcb_data.segments, but st.segments / st.cap_segs /
+            # st._seg_floor_by_id were snapshotted in _Repair.__init__ before
+            # they existed -- so the re-grade below, and required_rows' seed +
+            # final disclosure, read a track view missing exactly the copper
+            # this pass is responsible for, and a cap could be reported
+            # RESOLVED with one of its pads inside a connector's keep-out.
+            #
+            # The nudger's own connector_clear gate does NOT already close
+            # this. On the connector's OWN layer the two agree exactly -- same
+            # two floors through the same resolver, and connector_clear is the
+            # stricter by EPS -- so an accepted same-layer connector can never
+            # be charged here. It is the OTHER layers that diverge, in two
+            # ways: connector_clear compares against the cap FOOTPRINT's side
+            # (#738), so an inner-layer or back-side connector is never tested
+            # against a THROUGH-HOLE cap pad whose copper spans every layer;
+            # and a connector on a layer this board never declared is skipped
+            # there while _seg_shares charges it here, which is a window #738's
+            # own proposed fix does not close. Either way the gate that drew
+            # the copper is not the gate that grades it, and the summary the
+            # operator reads comes from this one.
+            #
+            # THE GUARD STAYS `via_moves` and gains no `or new_segs`: a
+            # connector dict is appended only inside the same commit block that
+            # appends the via move, with no continue or break between, so a
+            # non-empty new_segs IMPLIES a non-empty via_moves and the disjunct
+            # could never fire. No inner `if new_segs:` either -- the empty
+            # case returns immediately inside register_new_segments.
+            # (writer.py does spell `if via_moves or new_segments:`, and that
+            # is right THERE: it wraps two independent text rewrites and is
+            # defending against a caller handing it lists it did not produce.)
+            st.register_new_segments(new_segs)
             # refresh the per-cap pruned via lists before re-grading
             st.cap_vias = {r: st.vias for r in st.caps}
+            # base_seg / base_pad / base_via are deliberately NOT re-seeded --
+            # exactly as base_via is left alone by the line above, though via
+            # positions changed there too. They are read only by cost() /
+            # hard_blocked, neither of which runs past this point; and a
+            # baseline means "the state at the SEED", which copper this pass
+            # CREATED is not part of. Folding it in would license a later move
+            # to sit on the pass's own connector for free -- the #441
+            # GND<->NetR2_2 failure in miniature, and silent. The consequence
+            # to know: from here st.base_seg and st.cap_segs describe different
+            # boards, which is what "baseline" means rather than a defect.
+            #
+            # KNOWN GAP, deliberately not closed here: `resolved` above is
+            # computed BEFORE the nudge and is not refreshed, so a cap the
+            # sweep cleaned and a connector then grazes can appear in both
+            # lists. That is older than #736 and a different failure mode.
             unresolved = [r for r in st.caps
                           if st.graze_penalty(r, st.caps[r], st.caps[r].x,
                                               st.caps[r].y, st.caps[r].rot) > EPS]
