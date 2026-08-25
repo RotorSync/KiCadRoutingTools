@@ -2076,8 +2076,27 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     Run AFTER bga_fanout.py.
 
     Returns a dict with 'placements' (list of {reference,new_x,new_y,
-    new_rotation} for moved caps), 'resolved', 'unresolved' (refs still
-    grazing foreign copper), and 'bga_refs'.
+    new_rotation} for moved caps), 'resolved', 'unresolved', 'bga_refs',
+    'via_moves', 'new_segments', 'required' and 'clearance_notes'.
+
+    'resolved' and 'unresolved' are graded together, from ONE board state, at
+    the very END of the pass (#746) -- so they are disjoint, and 'resolved'
+    credits the via-nudge for a cap only the nudge could free. Read them as:
+
+      resolved     was grazing at the SEED and is clean now. A subset of the
+                   initial violators, so len(resolved) <= the V printed below.
+      unresolved   is grazing NOW, whatever it was at the seed. NOT a subset
+                   of the initial violators: copper this pass itself drew can
+                   put a cap here that started clean.
+      via_resolved the caps in 'resolved' that the cap-move descent could not
+                   clean and the via-nudge did -- the last resort's credit,
+                   which before #746 landed in neither list.
+      regrazed     the caps the descent DID clean and a connector this same
+                   pass then drew grazes. They are in 'unresolved' and not in
+                   'resolved'; this key names the cause, which is us.
+
+    The two early returns below carry neither 'via_resolved' nor 'regrazed',
+    exactly as they carry no 'via_moves' / 'new_segments' -- see the note there.
 
     via_clear_fallback (#213): when True (default), any cap the normal cost
     descent leaves grazing foreign copper is jumped to the nearest position
@@ -2129,8 +2148,9 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
           f"movable near-BGA caps: {len(st.caps)}")
     # #725: the early returns carry 'required' / 'clearance_notes' too, so a
     # caller does not have to special-case a no-op board for them. (They still
-    # omit 'via_moves' / 'new_segments', as they always have -- every caller
-    # reads the dict with .get.)
+    # omit 'via_moves' / 'new_segments' -- and, since #746, 'via_resolved' /
+    # 'regrazed' -- as they always have: every caller reads the dict with .get,
+    # and all four describe a via-nudge that provably did not happen here.)
     if not st.vias:
         print("No vias on the board - run this AFTER bga_fanout.py.")
         return {'placements': [], 'resolved': [], 'unresolved': [],
@@ -2342,19 +2362,37 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             gc.enable()
 
     placements = []
-    resolved = []
     for ref, cap in st.caps.items():
         moved = (abs(cap.x - cap.seed_x) > EPS or abs(cap.y - cap.seed_y) > EPS
                  or abs(cap.rot - cap.seed_rot) > EPS)
         if moved:
             placements.append({'reference': ref, 'new_x': cap.x,
                                'new_y': cap.y, 'new_rotation': cap.rot})
-        if (ref in violators0
-                and st.graze_penalty(ref, cap, cap.x, cap.y, cap.rot) <= EPS):
-            resolved.append(ref)
-    unresolved = [r for r in st.caps
-                  if st.graze_penalty(r, st.caps[r], st.caps[r].x,
-                                      st.caps[r].y, st.caps[r].rot) > EPS]
+
+    # #746: ONE grader, so `resolved` and `unresolved` can never be read off
+    # two different boards. They were: `resolved` was built here and never
+    # refreshed, while `unresolved` was rebuilt after the via-nudge below --
+    # so a cap the NUDGE freed was grazing when the credit was computed and
+    # clean when the debit was, and appeared in neither list.
+    #
+    # Disjoint by construction, and the order of `st.caps` is preserved in
+    # both: a ref that grazes NOW is unresolved and cannot also be credited;
+    # only a still-clean ref that was a SEED violator is. Note the asymmetry
+    # is deliberate -- `resolved` is gated on `violators0` (you cannot resolve
+    # what was never broken) and `unresolved` is not (copper this pass drew
+    # can break a cap that started clean, which is #736's whole finding).
+    def _grade():
+        res, unres = [], []
+        for ref, cap in st.caps.items():
+            if st.graze_penalty(ref, cap, cap.x, cap.y, cap.rot) > EPS:
+                unres.append(ref)
+            elif ref in violators0:
+                res.append(ref)
+        return res, unres
+
+    resolved, unresolved = _grade()
+    via_resolved: List[str] = []
+    regrazed: List[str] = []
 
     # Last resort (#313): a cap still grazing at the displacement cap is
     # usually BOXED (no clear cap position exists) -- move the offending
@@ -2415,19 +2453,38 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # to know: from here st.base_seg and st.cap_segs describe different
             # boards, which is what "baseline" means rather than a defect.
             #
-            # KNOWN GAP, deliberately not closed here: `resolved` above is
-            # computed BEFORE the nudge and is not refreshed, so a cap the
-            # sweep cleaned and a connector then grazes can appear in both
-            # lists. That is older than #736 and a different failure mode.
-            unresolved = [r for r in st.caps
-                          if st.graze_penalty(r, st.caps[r], st.caps[r].x,
-                                              st.caps[r].y, st.caps[r].rot) > EPS]
+            # #746: BOTH lists are re-graded here, from the one view the two
+            # refreshes above just established. This is what closes the gap
+            # this comment used to declare open ("`resolved` is computed
+            # BEFORE the nudge and is not refreshed"), in both its directions:
+            # a cap the NUDGE freed is now credited instead of vanishing from
+            # both lists, and a cap the SWEEP cleaned that a connector then
+            # grazes now leaves `resolved` instead of sitting in both.
+            #
+            # The two deltas are taken against `swept` -- the pre-nudge credit
+            # -- and NOT recomputed from a penalty, because "who fixed it" is
+            # a fact about the transition and not about either end state. Set
+            # semantics on lists: `st.caps` has one entry per ref, so `swept`
+            # and `resolved` carry no duplicates and `in` is exact.
+            swept = resolved
+            resolved, unresolved = _grade()
+            via_resolved = [r for r in resolved if r not in swept]
+            regrazed = [r for r in swept if r not in resolved]
 
+    # #746: the credit clause says WHO freed the cap, because `resolved` now
+    # spans both mechanisms and a bare count cannot distinguish them. Both
+    # clauses are suppressed when empty, so a run that never reaches the
+    # via-nudge prints exactly the line it printed before.
+    _credit = (f" ({len(via_resolved)} freed by via-nudge)"
+               if via_resolved else "")
     print(f"Moved {len(placements)} cap(s); resolved {len(resolved)}/"
-          f"{len(violators0)} initial violations; "
+          f"{len(violators0)} initial violations{_credit}; "
           f"{len(unresolved)} unresolved.")
     if unresolved:
         print(f"  Unresolved (need manual attention): {', '.join(sorted(unresolved))}")
+    if regrazed:
+        print(f"  Re-grazed by this pass's own connector copper: "
+              f"{', '.join(sorted(regrazed))}")
     # #725: disclose what was graded ABOVE the flat --clearance, and why.
     # Printed from the ENGINE so the CLI and the GUI plugin both inherit it.
     required = st.required_rows({n.net_id: n.name for n in pcb_data.nets.values()})
@@ -2440,6 +2497,7 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     return {'placements': placements, 'resolved': resolved,
             'unresolved': unresolved, 'bga_refs': st.bga_refs,
             'via_moves': via_moves, 'new_segments': new_segs,
+            'via_resolved': via_resolved, 'regrazed': regrazed,
             'required': required, 'clearance_notes': list(st.clearance_notes)}
 
 
