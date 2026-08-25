@@ -272,7 +272,7 @@ def write_placed_output(input_file: str, output_file: str,
             so the barrel disappears from the model entirely. Invisible copper
             the router then plans tracks through, which is the hazard PR #534
             was written against and strictly worse than the wrong-tenting bug
-            #741 set out to fix.
+            #741 set out to fix. The parser asymmetry itself is #748.
             """
             if not n2n:
                 return None
@@ -311,8 +311,8 @@ def write_placed_output(input_file: str, output_file: str,
                 # done that: gui_utils.apply_via_protection returns early on an
                 # empty spec, because pcbnew's *_MODE_FROM_BOARD already means
                 # inherit. plane_io's restore carries the spec but not this
-                # flag, so it still has the residue; filed separately rather
-                # than changed from here.
+                # flag, so it still has the residue; #749 rather than changed
+                # from here.
                 #
                 # Stating the rule HERE rather than relying on the engine key
                 # means the two halves of #741 fail independently: a move dict

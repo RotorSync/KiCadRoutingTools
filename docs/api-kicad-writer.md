@@ -192,8 +192,8 @@ board, so a no-net via needs `net_name=''` spelled out; see
 
 Only `py_placer/placement/writer.py` passes the flag today. The other emit
 sites (`output_writer`, `plane_io`, `repair_planes`, `kicad_oracle`) still have
-the residue and are tracked separately -- do not assume a site is correct
-because it passes `tenting_attrs`.
+the residue and are tracked in #749 -- do not assume a site is correct because
+it passes `tenting_attrs`. The numeric-dialect hazard above is #748.
 
 For vias you **add**, `prevailing_via_protection(pcb.vias)` /
 `prevailing_via_protection_in_text(content)` gives the board's own convention,

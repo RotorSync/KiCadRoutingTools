@@ -1970,7 +1970,10 @@ class FanoutTab(wx.Panel):
             # segment(s) back to the stub start. The CLI applies these via
             # write_placed_output; on the live board we must mirror it (else the
             # via stays put and the graze the summary claims to have fixed
-            # persists). GUI parity for placement/writer.py:250-302.
+            # persists). GUI parity for the via-nudge block in
+            # placement/writer.py (`# Via-nudge rewrites (#313)` to the
+            # splice) -- named by its marker comment rather than by line
+            # numbers, which this file has now got wrong twice.
             name_to_id, _ = _build_layer_mappings()
 
             def _layer_id(layer_name):
@@ -2009,7 +2012,7 @@ class FanoutTab(wx.Panel):
                 # internally and returns {}. That is pre-existing #489
                 # behaviour and NOT this fix's doing, but it means the GUI half
                 # of the round trip does not currently carry a spec at all.
-                # Filed separately.
+                # #751.
                 moved_attrs = vd.get('tenting_attrs')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':

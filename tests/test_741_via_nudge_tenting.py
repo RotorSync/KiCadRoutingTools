@@ -124,8 +124,13 @@ CLOSED by arms added afterwards rather than declared away. Three arms overlap
 tests/test_489_via_tenting.py, which owns those values; they are kept only as
 end-to-end change detectors and are marked as such.
 
-RUNTIME: ~20-30s. One subprocess (the CLI arm), one memoised rig per clearance,
-and the corpus spec arm is a TEXT scan rather than a parse.
+RUNTIME: ~14s warm, and it is almost all one class -- measured 13.8/13.9/13.8
+over three runs, of which TestInertOnTheTrackedCorpus is 13.5. A cold cache is
+much worse: an independent reviewer measured 57s on a fresh checkout, because
+that class parses and drives the engine over 22 boards x 2 clearances. That is
+why this file does NOT declare RUN_ALL_FAST_OK -- run_all.py's rule is that a
+test driving a routing chain belongs in the integration bucket whatever it
+imports. The rest (rig, 34 other arms, one CLI subprocess) is under a second.
 """
 
 # NO RUN_ALL_FAST_OK. Measured six runs: 54-67s, of which
