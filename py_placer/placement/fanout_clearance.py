@@ -2076,24 +2076,43 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     Run AFTER bga_fanout.py.
 
     Returns a dict with 'placements' (list of {reference,new_x,new_y,
-    new_rotation} for moved caps), 'resolved', 'unresolved', 'bga_refs',
-    'via_moves', 'new_segments', 'required' and 'clearance_notes'.
+    new_rotation} for moved caps), 'resolved', 'unresolved', 'via_resolved',
+    'regrazed', 'bga_refs', 'via_moves', 'new_segments', 'required' and
+    'clearance_notes'.
 
     'resolved' and 'unresolved' are graded together, from ONE board state, at
     the very END of the pass (#746) -- so they are disjoint, and 'resolved'
     credits the via-nudge for a cap only the nudge could free. Read them as:
 
       resolved     was grazing at the SEED and is clean now. A subset of the
-                   initial violators, so len(resolved) <= the V printed below.
+                   initial violators, so len(resolved) is at most the
+                   denominator of the "resolved R/V" count printed below.
       unresolved   is grazing NOW, whatever it was at the seed. NOT a subset
                    of the initial violators: copper this pass itself drew can
                    put a cap here that started clean.
       via_resolved the caps in 'resolved' that the cap-move descent could not
                    clean and the via-nudge did -- the last resort's credit,
                    which before #746 landed in neither list.
-      regrazed     the caps the descent DID clean and a connector this same
-                   pass then drew grazes. They are in 'unresolved' and not in
-                   'resolved'; this key names the cause, which is us.
+      regrazed     the caps that were CLEAN before the nudge and are grazing
+                   after it: this pass broke them. Keyed on the transition,
+                   NOT on membership of the seed violators -- a cap that was
+                   never broken at all is the case the 'unresolved' line above
+                   exists to describe, and it must not be the one case with no
+                   cause named. A subset of 'unresolved', disjoint from
+                   'resolved'.
+
+    Two things to know before treating 'regrazed' as a shipped DRC violation.
+    It is graded by THIS module, which deliberately over-blocks a track on a
+    layer the board never declared (see test_736's
+    TestTheUnknownLayerOverBlockIsDELIBERATE), so check_drc can grade the same
+    pair clean -- 'unresolved' has had that property since #736; what is new
+    is a line asserting a CAUSE, which can send an operator hunting a phantom.
+    And the cause it asserts is connector copper rather than the relocated via
+    because valid_via_pos's cap gate is strictly stronger than via_penalty's:
+    same rects, same radius, same resolver, both over post-descent poses, and
+    no layer gate on either -- so a landing that would newly graze a cap is
+    refused before it happens. The set difference below does not re-check
+    that, which is why it is written down here.
 
     The two early returns below carry neither 'via_resolved' nor 'regrazed',
     exactly as they carry no 'via_moves' / 'new_segments' -- see the note there.
@@ -2461,15 +2480,23 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # both lists, and a cap the SWEEP cleaned that a connector then
             # grazes now leaves `resolved` instead of sitting in both.
             #
-            # The two deltas are taken against `swept` -- the pre-nudge credit
-            # -- and NOT recomputed from a penalty, because "who fixed it" is
-            # a fact about the transition and not about either end state. Set
-            # semantics on lists: `st.caps` has one entry per ref, so `swept`
-            # and `resolved` carry no duplicates and `in` is exact.
+            # Both deltas are taken against the PRE-NUDGE lists and not
+            # recomputed from a penalty, because "who fixed it" and "who broke
+            # it" are facts about the transition, not about either end state.
+            # Set semantics on lists: `st.caps` has one entry per ref, so no
+            # list here carries duplicates and `in` is exact.
+            #
+            # `regrazed` keys on `was_grazing`, NOT on `swept`: a review of the
+            # first version caught that spelling it `[r for r in swept if r not
+            # in resolved]` can only ever name a cap that was ALSO a seed
+            # violator -- so a cap that started perfectly clean and was broken
+            # by this pass's own connector was the one case that got no cause
+            # named, which is exactly the case the docstring above says exists.
             swept = resolved
+            was_grazing = set(unresolved)
             resolved, unresolved = _grade()
             via_resolved = [r for r in resolved if r not in swept]
-            regrazed = [r for r in swept if r not in resolved]
+            regrazed = [r for r in unresolved if r not in was_grazing]
 
     # #746: the credit clause says WHO freed the cap, because `resolved` now
     # spans both mechanisms and a bare count cannot distinguish them. Both

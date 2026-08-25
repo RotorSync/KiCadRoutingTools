@@ -58,21 +58,25 @@ defaults AND at the forcing configuration, 88 rows differ in exactly ONE place
 -- the orangecrab row above.  At the shipped defaults no tracked board reaches
 the via-nudge at all, so all 44 of those rows are byte-identical.
 
-MUTATION BATTERY, 11 rows against the engine, 11 killed, 0 survivors.  The
+MUTATION BATTERY, 12 rows against the engine, 12 killed, 0 survivors.  The
 count per row is what makes the `# MUTATION:` notes checkable rather than
 decorative, so it is recorded here:
 
-    resolved-refresh-reverted            10 arms   the defect itself
-    deltas-swapped                       10        via_resolved <-> regrazed
-    deltas-hoisted-out-of-the-guard       7        credit on a run with no nudge
-    swept-bound-after-the-regrade         6        both deltas empty everywhere
+    resolved-refresh-reverted            11 arms   the defect itself
+    deltas-swapped                       11        via_resolved <-> regrazed
+    deltas-hoisted-out-of-the-guard       8        credit on a run with no nudge
+    swept-bound-after-the-regrade         7        both deltas empty everywhere
     credit-clause-unconditional           4        "(0 freed by via-nudge)"
     via_resolved-seeded-with-resolved     4        the descent's credit, restamped
-    registrar-after-the-regrade           3        #736's ordering
+    registrar-after-the-regrade           4        #736's ordering
     violators0-gate-dropped               3        "resolved 55/14"
+    regrazed-print-deleted                2
     grade-returns-sorted                  1        only the real board's order
     via_resolved-is-all-of-resolved       1        only the real board
-    regrazed-print-deleted                1
+    regrazed-keyed-on-swept               1        only arm C
+
+Three rows are killed by exactly one arm, and each names why that arm exists
+rather than being redundant with the rest.
 
 TWO OF MY OWN `# MUTATION:` NOTES WERE WRONG and are corrected in place rather
 than quietly deleted, because the shape recurs: both named an arm that CANNOT
@@ -81,6 +85,15 @@ reach the mutation.  `via_resolved = list(resolved)` lives inside the
 can never see it; I had written that this class was what caught it.  The
 battery said one arm caught it, and a different one.  A note claiming a gate
 that does not gate is worth less than no note.
+
+ARM C EXISTS BECAUSE A REVIEW FOUND THE FIRST `regrazed` KEYED ON THE WRONG
+THING.  Spelled `[r for r in swept if r not in resolved]` it can only ever
+name a cap that was ALSO a seed violator, so a cap that arrived perfectly
+clean and was broken by this pass's own connector was the single kind of
+re-graze with no cause named -- the exact case the engine docstring says
+exists.  Re-keyed on the transition (`unresolved` minus the pre-nudge
+`unresolved`), and arm C is the only arm in this file that tells the two
+spellings apart, because arm B's C2 happens to be a seed violator too.
 
 Runtime ~30s warm, in-process apart from one `git ls-files`.
 
@@ -140,6 +153,10 @@ B_VIA_SIZE, B_VIA_DRILL = 0.4, 0.2
 B_STUB_W = 3.0              # hw 1.50 vs vr 0.20 -> a +1.30mm window
 B_STUB_X0 = 4.0
 B_LANDING = (10.230, 12.554)    # MEASURED
+B_C3 = (11.4, 13.9)         # NEVER a seed violator: 1.709mm off the stub
+                            # against its 1.600 keep-out, and 1.109 off the
+                            # connector's far end against the same -- so the
+                            # pass breaks a cap that arrived perfectly clean
 B_NEAR = 8.0                # the caps sit further from the BGA than the 1.0
                             # default admits; without this `st.caps` is empty
                             # and the pass early-returns having graded nothing
@@ -262,6 +279,30 @@ def arm_b(*, layer='In1.Cu', through=True, stub_w=B_STUB_W, **kw):
                 via_clear_fallback=False)
     opts.update(kw)
     return _drive(bi, [v], [stub], fps, [], **opts)
+
+
+def arm_c():
+    """Arm B's board with C2 replaced by a cap that is CLEAN at the seed.
+
+    C1 is still buried and still calls the nudger; C3 sits outside every
+    keep-out on the board it was handed and is broken purely by the connector
+    this pass then draws.  It is never a violator, so it never enters
+    `violators0`, never enters `resolved`, and is invisible to any disclosure
+    keyed on the seed -- which is what an adversarial review of the first
+    version of this fix found.
+    """
+    bi = BoardInfo(layers={}, copper_layers=list(CU), board_bounds=B_BOUNDS)
+    v = make_via(B_VIA[0], B_VIA[1], net_id=3, size=B_VIA_SIZE,
+                 drill=B_VIA_DRILL)
+    stub = make_seg(B_STUB_X0, B_Y, B_VIA[0], B_Y, width=B_STUB_W,
+                    layer='In1.Cu', net_id=3)
+    fps = {'U1': _bga(*B_BGA),
+           'C1': _cap('C1', B_C1[0], B_C1[1], 11, 12, through=True),
+           'C3': _cap('C3', B_C3[0], B_C3[1], 15, 16, through=True)}
+    return _drive(bi, [v], [stub], fps, [], max_displacement=B_DISP,
+                  max_displacement_cap=B_DISP, max_passes=30,
+                  allow_rotations=False, near_margin=B_NEAR,
+                  via_clear_fallback=False)
 
 
 def sweep_only(disp=0.3):
@@ -426,6 +467,37 @@ class TestACapCleanedThenReGrazedLeavesResolved(unittest.TestCase):
         self.assertEqual(res['unresolved'], ['C1'])
     # MUTATION: none -- a control.
 
+    def test_a_cap_that_was_NEVER_broken_still_gets_its_cause_named(self):
+        """The case a review of the first version of this fix found missing.
+
+        C3 arrives clean -- not in `violators0`, so it can never be in
+        `resolved` -- and this pass's own connector breaks it.  Keyed on the
+        seed (`[r for r in swept if r not in resolved]`) that cap is the ONE
+        kind of re-graze with no cause named, which is the opposite of what
+        the disclosure is for.  Keyed on the TRANSITION it is named."""
+        res, _st, out = arm_c()
+        # ON THE BRANCH, three ways: C3 must not be a seed violator, must not
+        # have moved, and the connector must exist. Miss any and the arm is
+        # about something else.
+        self.assertIn('Caps initially grazing foreign copper (via/track/pad): '
+                      '1 (C1)', out,
+                      'C3 is a SEED violator here, so this rig no longer '
+                      'isolates the never-broken case')
+        self.assertEqual([p['reference'] for p in res['placements']], ['C1'],
+                         'C3 moved; it must be broken where it stands')
+        self.assertEqual(len(res['new_segments']), 1)
+
+        self.assertEqual(_line(out, '  Re-grazed'),
+                         "  Re-grazed by this pass's own connector copper: C3")
+        self.assertEqual(res['regrazed'], ['C3'])
+        self.assertEqual(res['unresolved'], ['C1', 'C3'])
+        self.assertEqual(res['resolved'], [])
+    # MUTATION: `regrazed = [r for r in swept if r not in resolved]` -- the
+    # first spelling. C3 was never in `violators0`, so `swept` cannot contain
+    # it and regrazed goes to []: the pass breaks a cap that arrived clean and
+    # reports it as an anonymous `unresolved`. Arm B alone does NOT catch this,
+    # because its C2 happens to be a seed violator as well.
+
 
 class TestTheSweepOnlyRunIsUnchanged(unittest.TestCase):
     """A run that never reaches the via-nudge must print what it always did."""
@@ -470,13 +542,15 @@ class TestTheSweepOnlyRunIsUnchanged(unittest.TestCase):
 class TestTheTwoListsAreDisjointAndOrdered(unittest.TestCase):
     """The shape contract both front ends read, on every arm at once."""
 
-    ARMS = ('arm_a', 'arm_b', 'arm_b_smd', 'arm_b_onlayer', 'sweep_only')
+    ARMS = ('arm_a', 'arm_b', 'arm_c', 'arm_b_smd', 'arm_b_onlayer',
+            'sweep_only')
 
     @classmethod
     def setUpClass(cls):
         cls.runs = {
             'arm_a': arm_a(),
             'arm_b': arm_b(),
+            'arm_c': arm_c(),
             'arm_b_smd': arm_b(through=False),
             'arm_b_onlayer': arm_b(layer='F.Cu'),
             'sweep_only': sweep_only(),
