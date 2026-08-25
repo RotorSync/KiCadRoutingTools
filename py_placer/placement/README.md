@@ -281,7 +281,8 @@ which is not a subset of the seed violators — copper the pass itself drew can
 break a cap that started clean, and when it does, a `Re-grazed by this pass's
 own connector copper:` line names those caps. Before #746 `resolved` was
 computed before the nudge and never refreshed, so a cap the nudge freed reached
-neither list and a cap the pass re-grazed reached both.
+neither list, and a cap the sweep had cleaned before the pass re-grazed it
+reached both.
 
 It reads each via's actual size from the board, so the only setting that
 matters is `--clearance`, which must match the fanout / DRC floor:
