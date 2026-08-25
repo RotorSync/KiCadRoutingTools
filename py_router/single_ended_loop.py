@@ -576,6 +576,78 @@ def route_single_ended_nets(
         for _i, (_nm, _nid) in enumerate(single_ended_nets):
             if _nid in _members:
                 _stop_after_idx = _i
+    # ---- Parallel batch pre-pass (KICAD_PARALLEL_BATCH, default ON) ----
+    # Route spatially-disjoint plain single-ended nets in parallel via
+    # grid_router.route_batch against ONE immutable snapshot, then commit
+    # sequentially (re-checking each against already-committed copper).
+    # Complex nets (multipoint/oracle/bus) and failures/conflict-losers fall
+    # through to the sequential loop below.
+    from parallel_routing import route_batch_parallel, _parallel_enabled
+    if (_parallel_enabled() and not _stop_file and not _stop_after
+            and state.working_obstacles is not None
+            and state.net_obstacles_cache is not None):
+        _plain = []
+        for _nm, _nid in single_ended_nets:
+            if _nid in bus_net_to_group:
+                continue
+            if (getattr(state, 'oracle_links_by_net', None) or {}).get(_nid):
+                continue
+            if get_multipoint_net_pads(pcb_data, _nid, config):
+                continue
+            _plain.append((_nm, _nid))
+        if _plain:
+            def _commit_fn(_nid, _result):
+                """Commit one clean parallel result; returns True on success."""
+                try:
+                    _stub_len = calculate_stub_length(pcb_data, _nid)
+                    _rl = calculate_route_length(_result['new_segments'],
+                                                 _result.get('new_vias', []), pcb_data)
+                    _result['route_length'] = _rl + _stub_len
+                    _result['stub_length'] = _stub_len
+                    results.append(_result)
+                    add_route_to_pcb_data(pcb_data, _result,
+                                          debug_lines=config.debug_lines)
+                    from plane_fragility import fragility_on_copper_change
+                    fragility_on_copper_change(config, pcb_data,
+                                               _result.get('new_segments'),
+                                               _result.get('new_vias'))
+                    if _nid in remaining_net_ids:
+                        remaining_net_ids.remove(_nid)
+                    routed_net_ids.append(_nid)
+                    routed_results[_nid] = _result
+                    if _result.get('path'):
+                        routed_net_paths[_nid] = _result['path']
+                    track_proximity_cache[_nid] = compute_track_proximity_for_net(
+                        pcb_data, _nid, config, layer_map)
+                    if state.working_obstacles is not None and state.net_obstacles_cache is not None:
+                        update_net_obstacles_after_routing(
+                            pcb_data, _nid, _result, config, state.net_obstacles_cache)
+                        add_net_obstacles_from_cache(state.working_obstacles,
+                                                     state.net_obstacles_cache[_nid])
+                    invalidate_obstacle_cache(obstacle_cache, _nid)
+                    record_net_event(state, _nid, "initial_route", {
+                        "type": "single-ended-parallel",
+                        "segments": len(_result['new_segments']),
+                        "vias": len(_result.get('new_vias', [])),
+                        "iterations": _result['iterations']})
+                    return True
+                except Exception as _e:
+                    print(f"  [parallel] commit failed for net {_nid}: {_e}")
+                    return False
+
+            _specs = [{'net_id': nid} for _, nid in _plain]
+            _results, _requeued = route_batch_parallel(
+                pcb_data, config, state.working_obstacles, _specs,
+                all_unrouted_net_ids, routed_net_ids, track_proximity_cache,
+                layer_map, state.net_obstacles_cache, _commit_fn)
+            if _results:
+                print(f"  [parallel] routed {len(_results)} nets in batches "
+                      f"({len(_requeued)} re-queued)")
+            # Drop successfully-routed nets from the sequential loop.
+            if _results:
+                _routed_set = set(_results)
+                single_ended_nets = [(nm, nid) for nm, nid in single_ended_nets
+                                     if nid not in _routed_set]
     _pos = -1
     for net_name, net_id in single_ended_nets:
         _pos += 1

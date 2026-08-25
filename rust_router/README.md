@@ -2,11 +2,10 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.20.0**
+**Current Version: 0.22.0**
 
-> **Release note:** the 0.20.0 per-platform binaries are published as of
-> [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
-> and `/VERSION` + `metadata.json` name that release. `build_router.py`
+> **Release note:** 0.22.0 adds `route_batch` (parallel batch routing).
+> `/VERSION` + `metadata.json` name that release; `build_router.py`
 > fetches them directly -- a plain `python build_router.py` is enough, and
 > `--from-source` is only needed when testing local Rust changes.
 
@@ -311,6 +310,17 @@ src/
 
 ## Version History
 
+
+### 0.22.0 (2026-08-16)
+- **Batch parallel routing**: new `route_batch(requests, shared_snapshot)`
+  entry point routes N nets in parallel with rayon against ONE immutable
+  obstacle snapshot inside a single FFI call (no GIL involvement), returning
+  per-net candidate paths. Each request is fully self-contained (its own
+  router config + route params), so per-net results are deterministic and
+  independent of thread count/scheduling -- a pure function of request +
+  snapshot. The core A* logic is untouched; this wraps it. Threads capped at
+  min(12, cores-2). Rust unit tests assert determinism: identical batch
+  routed with 1 thread and N threads yields identical per-net paths.
 
 ### 0.21.1 (2026-08-16)
 
