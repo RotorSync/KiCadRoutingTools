@@ -1991,15 +1991,25 @@ class FanoutTab(wx.Panel):
                 # inherits the board's `(setup (tenting ...))`, which
                 # apply_via_protection correctly leaves alone.
                 #
-                # Note the guard below is `if not moved_attrs`: TRUTHINESS, not
-                # presence, so it fires for that inheriting via too. Harmless --
-                # _pcbnew_via_protection_attrs returns {} for a track at
-                # *_MODE_FROM_BOARD, so the re-read agrees -- but it does mean
-                # this fallback is NOT the regression detector for either half
-                # of #741. It re-derives its answer from the same track via the
-                # same call that built pcb_data, so it would MASK an engine
-                # revert. tests/test_741_via_nudge_tenting.py asserts on the
-                # engine dict for exactly that reason.
+                # Note the guard below is `if not moved_attrs`: TRUTHINESS,
+                # not presence, so it fires for that inheriting via too. It
+                # cannot mis-stamp -- apply_via_protection returns early on an
+                # empty spec either way -- but it is NOT the regression
+                # detector for either half of #741: it re-derives its answer
+                # from the same track via the same call that built pcb_data,
+                # so it would MASK an engine revert.
+                # tests/test_741_via_nudge_tenting.py asserts on the engine
+                # dict for exactly that reason.
+                #
+                # And on KiCad 10.0.0 the re-read is inert for EVERY via, not
+                # just an inheriting one: pcbnew's SWIG wrapper does not export
+                # TENTING_MODE_TENTED and friends (measured -- the setters
+                # exist, the constants do not, and the getters hand back an
+                # opaque SwigPyObject), so _pcbnew_via_protection_attrs raises
+                # internally and returns {}. That is pre-existing #489
+                # behaviour and NOT this fix's doing, but it means the GUI half
+                # of the round trip does not currently carry a spec at all.
+                # Filed separately.
                 moved_attrs = vd.get('tenting_attrs')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
