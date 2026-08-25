@@ -832,6 +832,10 @@ class _Repair:
         self.cap_caps: Dict[str, List[str]] = {}
         # foreign-net tracks this cap's pads SHARE COPPER WITH, in reach (#731)
         self.cap_segs: Dict[str, List[Tuple]] = {}
+        # ...and how many LEADING entries of each are seed-era (#736). Copper
+        # register_new_segments appends is real on the final board and a
+        # fiction at the seed, so the two graded poses see different lists.
+        self._seed_seg_n: Dict[str, int] = {}
         # through-vias in reach (each (vx, vy, net, keepout))
         self.cap_vias: Dict[str, List[Tuple[float, float, int, float]]] = {}
         # #725: every reach below is raised by THE TWO ITEMS' OWN maxima, never
@@ -882,6 +886,13 @@ class _Repair:
             # union keeps the list exact.
             self.cap_segs[ref] = self._prune_segs(cap, cap_geom[ref],
                                                   self.segments)
+            # #736: how much of that list is SEED-ERA copper. required_rows
+            # grades the seed pose as well as the final one, and a connector
+            # this pass DREW did not exist at the seed -- charging it there
+            # invents a row describing a pair no board ever had. Recorded per
+            # cap rather than derived from a global count, because the pruned
+            # lists have different lengths.
+            self._seed_seg_n[ref] = len(self.cap_segs[ref])
 
             near_vias = []
             # v[3] = via_radius + its own keep-out; a via that can reach a pad
@@ -1301,10 +1312,22 @@ class _Repair:
         never its current rect. The bound below is the reachable-DISK argument:
         a cap moves at most max_displacement_cap from its SEED, so anything
         whose seed gap already exceeds that can never constrain it -- which is
-        what makes this prune EXACT rather than an approximation
-        (TestPruneRadiiStayExact). A MOVED pose would silently redefine what
-        "exact" means, and it would be wrong for required_rows, which grades
-        the seed pose as well as the final one.
+        what makes this prune EXACT rather than an approximation. A MOVED pose
+        would silently redefine what "exact" means.
+
+        The bound is stated rather than cited, because the obvious citation is
+        wrong: TestPruneRadiiStayExact checks that the lists never SHRINK when
+        a requirement is raised, not that the pruned grade equals the unpruned
+        one. Measured instead, over all 115 caps of every tracked board:
+        `2*span + clearance - grid_overshoot - R_max` has a minimum slack of
+        +1.009mm and never goes negative, where R_max is the largest
+        seed-centre-to-pad-corner distance across all four reachable
+        rotations. That figure is at --clearance 0.1; the bound carries a
+        `+ clearance` term, so it is +1.109 at the shipped 0.2 and larger
+        above. The grid overshoot is real and pre-existing --
+        _candidate_positions snaps AFTER its radius test, so a final pose can
+        sit up to grid_step*sqrt(2)/2 past max_displacement_cap -- and the
+        2*span term absorbs it with an order of magnitude to spare.
 
         seg[5] already carries the segment's own over-reach, so adding this
         cap's excess over the flat scalar bounds the pair.
@@ -1405,9 +1428,20 @@ class _Repair:
         if not fresh:
             return 0
         for ref, cap in self.caps.items():
-            kept = self._prune_segs(cap, self._cap_geom[ref], fresh)
+            # `.get` rather than a bare index, matching what _pair_effs and
+            # the eff builders already do: st.caps / st.cap_segs / st.segments
+            # are all assignable from a test on a REAL _Repair (test_725 and
+            # test_732 both do it), and a cap this object never pruned for has
+            # no seed geometry to measure a reach from. Skipping it leaves
+            # that cap exactly as the caller built it.
+            geom = self._cap_geom.get(ref)
+            if geom is None or ref not in self.cap_segs:
+                continue
+            kept = self._prune_segs(cap, geom, fresh)
             if kept:
                 self.cap_segs[ref] = self.cap_segs[ref] + kept
+                self._seed_seg_n.setdefault(
+                    ref, len(self.cap_segs[ref]) - len(kept))
         return len(fresh)
 
     def _pad_effs(self, ref, cap):
@@ -1618,15 +1652,22 @@ class _Repair:
             x, y, rot = cap.x, cap.y, cap.rot
             sx, sy, srot = cap.seed_x, cap.seed_y, cap.seed_rot
 
-            def both(fn):
+            def both(fn, seed_kw=None):
                 """Nets charged at the SEED pose or the final one.
 
                 The seed half is the point: the pass SUCCEEDS by leaving
                 nothing charged, so a final-pose-only report is empty exactly
                 when the raised requirement did its work -- and the operator
                 could not tell a run graded at --clearance from one graded at
-                five times it."""
-                out = set(fn(ref, cap, sx, sy, srot))
+                five times it.
+
+                #736: `seed_kw` scopes the SEED half to the copper that
+                existed at the seed. Only the TRACK kind needs it -- the pad
+                and via channels gain nothing after __init__ -- and without it
+                a connector the pass DREW is charged against the cap's seed
+                pads, a pair no board ever had. That is the same class of
+                phantom #731 removed from this very report."""
+                out = set(fn(ref, cap, sx, sy, srot, **(seed_kw or {})))
                 out |= set(fn(ref, cap, x, y, rot))
                 return out
 
@@ -1640,7 +1681,8 @@ class _Repair:
                      both(self._via_shortfalls), None, None),
                     ('track', self.cap_segs[ref],
                      lambda t: self._seg_floor_by_id.get(id(t)), lambda t: t[4],
-                     both(self._seg_shortfalls),
+                     both(self._seg_shortfalls,
+                          {'upto': self._seed_seg_n.get(ref)}),
                      lambda t: t[6], None)):
                 for net, (mm, src) in best(fls, items, floor_of, net_of,
                                            set(charged), cl, layer_of,
@@ -1768,7 +1810,7 @@ class _Repair:
                     by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
         return by_net
 
-    def _seg_shortfalls(self, ref, cap, x, y, rot):
+    def _seg_shortfalls(self, ref, cap, x, y, rot, upto=None):
         """PER-FOREIGN-NET track clearance shortfall for a placement, over the
         tracks this cap's pads actually SHARE COPPER WITH (#731),
         keyed by the track's net_id (#441): {snet: sum of (halfw - dist) over that
@@ -1782,6 +1824,13 @@ class _Repair:
         scalar baseline). Uses the per-cap pruned, layer-scoped track list."""
         by_net: Dict[int, float] = {}
         segs = self.cap_segs[ref]
+        # #736: `upto` grades only the first N entries -- the SEED-ERA ones,
+        # since register_new_segments APPENDS. Used by required_rows' seed
+        # half, which must not charge copper this pass itself drew. A PREFIX
+        # rather than a filtered subset on purpose: the eff rows below are
+        # index-aligned with this list, and a subset would mis-index them.
+        if upto is not None:
+            segs = segs[:upto]
         effs = self._seg_effs(ref, cap)
         if effs is None:
             # No matrix: a duck-typed cap, or a real _Cap with no copper pad
@@ -2342,6 +2391,13 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # non-empty new_segs IMPLIES a non-empty via_moves and the disjunct
             # could never fire. No inner `if new_segs:` either -- the empty
             # case returns immediately inside register_new_segments.
+            #
+            # The CONVERSE is false and this is not an equivalence: a via whose
+            # conn_layers is empty -- no same-net copper terminating in its
+            # body, no containing same-net pad, no same-net zone -- relocates
+            # with no connector at all (and, worth knowing separately, with no
+            # connector validation, since `all(...)` over an empty dict is
+            # vacuously True). That grows via_moves and not new_segs.
             # (writer.py does spell `if via_moves or new_segments:`, and that
             # is right THERE: it wraps two independent text rewrites and is
             # defending against a caller handing it lists it did not produce.)

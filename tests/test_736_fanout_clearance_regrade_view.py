@@ -104,13 +104,20 @@ Conventions this file follows (#697/#725/#731/#732/#733/#737 and CLAUDE.md):
         mutations -- dropping `_item_reach`, and omitting the floor map --
         cancel and both survive.
 
-MUTATION BATTERY: 18 single-line mutations of the fix, 18 killed, each named
+MUTATION BATTERY: 22 single-line mutations of the fix, 22 killed, each named
 by the arm that kills it under `TestOneConstructionSiteOnePrunePredicate`. Two
 false-positive probes -- a trailing comment naming a guarded literal, and a
 comment line naming the pricing spelling -- are correctly inert.
 
-Two of the eighteen exist because the FIRST run of that battery let them
-through, and both are recorded rather than quietly fixed:
+Four of the twenty-two (19-22) exist because an adversarial review of this
+branch found a defect the fix INTRODUCED: `required_rows` grades the seed pose
+as well as the final one, and a connector the pass DREW did not exist at the
+seed, so charging it there invented a `track <net>` row describing a pair no
+board ever had -- the same class of phantom #731 removed from that very report.
+`TestTheSeedHalfOfTheDisclosureIgnoresPassCreatedCopper` is that finding.
+
+Two more exist because the FIRST run of the battery let them through, and both
+are recorded rather than quietly fixed:
 
   * `if via_moves:` -> `if True:` changes no NUMBER, because the via prune is
     exact and de-pruning grades identically. The first version of
@@ -218,6 +225,15 @@ DECL_CLASS = [{'name': 'Default', 'clearance': 0.2, 'track_width': 0.2,
 DECL_LC = 0.5               # a pad override, so pair() != _item_reach()
 DECL_T5 = 0.35              # HW + _item_reach(seg floor)  = 0.15 + max(0.1,0.2)
 DECL_EFF = 0.65             # HW + pair(cap floor, seg floor) = 0.15 + 0.5
+
+# A connector hugging C1's SEED pads: 0.100 off pad 2's seed edge against the
+# 0.650 declared keep-out, so it IS charged there -- and 1.900 clear of the
+# pads once the cap has walked SEED_HUG_WALK away, so it is NOT charged at the
+# pose the pass left it in. That asymmetry is the whole of the seed-half
+# disclosure defect an adversarial review found in this branch.
+SEED_HUG = {'start': (10.90, CAP_XY[1]), 'end': (11.05, CAP_XY[1]),
+            'width': TRACK_W, 'layer': 'F.Cu', 'net_id': NET_V}
+SEED_HUG_WALK = 2.5
 
 
 def _bga():
@@ -665,6 +681,58 @@ class TestTheRefreshIsSkippedWhenNothingMoved(unittest.TestCase):
     # asserted only the track half and the mutation SURVIVED the battery.
 
 
+class TestTheSeedHalfOfTheDisclosureIgnoresPassCreatedCopper(unittest.TestCase):
+    """`required_rows` grades `_seg_shortfalls` at the SEED pose as well as the
+    final one -- deliberately, so that a pass which SUCCEEDS still discloses
+    the raised requirement that did the work.
+
+    A connector this pass DREW did not exist at the seed. Charging it there
+    invents a `track <net>` row describing a pair no board ever had, which is
+    exactly the class of phantom #731 removed from this very report. Measured
+    on the rig below before the scope was added: `{3: 0.550}` charged at the
+    seed against `{}` at the final pose -- 0.650 (the declared eff cell) minus
+    the 0.100 the connector sits off pad 2's SEED edge.
+
+    Found by an adversarial review of this branch, not by me.
+    """
+
+    def test_a_connector_hugging_the_SEED_pads_produces_no_track_row(self):
+        with _stub(DECL_CLASS) as path:
+            pcb, v = _board(VIA_CLEAR, 'F.Cu', lc=DECL_LC)
+            st = _Repair(pcb, path, CLEAR, 0.1, 0.55, 1.0, 2.0, 0.3, 'C',
+                         set())
+            self.assertIsNotNone(st._floors, 'an INERT board discloses '
+                                             'nothing, so this arm would pass '
+                                             'on an empty report')
+            cap = st.caps['C1']
+            seed_n = st._seed_seg_n['C1']
+            cap.x = cap.seed_x - SEED_HUG_WALK      # the pose the pass left
+            self.assertEqual(st.register_new_segments([SEED_HUG]), 1)
+            self.assertEqual(len(st.cap_segs['C1']), seed_n + 1)
+
+            # ON THE BRANCH: the fixture really does reach the phantom -- the
+            # connector is charged at the seed pose over ALL copper, and clear
+            # at the pose the cap is actually in.
+            self.assertEqual(
+                st._seg_shortfalls('C1', cap, cap.x, cap.y, cap.rot), {})
+            self.assertIn(
+                NET_V, st._seg_shortfalls('C1', cap, cap.seed_x, cap.seed_y,
+                                          cap.seed_rot))
+            # ...and scoped to the seed-era copper it is not
+            self.assertEqual(
+                st._seg_shortfalls('C1', cap, cap.seed_x, cap.seed_y,
+                                   cap.seed_rot, upto=seed_n), {})
+
+            tracks = [r for r in st.required_rows({})
+                      if str(r[1]).startswith('track ')]
+            self.assertEqual(tracks, [],
+                             'the disclosure names a track pair that exists '
+                             'on neither the seed board nor the final one')
+    # MUTATION: drop the `upto` slice from _seg_shortfalls; record
+    # _seed_seg_n AFTER the append instead of in __init__; pass no seed_kw to
+    # both() for the track kind.
+
+
 class TestThePruneIsAnchoredOnTheSEEDPose(unittest.TestCase):
     """By the time a connector is registered the caps have already moved, so
     `_prune_segs` is handed `self._cap_geom` -- the SEED-pose geometry -- and
@@ -722,7 +790,7 @@ class TestOneConstructionSiteOnePrunePredicate(unittest.TestCase):
     are REPORTED; never `assertIn` over the whole source (#732 measured a
     393KB failure message from that).
 
-    THE BATTERY, as RUN: 18 mutations, 18 killed, plus two inert probes.
+    THE BATTERY, as RUN: 22 mutations, 22 killed, plus two inert probes.
 
       1  delete the refresh call ............ graze_penalty_RISES + 3 others
       2  call it BEFORE the nudge ........... graze_penalty_RISES + 3 others
@@ -742,10 +810,16 @@ class TestOneConstructionSiteOnePrunePredicate(unittest.TestCase):
       16 drop the distance filter ........... prune_predicate_has_ONE_spelling
       17 make the refresh unconditional ..... RefreshIsSkippedWhenNothingMoved
       18 prune from the MOVED pose .......... PruneIsAnchoredOnTheSEEDPose
+      19 ignore the `upto` seed scope ....... SeedHalfIgnoresPassCreatedCopper
+      20 record `_seed_seg_n` after the append  same
+      21 grade the seed half over ALL copper .. same
+      22 registrar reports the wrong count ... same
 
-    10, 11, 15, 16, 17 and 18 have exactly ONE killer each; the module
-    docstring records that 17 and 18 SURVIVED the first run of this battery and
-    what was added to catch them.
+    TEN of them -- 10, 11, 15, 16, 17, 18 and each of 19-22 -- have exactly
+    ONE killer, which is why those arms exist at all; the
+    module docstring records that 17 and 18 SURVIVED the first run of this
+    battery, and that 19-22 exist because a review found a defect the fix
+    itself introduced.
 
     INERT PROBES, which must change nothing: a trailing comment naming
     `self._seg_floor_by_id[`, and a comment line naming the pricing spelling
