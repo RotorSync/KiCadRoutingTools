@@ -5,9 +5,16 @@ Run this AFTER bga_fanout.py. It nudges decoupling caps near a BGA so their
 pads clear every foreign-net fanout via by `clearance`, and pulls each cap
 pad toward the nearest same-net ball (so a GND/power via dropped there later
 also lands on the cap pad). Caps move as little as possible (90-degree
-rotations allowed) and never overlap each other; a cap that can't clear a
-foreign via grows its displacement budget until it fits or is reported
-unresolved.
+rotations allowed) and never overlap each other; a cap that can't clear
+foreign copper -- a via (#130), a track (#278) or a component pad (#275) --
+grows its displacement budget until it fits or is reported unresolved.
+
+The summary counts both mechanisms from ONE board state, at the end of the
+pass (#746): `resolved R/V initial violations` means "was grazing at the seed
+and is clean now", with `(F freed by via-nudge)` naming the share the #313
+last resort freed by moving a via rather than the cap. A `Re-grazed by this
+pass's own connector copper:` line means the pass fixed those caps and then
+its own reconnect copper broke them again.
 
 Usage:
   python place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]

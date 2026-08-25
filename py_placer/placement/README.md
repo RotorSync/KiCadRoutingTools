@@ -272,6 +272,17 @@ shared via connects ball + cap + plane). Caps move as little as possible
 that can't clear within the (auto-grown) displacement budget is reported
 unresolved for a manual nudge.
 
+The summary line reads `Moved N cap(s); resolved R/V initial violations;
+K unresolved`. Since #746 both counts are graded from the **same** board state,
+at the end of the pass: `resolved` means "was grazing at the seed and is clean
+now" and therefore credits the #313 via-nudge as well as the cap move, with
+`(F freed by via-nudge)` naming that share. `unresolved` means "grazing now",
+which is not a subset of the seed violators — copper the pass itself drew can
+break a cap that started clean, and when it does, a `Re-grazed by this pass's
+own connector copper:` line names those caps. Before #746 `resolved` was
+computed before the nudge and never refreshed, so a cap the nudge freed reached
+neither list and a cap the pass re-grazed reached both.
+
 It reads each via's actual size from the board, so the only setting that
 matters is `--clearance`, which must match the fanout / DRC floor:
 

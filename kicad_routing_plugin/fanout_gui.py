@@ -96,6 +96,49 @@ def _get_net_classes_from_board():
         return {}, ['Default']
 
 
+def cap_optimization_summary(result):
+    """The one-line summary for a repair_fanout_clearance result (#130/#746).
+
+    A module-level function rather than a method body so it can be driven with
+    a plain dict: it needs no board, no dialog and no wx, and before #746 the
+    only way to reach it was a live pcbnew board, so nothing tested it and the
+    wording below went wrong unnoticed.
+
+    Reads every key with `.get` -- the engine's two early returns carry neither
+    'via_moves'/'new_segments' nor 'via_resolved'/'regrazed'.
+
+    #746: `resolved` is graded at the END of the pass, so it spans BOTH
+    mechanisms -- a cap the descent walked clear and a cap only the via-nudge
+    could free. `via_resolved` says which, so this line does too instead of
+    leaving the operator to infer it from the engine's stdout. `regrazed`
+    names the caps the pass itself broke after fixing them; silence is normal.
+    """
+    moved = len(result.get('placements') or [])
+    nudged = len(result.get('via_moves') or [])
+    unresolved = result.get('unresolved') or []
+    via_resolved = result.get('via_resolved') or []
+    regrazed = result.get('regrazed') or []
+    summary = f"Decoupling caps optimized: {moved} moved"
+    if nudged:
+        summary += f"; {nudged} via(s) nudged with reconnect (#313)"
+    if via_resolved:
+        summary += f"; {len(via_resolved)} cap(s) freed by that nudge"
+    if unresolved:
+        # The verdict has ALWAYS been via + track + pad (the engine's
+        # graze_penalty is via #130 + track #278 + pad #275). This line said
+        # "could not clear a foreign via", naming one of the three: wrong
+        # before #736 and more visibly wrong after it, which made the track
+        # channel reachable in this verdict for the first time. Worded to
+        # match the engine's own seed disclosure.
+        summary += (f"; {len(unresolved)} still grazing foreign copper "
+                    f"(via/track/pad) "
+                    f"(manual: {', '.join(sorted(unresolved))})")
+    if regrazed:
+        summary += (f"; {len(regrazed)} re-grazed by this pass's own "
+                    f"connector copper: {', '.join(sorted(regrazed))}")
+    return summary
+
+
 class NetSelectionPanel(wx.Panel):
     """Reusable net selection panel with filtering."""
 
@@ -2060,16 +2103,7 @@ class FanoutTab(wx.Panel):
                 from .gui_utils import refill_all_zones
                 refill_all_zones(board)
 
-            moved = len(result.get('placements', []))
-            nudged = len(via_moves)
-            unresolved = result.get('unresolved', [])
-            summary = f"Decoupling caps optimized: {moved} moved"
-            if nudged:
-                summary += f"; {nudged} via(s) nudged with reconnect (#313)"
-            if unresolved:
-                summary += (f"; {len(unresolved)} could not clear a foreign via "
-                            f"(manual: {', '.join(sorted(unresolved))})")
-            return summary
+            return cap_optimization_summary(result)
         except Exception as e:
             import traceback
             traceback.print_exc()
