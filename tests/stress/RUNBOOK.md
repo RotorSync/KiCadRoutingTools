@@ -366,10 +366,13 @@ harmless.
    later power/GND via shares the via). It reads each via's real size from the
    board, only moves 2-pad caps near a BGA, never overlaps caps, and is a no-op
    when nothing collides. It prints `resolved R/V initial violations; K
-   unresolved`, with `(F freed by via-nudge)` when the #313 last resort had to
-   move a via; `resolved` is graded at the END of the pass and credits both
-   mechanisms (#746). Unresolved caps are still grazing foreign copper (via,
-   track or pad) and need a manual nudge. Feed `<out>` into the next step; verify with
+   unresolved`, with `(F freed by via-nudge)` when the #313 last resort moved
+   a via to free a boxed cap; `resolved` is graded at the END of the pass and
+   credits both mechanisms (#746). Unresolved caps are still grazing foreign
+   copper (via, track or pad) and need a manual nudge; a `Re-grazed by this
+   pass's own connector copper:` line names the ones that were clean before
+   the nudge, i.e. copper this step drew rather than copper the board arrived
+   with. Feed `<out>` into the next step; verify with
    `check_drc.py <out> -c <floor>` (PAD-VIA drops).
 6. Diff pairs: if `--diff-pairs` reports pairs, route them with route_diff.py
    AFTER fanout and BEFORE signal routing (gap from --design-rules; use

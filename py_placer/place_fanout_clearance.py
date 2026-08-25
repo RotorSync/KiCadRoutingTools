@@ -13,8 +13,10 @@ The summary counts both mechanisms from ONE board state, at the end of the
 pass (#746): `resolved R/V initial violations` means "was grazing at the seed
 and is clean now", with `(F freed by via-nudge)` naming the share the #313
 last resort freed by moving a via rather than the cap. A `Re-grazed by this
-pass's own connector copper:` line means the pass fixed those caps and then
-its own reconnect copper broke them again.
+pass's own connector copper:` line means those caps were CLEAN before the
+nudge and are grazing after it -- whether or not the pass had fixed them
+first, since copper this pass draws can also break a cap that arrived clean.
+They are in the unresolved list too; this line names the cause, which is us.
 
 Usage:
   python place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]

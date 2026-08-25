@@ -30,33 +30,58 @@ pre-nudge R with a post-nudge U, and it fails in BOTH directions:
 
 A REAL TRACKED BOARD DEMONSTRATES HALF A, which is what makes this more than a
 synthetic curiosity.  `kicad_files/orangecrab_ext_pll.kicad_pcb` at clearance
-0.1 with the cap fallback off went
+0.1 in the FORCING configuration below -- ALL FOUR knobs, not just the
+fallback: at `via_clear_fallback=False` alone the descent clears all 14 and
+the nudger is never called -- went
 
     before   "Moved 18 cap(s); resolved 1/14 initial violations; 10 unresolved."
     after    "Moved 18 cap(s); resolved 4/14 initial violations
               (3 freed by via-nudge); 10 unresolved."
 
 -- C19, C44 and C45 were freed by the nudge and credited nowhere.  Half B has
-no tracked board (see the window derivation below) and is synthetic here.
+no tracked board -- measured, see below -- and is synthetic here.
 
-THE WINDOW HALF B NEEDS, because it is not obvious and a future reader will
-otherwise assume the rig is arbitrary.  `valid_via_pos` gates a landing against
-every cap rect with NO layer gate, at `vr + via_req`; a connector is charged at
-`hw + pair`.  With `hw <= vr` the connector's charged band is a subset of the
-via's, so no cap can be newly grazed and half B is unreachable.  The window is
-exactly `hw - vr` = (stub width - via size) / 2, independent of the floors,
-which cancel.  Arm B therefore drives a 3.0mm stub into a 0.4mm via (window
-+1.30mm).  It also needs the #738 layer window -- the cap pads are THROUGH-HOLE
-so their copper spans the connector's inner layer while `connector_clear` tests
-only the footprint's own side.  Both conditions are single-variable controls
-here: `TestTheReGrazeIsTheOffLayerWindow` flips the stub to F.Cu and the pass
-declines to draw the connector at all.
+WHY ARM B'S RIG IS SHAPED THE WAY IT IS.  Half B needs the connector to graze
+a cap the relocated via does not, and `valid_via_pos` gates a landing against
+every cap rect with NO layer gate.  The geometry is a capsule against a disc:
+the via is tested as ONE disc of radius `R_v = vr + via_req` at the LANDING
+(`_point_to_rect_dist`), while the connector is charged as a capsule of radius
+`R_c = hw + pair` around the whole path from the old position to the new
+(`_seg_to_rect_dist`).  A point beside the path's INTERIOR is in the capsule
+and in neither endpoint's disc, so the reachable condition is on the nudge
+LENGTH, not on the two radii alone:
+
+    reachable  <=>  R_c >= R_v,  or  L >= 2 * sqrt(R_v^2 - R_c^2)
+
+with `L <= max_shift` (0.6).  A FIRST VERSION OF THIS FILE GOT THAT WRONG: it
+said `hw <= vr` made half B unreachable, which is the answer for one point
+(arm A's 0.8mm via and 0.3mm connector need L >= 0.866 and cannot get it) read
+as a general law.  A review refuted it with a working rig at `hw == vr`, where
+the bound is 0 and any nudge at all suffices.  The floors DO cancel wherever
+they resolve equal, and that half survived the same review: `via_req` spans
+`_all_cu`, which contains the connector's one layer, so `via_req >= pair`
+always.
+
+Arm B sits far inside the reachable region rather than on its boundary --
+`R_c = 1.60` against `R_v = 0.30`, so no length is required at all -- because
+it is a demonstration, not a boundary test.  It also needs #738's layer
+window: the cap pads are THROUGH-HOLE, so their copper spans the connector's
+inner layer while `connector_clear` tests only the footprint's own side.  That
+is the single-variable control
+`test_the_regraze_is_the_off_layer_window_not_a_generic_effect`, which flips
+the stub to F.Cu and watches the pass decline to draw the connector at all.
+
+THAT NO TRACKED BOARD SHOWS HALF B IS MEASURED, NOT DERIVED -- `regrazed` is
+empty on all 88 corpus rows below.  The corrected condition above is wide
+enough that it would be dishonest to claim otherwise.
 
 The corpus is the inertness argument, measured rather than asserted: over the
 22 boards `git ls-files` returns, at clearance 0.25 and 0.10, at the shipped
 defaults AND at the forcing configuration, 88 rows differ in exactly ONE place
--- the orangecrab row above.  At the shipped defaults no tracked board reaches
-the via-nudge at all, so all 44 of those rows are byte-identical.
+-- the orangecrab row above.  At the shipped defaults no tracked board NUDGES
+A VIA (one, rp2350_fpga_eensy_prePlane, does reach the nudger and is refused
+every landing), so all 44 of those rows print an identical summary and
+`regrazed` is empty on all 88.
 
 MUTATION BATTERY, 12 rows against the engine, 12 killed, 0 survivors.  The
 count per row is what makes the `# MUTATION:` notes checkable rather than
@@ -78,13 +103,20 @@ decorative, so it is recorded here:
 Three rows are killed by exactly one arm, and each names why that arm exists
 rather than being redundant with the rest.
 
-TWO OF MY OWN `# MUTATION:` NOTES WERE WRONG and are corrected in place rather
-than quietly deleted, because the shape recurs: both named an arm that CANNOT
-reach the mutation.  `via_resolved = list(resolved)` lives inside the
-`if via_moves:` block, so the sweep-only class -- where that guard is False --
-can never see it; I had written that this class was what caught it.  The
-battery said one arm caught it, and a different one.  A note claiming a gate
-that does not gate is worth less than no note.
+TWO OF MY OWN `# MUTATION:` NOTES WERE WRONG, in two DIFFERENT ways, and are
+corrected in place rather than quietly deleted:
+
+  * one named an arm that CANNOT reach the mutation.  `via_resolved =
+    list(resolved)` lives inside the `if via_moves:` block, so the sweep-only
+    class -- which exists precisely because that guard is False there -- can
+    never execute it.  I had written that this class was what caught it; the
+    battery says one arm does, and a different one.
+  * the other claimed SOLE credit for a mutation ten arms catch.  The
+    partition arm does reach the delta swap and does kill it; it is simply not
+    "silent" anywhere, and the note said it was.
+
+A note claiming a gate that does not gate is worth less than no note, and so
+is one claiming coverage it shares with nine others.
 
 ARM C EXISTS BECAUSE A REVIEW FOUND THE FIRST `regrazed` KEYED ON THE WRONG
 THING.  Spelled `[r for r in swept if r not in resolved]` it can only ever
@@ -122,7 +154,8 @@ if _TESTS not in sys.path:
     sys.path.insert(0, _TESTS)
 
 import run_utils
-from kicad_parser import BoardInfo, Footprint, Zone, parse_kicad_pcb
+from kicad_parser import (BoardInfo, Footprint, Zone, detect_package_type,
+                          parse_kicad_pcb)
 from placement import fanout_clearance as FC
 from placement.fanout_clearance import repair_fanout_clearance
 from synth import make_net, make_pad, make_pcb, make_seg, make_via
@@ -154,7 +187,7 @@ B_STUB_W = 3.0              # hw 1.50 vs vr 0.20 -> a +1.30mm window
 B_STUB_X0 = 4.0
 B_LANDING = (10.230, 12.554)    # MEASURED
 B_C3 = (11.4, 13.9)         # NEVER a seed violator: 1.709mm off the stub
-                            # against its 1.600 keep-out, and 1.109 off the
+                            # against its 1.600 keep-out, and 1.110 off the
                             # connector's far end against the same -- so the
                             # pass breaks a cap that arrived perfectly clean
 B_NEAR = 8.0                # the caps sit further from the BGA than the 1.0
@@ -602,7 +635,7 @@ class TestTheTwoListsAreDisjointAndOrdered(unittest.TestCase):
                     [r for r in order if r in set(res['unresolved'])])
     # MUTATION: `return sorted(res), sorted(unres)` in _grade() -- survives on
     # these rigs (C1 < C2 already) and is killed by the real-board arm, where
-    # st.caps order is R19, C1, C25, C7, ... and sorted() is not.
+    # `unresolved` comes out R19, C1, C25, C7, ... and sorted() does not.
 
     def test_the_two_disclosure_keys_partition_against_the_pre_nudge_credit(self):
         """via_resolved and regrazed are DISJOINT and each is a subset of the
@@ -698,8 +731,12 @@ class TestOnARealTrackedBoard(unittest.TestCase):
     # sit on, which is the failure the window derivation says cannot happen.
 
     def test_the_order_here_is_NOT_sorted(self):
-        """What kills `sorted()` in _grade(): this board's st.caps order puts
-        R19 first, so a sorted list is observably different."""
+        """What kills `sorted()` in _grade(): this board's `unresolved`
+        comes out R19-first, so a sorted list is observably different.  (The
+        head of `st.caps` itself is R17, R13, C22, ... -- also unsorted, but it
+        is the RETURNED list that carries the contract, and `resolved` here
+        happens to be in sorted order, so `unresolved` is the one that
+        discriminates.)"""
         self.assertNotEqual(self.res['unresolved'],
                             sorted(self.res['unresolved']))
         self.assertEqual(self.res['unresolved'][0], 'R19')
@@ -767,20 +804,36 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
                 continue
             if not pcb.vias:
                 continue
-            if not any('BGA' in (f.footprint_name or '').upper()
+            # The ENGINE's own selector, not a name grep. `find_components_by_type`
+            # goes through detect_package_type, which also answers 'BGA' for
+            # LGA / CSP / WLCSP / WLP / CGA and for a geometric ball field with
+            # no keyword at all. Measured: a name grep selects 3 of the 22
+            # tracked boards and the engine's detector selects 4 -- and the
+            # missed one, rp2350_fpga_eensy_prePlane (a WLCSP-49), is exactly
+            # the board that REACHES the nudger at the shipped defaults. A
+            # bound that excludes its own counterexample is not a bound.
+            if not any(detect_package_type(f) == 'BGA'
                        for f in pcb.footprints.values()):
                 continue
             out.append(b)
         return out
 
     def test_no_tracked_board_nudges_a_via_at_the_shipped_defaults(self):
+        """NUDGES, not `reaches`: rp2350_fpga_eensy_prePlane does reach the
+        nudger at clearance 0.25 and is refused every landing it tries, so it
+        moves no via and neither new key can be non-empty. That is a weaker
+        and TRUE statement, and it is the one this arm holds."""
         reaching = self._reaching()
         if reaching is None:
             print('SKIP: git cannot identify the tracked corpus')
             self.skipTest('no git')
-        self.assertGreaterEqual(len(reaching), 3,
+        self.assertGreaterEqual(len(reaching), 4,
                                 'the candidate set collapsed; the filter is '
-                                'wrong and this arm proves nothing')
+                                'wrong and this arm proves nothing. It was 3 '
+                                'while it grepped names, which passed this '
+                                'guard at the boundary while silently '
+                                'dropping the one board that reaches the '
+                                'nudger')
         noisy = []
         for b in reaching:
             for clr in (0.25, 0.10):

@@ -111,7 +111,9 @@ def cap_optimization_summary(result):
     mechanisms -- a cap the descent walked clear and a cap only the via-nudge
     could free. `via_resolved` says which, so this line does too instead of
     leaving the operator to infer it from the engine's stdout. `regrazed`
-    names the caps the pass itself broke after fixing them; silence is normal.
+    names the caps that were clean before the nudge and are grazing after it
+    -- the pass broke them, whether or not it had fixed them first. Silence
+    there is the normal case.
     """
     moved = len(result.get('placements') or [])
     nudged = len(result.get('via_moves') or [])
@@ -127,9 +129,11 @@ def cap_optimization_summary(result):
         # The verdict has ALWAYS been via + track + pad (the engine's
         # graze_penalty is via #130 + track #278 + pad #275). This line said
         # "could not clear a foreign via", naming one of the three: wrong
-        # before #736 and more visibly wrong after it, which made the track
-        # channel reachable in this verdict for the first time. Worded to
-        # match the engine's own seed disclosure.
+        # before #736 and more visibly wrong after it -- not because the
+        # track channel was new (it has been in graze_penalty since the module
+        # landed) but because #736 made the pass's OWN connector tracks
+        # reachable in this verdict for the first time. Worded to match the
+        # engine's own seed disclosure.
         summary += (f"; {len(unresolved)} still grazing foreign copper "
                     f"(via/track/pad) "
                     f"(manual: {', '.join(sorted(unresolved))})")
