@@ -58,7 +58,31 @@ defaults AND at the forcing configuration, 88 rows differ in exactly ONE place
 -- the orangecrab row above.  At the shipped defaults no tracked board reaches
 the via-nudge at all, so all 44 of those rows are byte-identical.
 
-Runtime ~50s warm, in-process apart from one `git ls-files`.
+MUTATION BATTERY, 11 rows against the engine, 11 killed, 0 survivors.  The
+count per row is what makes the `# MUTATION:` notes checkable rather than
+decorative, so it is recorded here:
+
+    resolved-refresh-reverted            10 arms   the defect itself
+    deltas-swapped                       10        via_resolved <-> regrazed
+    deltas-hoisted-out-of-the-guard       7        credit on a run with no nudge
+    swept-bound-after-the-regrade         6        both deltas empty everywhere
+    credit-clause-unconditional           4        "(0 freed by via-nudge)"
+    via_resolved-seeded-with-resolved     4        the descent's credit, restamped
+    registrar-after-the-regrade           3        #736's ordering
+    violators0-gate-dropped               3        "resolved 55/14"
+    grade-returns-sorted                  1        only the real board's order
+    via_resolved-is-all-of-resolved       1        only the real board
+    regrazed-print-deleted                1
+
+TWO OF MY OWN `# MUTATION:` NOTES WERE WRONG and are corrected in place rather
+than quietly deleted, because the shape recurs: both named an arm that CANNOT
+reach the mutation.  `via_resolved = list(resolved)` lives inside the
+`if via_moves:` block, so the sweep-only class -- where that guard is False --
+can never see it; I had written that this class was what caught it.  The
+battery said one arm caught it, and a different one.  A note claiming a gate
+that does not gate is worth less than no note.
+
+Runtime ~30s warm, in-process apart from one `git ls-files`.
 
     python3 tests/test_746_fanout_clearance_resolved_credit.py
 """
@@ -314,8 +338,13 @@ class TestTheNudgeIsCreditedInsteadOfLost(unittest.TestCase):
     def test_the_credit_names_the_nudge_as_the_mechanism(self):
         self.assertEqual(self.res['via_resolved'], ['C1'])
         self.assertEqual(self.res['regrazed'], [])
-    # MUTATION: `via_resolved = list(resolved)` -- passes here (swept is empty)
-    # and FAILS test_the_sweeps_own_credit_is_not_attributed_to_the_nudge.
+    # MUTATION: `via_resolved = list(resolved)`. This arm does NOT kill it --
+    # `swept` is empty on a rig where no cap moves, so the two spellings agree
+    # here. Measured: of the 26 arms in this file exactly ONE goes red, the
+    # real-board one, where the descent's own credit (C67) is in `resolved`
+    # and must not be attributed to the nudge. The first draft of this comment
+    # claimed the sweep-only class caught it; the battery said otherwise, and
+    # that mutation is unreachable from there (it lives inside `if via_moves:`).
 
     def test_a_second_rig_frees_a_cap_the_same_way(self):
         """Arm B's board with SMD pads: a different stub, a different landing,
@@ -414,13 +443,18 @@ class TestTheSweepOnlyRunIsUnchanged(unittest.TestCase):
                          'it is not even called')
         self.assertEqual(self.res['via_moves'], [])
         self.assertEqual(self.res['new_segments'], [])
+    # MUTATION: none -- an on-the-branch guard.
 
     def test_the_sweeps_own_credit_is_not_attributed_to_the_nudge(self):
         self.assertEqual(self.res['resolved'], ['C1'])
         self.assertEqual(self.res['via_resolved'], [])
         self.assertEqual(self.res['regrazed'], [])
-    # MUTATION: `via_resolved = list(resolved)` -> ['C1'], and the summary
-    # credits the via-nudge for a cap the descent walked clear on its own.
+    # MUTATION: seed the declaration -- `via_resolved: List[str] = list(resolved)`
+    # instead of `[]` -- so a cap the DESCENT walked clear is credited to the
+    # nudge on every board that never nudges. Also killed by hoisting the two
+    # delta comprehensions out of the `if via_moves:` guard. Note the mutation
+    # INSIDE that guard (`via_resolved = list(resolved)`) cannot be caught
+    # here: the guard is False on this path, so the block never runs.
 
     def test_both_new_clauses_are_suppressed_so_the_line_is_the_old_line(self):
         self.assertEqual(
@@ -472,9 +506,11 @@ class TestTheTwoListsAreDisjointAndOrdered(unittest.TestCase):
                 self.assertLessEqual(set(res['resolved']), seeds,
                                      'a cap was credited as resolved that was '
                                      'never a violator')
-    # MUTATION: drop the `elif ref in violators0` gate in _grade() -> every
-    # clean cap is credited; arm_b_onlayer reports resolved ['C2'] -> ['C2']
-    # unchanged but arm_a's sweep_only sibling gains the BGA-adjacent caps.
+    # MUTATION: drop the `elif ref in violators0` gate in _grade(), so every
+    # clean cap is credited whether or not it was ever broken. Measured: three
+    # arms go red, this one among them, and the real board's line becomes
+    # "resolved 55/14 initial violations" -- a numerator above its own
+    # denominator, from a pass claiming caps it never touched.
 
     def test_both_lists_follow_st_caps_order(self):
         """test_736:506 asserts `res['unresolved'] == ['C1']` by LIST equality,
@@ -506,8 +542,11 @@ class TestTheTwoListsAreDisjointAndOrdered(unittest.TestCase):
                                      set(res['resolved']))
                 self.assertLessEqual(set(res['regrazed']),
                                      set(res['unresolved']))
-    # MUTATION: swap the two comprehensions' direction -> arm_a's via_resolved
-    # becomes [] and arm_b's regrazed becomes [], both silently.
+    # MUTATION: swap the two comprehensions' direction. Measured: this arm
+    # goes red on three of its five subTests -- but so do nine other arms, so
+    # it is corroboration rather than the only guard. The shape it uniquely
+    # holds is the SUBSET half: a delta key that names a ref outside the list
+    # it is a delta into.
 
 
 class TestTheEarlyReturnsOmitTheNudgeKeys(unittest.TestCase):
@@ -545,6 +584,7 @@ class TestTheEarlyReturnsOmitTheNudgeKeys(unittest.TestCase):
         self.assertEqual(len(res.get('via_moves', [])), 0)
         self.assertEqual(list(res.get('via_resolved') or []), [])
         self.assertEqual(list(res.get('regrazed') or []), [])
+    # MUTATION: none -- a control on the plugin's own spelling.
 
 
 class TestOnARealTrackedBoard(unittest.TestCase):
@@ -579,6 +619,9 @@ class TestOnARealTrackedBoard(unittest.TestCase):
                          'the summary, and re-record the window derivation in '
                          'this file, which says no tracked board can')
         self.assertIsNone(_line(self.out, '  Re-grazed'))
+    # MUTATION: none -- a self-expiring bound. It is also what would catch a
+    # future change that made the nudger draw connectors a real board's caps
+    # sit on, which is the failure the window derivation says cannot happen.
 
     def test_the_order_here_is_NOT_sorted(self):
         """What kills `sorted()` in _grade(): this board's st.caps order puts
