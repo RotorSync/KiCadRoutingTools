@@ -122,7 +122,8 @@ yourself:
 ```python
 generate_segment_sexpr(start, end, width, layer, net_id, net_name=None) -> str
 generate_via_sexpr(x, y, size, drill, layers, net_id,
-                   free=False, net_name=None, tenting_attrs=None) -> str
+                   free=False, net_name=None, tenting_attrs=None,
+                   inherit_when_unspecified=False) -> str
 generate_gr_line_sexpr(start, end, width, layer) -> str      # debug graphics
 generate_gr_text_sexpr(text, x, y, layer, size=0.5, angle=0) -> str
 generate_zone_sexpr(net_id, net_name, layer, polygon_points,
@@ -147,35 +148,52 @@ print(generate_segment_sexpr((100.0, 100.0), (105.0, 100.0),
 `tenting_attrs` is a via's own protection spec -- `Via.tenting_attrs`, the
 `(tenting ...)` / `(covering ...)` / `(plugging ...)` / `(capping ...)` /
 `(filling ...)` family, see `docs/api-kicad-parser.md`. Which value you pass
-says which of **four** different things is true about the via, and they are not
-interchangeable (#489 s8, #741):
+is read together with `inherit_when_unspecified`, and the four combinations
+are not interchangeable (#489 s8, #741):
 
-| Pass | Meaning | Emitted |
+| `tenting_attrs` | `inherit_when_unspecified` | Emitted |
 |---|---|---|
-| a non-empty parsed spec | the board said this about this via | that spec, in canonical token order |
-| `INHERIT_VIA_PROTECTION` | the board said **nothing** about this via, and nothing is the answer | nothing -- the via keeps inheriting the board's `(setup ...)` |
-| `None` (the default) | the caller has no opinion | front+back tenting on KiCad 10 output (`net_name=` given); nothing on KiCad 9 |
-| `{}` | **indistinguishable from `None`** -- see below | same as `None` |
+| a non-empty parsed spec | either | that spec, in canonical token order |
+| `None` or `{}` | `True` | nothing -- the via keeps inheriting the board's `(setup ...)` |
+| `None` or `{}` | `False` (default) | front+back tenting on KiCad 10 output (`net_name=` given) |
+| `None` or `{}` | `False`, numeric net | nothing |
 
 `{}` is the trap, and it is worth stating plainly because it is exactly what
 `Via.tenting_attrs` holds for a via that carries no spec: passing it back
-verbatim reads as "no opinion" and stamps the default. That is why the sentinel
-exists. Re-placing a via is therefore
-`tenting_attrs=(v.tenting_attrs or INHERIT_VIA_PROTECTION)`, never
-`tenting_attrs=v.tenting_attrs` alone.
+verbatim, without the flag, reads as "no opinion" and stamps the default. So
+re-placing a via is `tenting_attrs=v.tenting_attrs,
+inherit_when_unspecified=True`, never `tenting_attrs=v.tenting_attrs` alone.
+
+The decision is a KEYWORD rather than a sentinel VALUE on purpose. A sentinel
+would have to survive being copied, and the copy idiom this repo actually uses
+for a spec is `dict(via.tenting_attrs or {})` -- which turns any dict-shaped
+sentinel straight back into a plain `{}` and silently restores the bug.
+Carrying the decision separately from the value cannot be undone by copying the
+value.
 
 **Pass the spec back for any via that already existed.** A via you re-place
 without it -- rip-up, sub-grid nudge, tap relocation -- is re-stamped with
 front+back tenting, which is wrong for via-in-pad (it needs IPC-4761 Type VII:
 filled + capped + plated).
 
-**Pass `INHERIT_VIA_PROTECTION` when such a via carried no spec of its own**,
-so the re-placement does not *gain* an attribute the board never gave it. This
-is what the GUI side has always done -- `gui_utils.apply_via_protection`
-returns early on an empty spec, because pcbnew's `*_MODE_FROM_BOARD` already
-means inherit. The sentinel is an empty `dict` subclass that compares truthy,
-so a copy or a re-import that breaks its identity still emits nothing rather
-than falling back to the default.
+**Pass `inherit_when_unspecified=True` for any via that already existed**, so
+the re-placement does not *gain* an attribute the board never gave it. This is
+what the GUI side has always done -- `gui_utils.apply_via_protection` returns
+early on an empty spec, because pcbnew's `*_MODE_FROM_BOARD` already means
+inherit.
+
+**And keep the board's net dialect.** `generate_via_sexpr` picks the dialect
+from `net_name` and the protection tokens from `tenting_attrs` independently,
+so a numeric `(net N)` token emitted alongside a spec is a shape
+`kicad_parser.extract_vias` cannot match -- the via vanishes from the model
+rather than merely losing its spec. Note `net_id_to_name` has no key `0` on any
+board, so a no-net via needs `net_name=''` spelled out; see
+`py_placer/placement/writer._net_name`.
+
+Only `py_placer/placement/writer.py` passes the flag today. The other emit
+sites (`output_writer`, `plane_io`, `repair_planes`, `kicad_oracle`) still have
+the residue and are tracked separately -- do not assume a site is correct
+because it passes `tenting_attrs`.
 
 For vias you **add**, `prevailing_via_protection(pcb.vias)` /
 `prevailing_via_protection_in_text(content)` gives the board's own convention,

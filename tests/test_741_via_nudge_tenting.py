@@ -116,8 +116,8 @@ TWO HAZARDS this file must not fall into, both measured:
     the "nothing else changed" arm diffs `_strip_via_blocks(out)` against
     `_strip_via_blocks(inp)` instead.
 
-THE BATTERY: 31 mutations, RUN rather than reasoned about, with the killer
-named beside each arm and the full table at the bottom of this file. 28 killed,
+THE BATTERY: 32 mutations, RUN rather than reasoned about, with the killer
+named beside each arm and the full table at the bottom of this file. 29 killed,
 THREE declared survivors -- recorded, not papered over. Two further survivors
 were found by an adversarial review of this file and a mutation run, and were
 CLOSED by arms added afterwards rather than declared away. Three arms overlap
@@ -159,7 +159,6 @@ import run_utils                                                # noqa: E402
 import kicad_parser as KP                                       # noqa: E402
 from kicad_parser import parse_kicad_pcb                        # noqa: E402
 from kicad_writer import (DEFAULT_VIA_TENTING,                  # noqa: E402
-                          INHERIT_VIA_PROTECTION,
                           VIA_PROTECTION_TOKEN_ORDER,
                           generate_via_sexpr)
 from placement import fanout_clearance as FC                    # noqa: E402
@@ -598,8 +597,8 @@ class TestASpecLessViaEmitsNothingAndInherits(unittest.TestCase):
         self.assertEqual(_prot_tokens(_via_block(self.rig.out_text, 'VF2')), [],
                          'the re-placed via was stamped with a protection '
                          'token the board never gave it')
-    # MUTATION 12: drop `or INHERIT_VIA_PROTECTION` at writer.py's emit.
-    # MUTATION 13: make the sentinel branch fall through to DEFAULT_VIA_TENTING.
+    # MUTATION 12: drop `inherit_when_unspecified=True` at writer.py's emit.
+    # MUTATION 13: make the inherit branch fall through to the default.
 
     def test_the_KiCad10_name_net_survives_so_this_arm_cannot_pass_wrongly(self):
         """`via_protection_sexpr` goes SILENT, not default, when net_name is
@@ -641,22 +640,40 @@ class TestTheHash489DefaultDidNotMove(unittest.TestCase):
                       generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
                                          net_name='GND', tenting_attrs={}))
 
-    def test_a_COPY_of_the_sentinel_still_emits_nothing(self):
-        """Identity is not the only path that must be correct. This is the arm
-        that would have failed when the sentinel was a bare object(): a copy
-        fell into the truthiness branch and then raised in the token loop."""
-        import copy
-        import pickle
-        for made, how in ((copy.copy(INHERIT_VIA_PROTECTION), 'copy'),
-                          (pickle.loads(pickle.dumps(INHERIT_VIA_PROTECTION)),
-                           'pickle')):
-            self.assertIsNot(made, INHERIT_VIA_PROTECTION, how)
+    def test_a_COPIED_spec_still_inherits_which_is_why_this_is_a_KEYWORD(self):
+        """WHY THE DECISION IS A KEYWORD AND NOT A SENTINEL VALUE.
+
+        The first version of this fix used a sentinel object passed as
+        `tenting_attrs`. It survived copy, deepcopy and pickle -- and was
+        destroyed by `dict()`, `.copy()` and `{**s}`, all of which turn a
+        dict-shaped sentinel into a plain `{}` that lands straight back on the
+        front+back default. That matters because `dict(...)` is EXACTLY the
+        idiom this repo uses to carry a spec: fanout_clearance.py's move dict
+        and plane_io.py:783 both spell it that way, and CLAUDE.md sends the
+        next author to those very sites.
+
+        A flag carried beside the value cannot be undone by copying the value.
+        Found by a cold review of this branch."""
+        for make, how in ((lambda d: dict(d), 'dict()'),
+                          (lambda d: d.copy(), '.copy()'),
+                          (lambda d: {**d}, '{**d}'),
+                          (lambda d: d, 'verbatim')):
             self.assertEqual(
                 _prot_tokens(generate_via_sexpr(
                     1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND',
-                    tenting_attrs=made)), [],
-                'a %s of the sentinel no longer inherits: it either raised or '
-                'fell through to the front+back default' % how)
+                    tenting_attrs=make({}),
+                    inherit_when_unspecified=True)), [],
+                'a spec carried through %s stopped inheriting and fell back to '
+                'the front+back default -- the #741 bug, restored by a copy'
+                % how)
+            self.assertEqual(
+                _prot_tokens(generate_via_sexpr(
+                    1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND',
+                    tenting_attrs=make(dict(TYPE_VII)),
+                    inherit_when_unspecified=True)),
+                ['covering', 'plugging', 'capping', 'filling'],
+                'a REAL spec carried through %s was lost' % how)
+    # MUTATION 26: make the flag a sentinel VALUE again -> the dict() arm fires.
 
     def test_a_spec_the_TEXT_parser_never_touched_is_still_collapsed(self):
         """KILLS the whitespace-collapse survivor. `via_protection_sexpr._one`
@@ -703,15 +720,22 @@ class TestTheHash489DefaultDidNotMove(unittest.TestCase):
                          'order, with the unknown one appended after')
     # MUTATION B: delete the `parts += [...]` unrecognised-token line.
 
-    def test_the_sentinel_emits_nothing_and_a_real_spec_still_wins(self):
+    def test_the_flag_emits_nothing_and_a_real_spec_still_wins(self):
         self.assertEqual(
             _prot_tokens(generate_via_sexpr(
                 1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND',
-                tenting_attrs=INHERIT_VIA_PROTECTION)), [])
+                inherit_when_unspecified=True)), [])
         self.assertEqual(
             _prot_tokens(generate_via_sexpr(
                 1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND',
                 tenting_attrs=dict(TYPE_VII))),
+            ['covering', 'plugging', 'capping', 'filling'])
+        # ...and the flag never OVERRIDES a real spec
+        self.assertEqual(
+            _prot_tokens(generate_via_sexpr(
+                1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND',
+                tenting_attrs=dict(TYPE_VII),
+                inherit_when_unspecified=True)),
             ['covering', 'plugging', 'capping', 'filling'])
 
     def test_the_numeric_net_dialect_is_still_silent_either_way(self):
@@ -723,23 +747,19 @@ class TestTheHash489DefaultDidNotMove(unittest.TestCase):
         self.assertEqual(
             _prot_tokens(generate_via_sexpr(
                 1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
-                tenting_attrs=INHERIT_VIA_PROTECTION)), [])
+                inherit_when_unspecified=True)), [])
 
-    def test_the_sentinel_is_compared_by_identity_not_truthiness(self):
-        """The sentinel is TRUTHY, which is what makes it safe rather than
-        what makes it dangerous. `via_protection_sexpr` matches it by identity
-        first -- but identity is fragile (a copy, a pickle, a second import of
-        kicad_writer under a different sys.path root), so the FALLBACK path
-        must be right too. Being an EMPTY dict, it survives the truthiness
-        branch and the token loop and emits nothing: the same answer. A falsy
-        sentinel would instead reach the front+back default, which is the
-        defect. Pin every property that argument rests on."""
-        self.assertTrue(INHERIT_VIA_PROTECTION,
-                        'the sentinel went FALSY: it now falls through to the '
-                        'front+back default, which is the bug')
-        self.assertIsNot(INHERIT_VIA_PROTECTION, {})
-        self.assertIsInstance(INHERIT_VIA_PROTECTION, dict)
-        self.assertEqual(len(INHERIT_VIA_PROTECTION), 0)
+    def test_a_real_spec_always_wins_over_the_flag(self):
+        """Branch ORDER: the spec is tested first, so a caller that sets the
+        flag defensively on every re-placement -- which is what CLAUDE.md now
+        tells them to do -- never loses a real spec by doing so."""
+        for flag in (True, False):
+            self.assertEqual(
+                _prot_tokens(generate_via_sexpr(
+                    1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND',
+                    tenting_attrs={'capping': 'yes'},
+                    inherit_when_unspecified=flag)), ['capping'])
+    # MUTATION 27: test inherit_when_unspecified BEFORE the spec.
 
     def test_the_imported_default_is_still_what_489_documented(self):
         """ANTI-ROT: the arms above follow the symbol, so they would keep
@@ -1083,22 +1103,20 @@ class TestOneEmitSiteOneSpecArgument(unittest.TestCase):
             'tenting_attrs= argument, so via_protection_sexpr falls through to '
             'DEFAULT_VIA_TENTING and every nudged via ships tented (#489 s8, '
             '#741).' % bad)
-        # The sentinel is resolved a few lines ABOVE the call now (the net-0
-        # guard needs it before the emit), so look for it in the enclosing
-        # function rather than in the call's argument text -- and require BOTH
-        # uses: the `or` that answers the spec-less case, and the belt that
-        # refuses to pair a numeric net with a spec.
-        uses = [i + 1 for i, l in enumerate(self.writer)
-                if 'INHERIT_VIA_PROTECTION' in l and 'import' not in l]
-        self.assertGreaterEqual(
-            len(uses), 2,
-            'placement/writer.py references INHERIT_VIA_PROTECTION on %d code '
-            'line(s) (%s); expected at least two -- the `or` that answers the '
-            'spec-less case (the second half of #741) and the belt that will '
-            'not pair a numeric net token with a protection spec (the via-loss '
-            'regression that fix introduced).' % (len(uses), uses))
-        nospec = [ln for ln, args in calls if 'tenting_attrs=' not in args]
-        self.assertEqual(nospec, [], nospec)
+        noflag = [ln for ln, args in calls
+                  if 'inherit_when_unspecified' not in args]
+        self.assertEqual(
+            noflag, [],
+            'the emit at line(s) %s passes a spec but not '
+            'inherit_when_unspecified, so a via that carried NO spec is '
+            'stamped with front+back tenting it never had -- the second half '
+            'of #741.' % noflag)
+        # and the net-0 / numeric-dialect guard, which is what stops the same
+        # call turning a via into copper the parser cannot see.
+        self.assertEqual(
+            len([1 for l in self.writer if 'def _net_name(' in l]), 1,
+            'placement/writer.py no longer resolves the net name through one '
+            'helper; the emit and the REMOVAL can now disagree about net 0')
     # MUTATIONS 2, 12, 16.
 
     def test_no_OTHER_file_under_py_placer_emits_a_via(self):
@@ -1154,7 +1172,8 @@ class TestOneEmitSiteOneSpecArgument(unittest.TestCase):
         for token, lines, floor in (
                 ('generate_via_sexpr', self.writer, 2),
                 ('tenting_attrs', self.writer, 1),
-                ('INHERIT_VIA_PROTECTION', self.writer, 2),
+                ('inherit_when_unspecified', self.writer, 1),
+                ('_net_name', self.writer, 3),
                 ('_remove_vias_at_positions', self.writer, 2),
                 ('via_moves', self.nudger, 3),
                 ('tenting_attrs', self.nudger, 1)):
@@ -1180,29 +1199,17 @@ class TestOneEmitSiteOneSpecArgument(unittest.TestCase):
         self.assertEqual(_calls(stripped, 'generate_via_sexpr'), [])
         self.assertEqual([l for l in stripped if "'tenting_attrs'" in l], [])
 
-    def test_the_sentinel_branch_is_tested_before_the_truthiness_branch(self):
-        """A SOURCE guard, and the reason is the opposite of the obvious one.
-        Reordering the two branches does not raise and does not mis-emit: the
-        sentinel is an empty DICT, so it survives the truthiness branch and the
-        token loop and produces the identical file. MEASURED -- with the
-        branches swapped, this arm is the ONLY thing in the suite that fails.
-
-        That is precisely why it exists. The ordering is load-bearing for the
-        NEXT person, who may make the sentinel something that is not a dict;
-        no fixture can see it today."""
+    def test_no_sentinel_VALUE_came_back(self):
+        """The decision must stay a keyword. A sentinel passed as
+        `tenting_attrs` is destroyed by `dict()`, which is the repo's own idiom
+        for carrying a spec -- see the dict()/copy()/{**} arm above."""
         import kicad_writer as KW
-        src = _code(KW.via_protection_sexpr)
-        ident = [i for i, l in enumerate(src)
-                 if 'is INHERIT_VIA_PROTECTION' in l]
-        truthy = [i for i, l in enumerate(src)
-                  if re.search(r'elif\s+tenting_attrs\s*:', l)]
-        self.assertEqual(len(ident), 1, src)
-        self.assertEqual(len(truthy), 1, src)
-        self.assertLess(ident[0], truthy[0],
-                        'the identity test must come FIRST: the sentinel is '
-                        'truthy, so a truthiness branch above it would swallow '
-                        'it and then index it like a dict')
-    # MUTATION 13: reorder the branches.
+        src = '\n'.join(_code(KW))
+        self.assertNotIn('INHERIT_VIA_PROTECTION', src,
+                         'a sentinel VALUE is back in kicad_writer; it cannot '
+                         'survive dict(), which is how this repo copies a spec')
+        self.assertIn('inherit_when_unspecified', src)
+    # MUTATION 26: reintroduce the sentinel.
 
 
 class TestInertOnTheTrackedCorpus(unittest.TestCase):
@@ -1354,7 +1361,7 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
 
 
 # THE BATTERY, as RUN -- every row below was applied to the tree and the file
-# re-run, not reasoned about. 31 mutations, 28 killed, 3 survivors, 0 BROKEN
+# re-run, not reasoned about. 32 mutations, 29 killed, 3 survivors, 0 BROKEN
 # (no mutation made this file die before it checked anything). The killer per
 # row is also named in the trailing `# MUTATION n:` comment beside the arm.
 #
@@ -1376,14 +1383,16 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
 #   10  skip _remove_vias_at_positions . the uuid/count arm, the whole-file diff,
 #                                         and five more
 #   11  drop net_name=nm ............... the (net "VF2") arm + 5
-#   12  drop `or INHERIT_VIA_PROTECTION` spec-less, source, anti-rot, CLI
+#   12  drop inherit_when_unspecified=True  spec-less, source, anti-rot, CLI
 #  12b  pass the sentinel UNCONDITIONALLY  headline, collapse, CLI
-#  13a  truthiness branch above identity  the branch-order SOURCE arm, ALONE --
-#                                         behaviourally inert, which is the
-#                                         point of that arm
-#  13b  sentinel falls through to default  spec-less, both sentinel arms, CLI
-#  13c  make the sentinel FALSY ........ the identity/truthiness arm + the
-#                                         copy/pickle arm
+#  13b  inherit branch -> the default ... spec-less arm, both flag arms, CLI
+#   26  make the decision a sentinel VALUE  the dict()/copy()/{**} arm and the
+#                                         no-sentinel source arm. This is the
+#                                         design the first draft shipped; a
+#                                         cold review measured that dict() --
+#                                         the repo's OWN idiom for copying a
+#                                         spec -- destroys it
+#   27  test the flag BEFORE the spec ... the real-spec-wins arm
 #   14  reorder VIA_PROTECTION_TOKEN_ORDER  the canonical-order arm + 2
 #   15  drop the whitespace collapse ... the ragged-spec arm (ADDED after a
 #                                         mutation run showed this file AND

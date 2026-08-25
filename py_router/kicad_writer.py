@@ -282,58 +282,11 @@ DEFAULT_VIA_TENTING = {'tenting': '(front yes) (back yes)'}
 VIA_PROTECTION_TOKEN_ORDER = ('tenting', 'covering', 'plugging', 'capping', 'filling')
 
 
-class _InheritViaProtection(dict):
-    """See INHERIT_VIA_PROTECTION.
-
-    An EMPTY dict subclass that is deliberately TRUTHY, which is what makes the
-    sentinel fail SAFE rather than fail loudly. `via_protection_sexpr` matches
-    it by identity, so normally the type never matters -- but identity is a
-    fragile thing to rest a fab attribute on: a `copy.copy`, a pickle round
-    trip, or a second import of this module under a different `sys.path` root
-    (this repo imports `kicad_writer` by bare name from py_router, py_placer
-    and py_tools) all produce an object that is `==` but not `is`.
-
-    So the fallback path must also be right. Being a dict, it survives the
-    truthiness branch and the token loop; being EMPTY, that loop emits nothing
-    -- exactly what the identity branch would have done. A plain `object()`
-    would raise there instead, and a FALSY sentinel would be worse still: it
-    would fall through to the front+back default, which is the bug (#741).
-    """
-    __slots__ = ()
-
-    def __bool__(self):
-        return True
-
-    __nonzero__ = __bool__       # py2-style spelling, harmless and explicit
-
-    def __repr__(self):
-        return 'INHERIT_VIA_PROTECTION'
-
-
-# Pass this as `tenting_attrs` for a via that came OFF the board and is going
-# back on carrying NO spec of its own. It is NOT the same as None: None means
-# "the caller did not say", which keeps the #489 front+back default; this means
-# "the board said nothing about this via, and nothing is the answer". KiCad
-# reads a via with no protection tokens as inheriting the board's
-# `(setup (tenting ...))` -- which is exactly what such a via had before it was
-# lifted, so re-stamping it with front+back tenting changes a fab attribute
-# that nobody asked to change.
-#
-# The GUI half has always behaved this way: gui_utils.apply_via_protection
-# returns early on an empty spec, because pcbnew's *_MODE_FROM_BOARD already
-# means inherit. This is the text writer's half of that (#741).
-#
-# Deliberately OPT-IN. Every existing caller keeps passing what it passes, and
-# tests/test_489_via_tenting.py's pin on the spec-less default -- which calls
-# generate_via_sexpr with no `tenting_attrs` at all -- resolves to None and is
-# untouched. Other re-placement sites (plane_io.restore_failed_reroute_nets is
-# the closest sibling) have the same residue and should adopt this, but each
-# needs its own measurement; #741 scopes it to the placement via-nudge.
-INHERIT_VIA_PROTECTION = _InheritViaProtection()
 
 
 def via_protection_sexpr(tenting_attrs: dict = None,
-                         net_name: str = None) -> str:
+                         net_name: str = None,
+                         inherit_when_unspecified: bool = False) -> str:
     """The `(tenting ...)` / `(covering ...)` / ... fragment to emit for a via.
 
     `tenting_attrs` is a Via's parsed spec ({token: raw inner text}); passing it
@@ -341,24 +294,35 @@ def via_protection_sexpr(tenting_attrs: dict = None,
     stands -- front+back tenting on KiCad 10 output -- since there is no
     board-level policy to consult here (#489 §8).
 
-    THREE states, not two, because `None` and `{}` used to mean the same thing
-    here and they are not the same fact (#741):
+    `inherit_when_unspecified` is what an EXISTING via needs, and it exists
+    because `None` and `{}` cannot answer the question on their own (#741):
 
-      a real spec              -> emit it
-      INHERIT_VIA_PROTECTION   -> emit NOTHING; the board said nothing about
-                                  this via and the via keeps inheriting
-                                  `(setup (tenting ...))`. For a via that came
-                                  OFF the board -- see that constant.
-      None / {} (KiCad 10)     -> the #489 default, front+back tenting
-      None / {} (numeric net)  -> nothing, as before
+      a real spec, either way            -> emit it
+      empty + inherit_when_unspecified   -> emit NOTHING. The board said
+                                            nothing about this via, so the via
+                                            keeps inheriting
+                                            `(setup (tenting ...))` -- which is
+                                            what it had before it was lifted.
+      empty, KiCad 10 (net_name given)   -> the #489 default, front+back
+      empty, numeric net                 -> nothing, as before
 
-    Order matters: the sentinel is tested FIRST and by identity, so a caller
-    that has a real spec always wins, and no truthiness test can reach it.
+    Pass `inherit_when_unspecified=True` whenever you are RE-PLACING a via --
+    rip-up, sub-grid nudge, tap relocation. `{}` is exactly what
+    `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
+    verbatim without this flag re-stamps the via with front+back tenting it
+    never had.
+
+    A KEYWORD rather than a sentinel value, deliberately. A sentinel object has
+    to survive being copied, and the copy idiom this repo actually uses for a
+    spec is `dict(via.tenting_attrs or {})` (fanout_clearance.py, plane_io.py)
+    -- which turns any dict-shaped sentinel back into a plain `{}` and silently
+    restores the bug. Carrying the DECISION separately from the VALUE cannot be
+    undone by copying the value.
     """
-    if tenting_attrs is INHERIT_VIA_PROTECTION:
-        spec = {}
-    elif tenting_attrs:
+    if tenting_attrs:
         spec = tenting_attrs
+    elif inherit_when_unspecified:
+        spec = {}
     elif net_name is not None:
         spec = DEFAULT_VIA_TENTING
     else:
@@ -426,7 +390,8 @@ def prevailing_via_protection_in_text(content: str) -> Optional[dict]:
 
 def generate_via_sexpr(x: float, y: float, size: float, drill: float,
                        layers: List[str], net_id: int, free: bool = False,
-                       net_name: str = None, tenting_attrs: dict = None) -> str:
+                       net_name: str = None, tenting_attrs: dict = None,
+                       inherit_when_unspecified: bool = False) -> str:
     """Generate KiCad S-expression for a via.
 
     Args:
@@ -436,12 +401,18 @@ def generate_via_sexpr(x: float, y: float, size: float, drill: float,
             (Via.tenting_attrs). Pass it for any via that already existed so a
             ripped-and-re-placed via keeps its real tenting/plugging/filling
             instead of being re-stamped with front+back tenting (#489 §8).
+        inherit_when_unspecified: Pass True alongside it for a RE-PLACED via.
+            An empty spec then emits nothing, so a via that was inheriting the
+            board's `(setup (tenting ...))` keeps inheriting it rather than
+            gaining an explicit token it never had (#741). See
+            via_protection_sexpr.
     """
     layers_str = '" "'.join(layers)
     free_str = "\n\t\t(free yes)" if free else ""
     net_str = f'(net "{_escape_net_name(net_name)}")' if net_name is not None else f'(net {net_id})'
     # KiCad 10 adds structured tenting/covering/plugging fields after layers
-    tenting_str = via_protection_sexpr(tenting_attrs, net_name)
+    tenting_str = via_protection_sexpr(tenting_attrs, net_name,
+                                      inherit_when_unspecified)
     return f'''	(via
 		(at {x:.6f} {y:.6f})
 		(size {size})

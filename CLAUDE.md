@@ -614,15 +614,22 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   loses its spec and is re-stamped with front+back tenting, which is wrong for
   via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
   default to `kicad_writer.prevailing_via_protection(pcb.vias)` — the board's own
-  convention — instead of a hardcoded policy. When a re-placed via carried **no**
-  spec of its own, pass `kicad_writer.INHERIT_VIA_PROTECTION` rather than nothing
-  (#741). `None` **and `{}`** both mean "the caller has no opinion", which on
-  KiCad 10 output stamps front+back tenting (on a numeric-net board they emit
-  nothing) — and `{}` is exactly what `Via.tenting_attrs` holds for such a via,
-  so passing it back verbatim is the bug. The sentinel emits nothing, so the
-  via keeps inheriting the board's `(setup ...)` — what it had, and what the GUI
+  convention — instead of a hardcoded policy. When RE-PLACING a via, also pass
+  `inherit_when_unspecified=True` (#741). `None` **and `{}`** otherwise both mean
+  "the caller has no opinion", which on KiCad 10 output stamps front+back
+  tenting (on a numeric-net board they emit nothing) — and `{}` is exactly what
+  `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
+  verbatim is the bug. With the flag an empty spec emits nothing, so the via
+  keeps inheriting the board's `(setup ...)` — what it had, and what the GUI
   side (`gui_utils.apply_via_protection`, early-return on an empty spec) has
-  always done. Spell it
-  `tenting_attrs=(v.tenting_attrs or INHERIT_VIA_PROTECTION)`. GUI side:
+  always done. Spell it `tenting_attrs=v.tenting_attrs,
+  inherit_when_unspecified=True` — a keyword rather than a sentinel VALUE,
+  because the repo's own idiom for carrying a spec is `dict(...)`, which would
+  turn any dict-shaped sentinel back into a plain `{}` and silently restore the
+  bug. **A re-placed via must also keep the board's net DIALECT**: emitting a
+  numeric `(net N)` token alongside a protection spec produces a via
+  `extract_vias` cannot read back at all, so the barrel vanishes from the model
+  (see `placement/writer._net_name`, and note `net_id_to_name` has no key 0 on
+  any board). GUI side:
   `gui_utils.apply_via_protection(pcb_via, attrs)`. `fab_notes.print_via_in_pad_note`
   emits the IPC-4761 note from the shared engines when a run puts vias in pads.
