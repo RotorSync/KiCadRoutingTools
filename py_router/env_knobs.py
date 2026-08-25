@@ -238,6 +238,13 @@ def refresh() -> None:
     # shortcut may inflict are the plane finalize / kicad-oracle recheck's
     # job, which runs after cleanup on both fronts.
     g['SMOOTH_ROUTE'] = _s('KICAD_SMOOTH_ROUTE', '')
+    # Beautification pass 1 (cleanup_pipeline pass 9c): professional
+    # hand-routing look -- PASS A trims genuinely-dangling copper back to the
+    # last real junction, PASS B re-bends acute/odd-angle pad entries to enter
+    # near-perpendicular. Both are conservative (connectivity-preserving,
+    # exact-clearance-gated) and default-ON. Tri-state like KICAD_SMOOTH_ROUTE:
+    # '' = follow the front default (ON), '1' forces on, '0' forces off.
+    g['BEAUTIFY'] = _s('KICAD_BEAUTIFY', '')
     # #600 improvement gate: refuse to ship a board this run made WORSE (more
     # previously-connected nets broken than newly connected). '0' disables --
     # for A/B, and for the rare case where an operator genuinely wants the

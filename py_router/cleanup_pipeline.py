@@ -454,6 +454,71 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"{_sm_nets} net(s), -{_sm_stats.get('saved_mm', 0.0):.2f} mm "
                   f"of copper (#536)")
 
+    # Beautification pass 1 (9c): professional hand-routing look. PASS A trims
+    # genuinely-dangling copper back to the last real junction; PASS B re-bends
+    # acute/odd-angle pad entries to enter near-perpendicular to the pad edge.
+    # Both are conservative -- connectivity-preserving (PASS A gated per-net on
+    # check_net_connectivity, PASS B preserves endpoints by construction) and
+    # exact-clearance-gated -- so they never add DRC violations or break a net.
+    # They run AFTER smoothing (so they see the final copper shape) but BEFORE
+    # close_soft_joints (PASS A removes copper; close must stay the last copper
+    # step per #319 ordering). Default-ON; KICAD_BEAUTIFY=0 disables for A/B.
+    _beautify_env = (env_knobs.BEAUTIFY or '').strip().lower()
+    _beautify_on = _beautify_env in ('', '1', 'true', 'on')
+    if _beautify_on:
+        _prog("beautify")
+        from beautify import beautify_stub_cleanup, beautify_pad_entry
+        # PASS A (stub trim) skips protected / impedance nets -- removing
+        # copper from a matched pair or impedance leg could break its length
+        # matching / coupling, exactly like smoothing. PASS B (pad-entry
+        # re-bend) does NOT skip them: it only re-angles the final approach
+        # at a pad (endpoint-preserving, exact-clearance-gated), which is a
+        # safe cosmetic change even on a pair leg.
+        _skip = _smooth_skip_net_ids(pcb_data)
+        _b_removed, _ = beautify_stub_cleanup(
+            pcb_data, scope_net_ids=_sub_scope, skip_net_ids=_skip)
+        _b2a, _b2b = beautify_pad_entry(
+            pcb_data, config=config, scope_net_ids=_sub_scope)
+        _b_removed = list(_b_removed) + list(_b2a)
+        _b_added = list(_b2b)
+        if keep_input_copper:
+            # Input-file copper is read-only (chained flows whose earlier
+            # stages author escape stubs must still see them verbatim): PASS A
+            # may only trim THIS-RUN copper. Keep input segments as anchors.
+            _routed_ids = {id(s) for r in results for s in (r.get('new_segments') or [])}
+            _b_removed = [s for s in _b_removed if id(s) in _routed_ids]
+        if _b_removed or _b_added:
+            # Removed copper must be dropped from BOTH pcb_data and the
+            # write-list. After smoothing, pcb_data.segments and a results
+            # entry can hold DIFFERENT Segment object instances for the same
+            # copper, so match by geometry+net signature, not by object id.
+            def _sig(s):
+                a = (round(min(s.start_x, s.end_x), 3), round(min(s.start_y, s.end_y), 3))
+                b = (round(max(s.start_x, s.end_x), 3), round(max(s.start_y, s.end_y), 3))
+                return (a, b, s.layer, round(s.width, 3), s.net_id)
+            rem_sigs = {_sig(s) for s in _b_removed}
+            routed_sigs = {_sig(s) for r in results for s in (r.get('new_segments') or [])}
+            for r in results:
+                segs = r.get('new_segments')
+                if segs is not None:
+                    r['new_segments'] = [s for s in segs if _sig(s) not in rem_sigs]
+            for s in _b_removed:
+                if _sig(s) not in routed_sigs:
+                    strip.append(s)
+            rem_ids = {id(s) for s in _b_removed}
+            pcb_data.segments = [s for s in pcb_data.segments if id(s) not in rem_ids]
+            pcb_data.segments.extend(_b_added)
+            # Add the re-bent copper to ONE results entry (there may be several
+            # after smoothing); adding to every entry would double-emit it.
+            _target = next((r for r in results if r.get('new_segments') is not None), None)
+            if _target is not None:
+                _target.setdefault('new_segments', []).extend(_b_added)
+            counts['beautify_removed'] = len(_b_removed)
+            counts['beautify_added'] = len(_b_added)
+            _trace('beautify')
+            print(f"{label}Beautify: trimmed {len(_b_removed)} dangling "
+                  f"segment(s), re-bent {len(_b_added)//2} pad entry/ies")
+
     # FINAL copper step (#319 ordering): nothing below may remove copper.
     # KICAD_NO_SOFT_JOINT_BRIDGE=1 is an A/B ablation knob (like
     # PRUNE_CONN_VERIFY / KICAD_BOARD_LEDGER): it isolates close's contribution
