@@ -128,6 +128,10 @@ FLAG_PARAMS = {
     # string); both controls are already in reset_params_to_defaults.
     '--fab-tier': 'fab_tier',
     '--fab-overrides': 'fab_overrides_path',
+    # Incremental routing: the previous routed output path (a string value).
+    # The GUI control is a file-path field named incremental_from; the plan
+    # executor applies it as the batch_route input override.
+    '--incremental-from': 'incremental_from',
 }
 LIST_FLAGS = {
     '--layers': 'layers',
