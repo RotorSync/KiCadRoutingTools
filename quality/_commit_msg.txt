@@ -1,0 +1,57 @@
+SI Phase 1: net noise classifier + coupling metric (v1.4)
+
+Signal-integrity awareness, Phase 1 (classify + measure) for KiCadRoutingTools.
+The router must eventually KNOW that sensitive lines (serial data, analog
+sense, radio) must not run alongside noisy lines (switching power, clocks,
+motor drive). This phase builds the net classifier and the coupling METRIC so
+violations become measurable before any routing enforcement exists.
+
+TASK 1 -- net noise classifier (py_router/si_classes.py)
+  Classifies every net into AGGRESSOR / VICTIM / NEUTRAL (SHIELD for ground
+  planes). Heuristics in priority order: per-board override file
+  (<board>.si.json, always wins) > connected-component switch-node hints
+  (net touching an inductor pad AND a diode/FET pad on a regulator footprint)
+  > netclass names > pad pinfunction/pintype metadata > net-name patterns >
+  NEUTRAL. Pattern tables documented inline.
+  Classification precision on hand-labeled routed nets of
+  kicad_files/routed_output.kicad_pcb: 24/24 = 1.000 (name + metadata
+  heuristics). d1's routed nets (USB3 super-speed SSTX/SSRX pairs -> VICTIM,
+  VBUS -> AGGRESSOR) all classified correctly. Name heuristics miss nets that
+  carry no name signal -- the override file is the escape hatch.
+
+TASK 2 -- coupling metric in the quality scorer (quality/score.py)
+  metric_si_coupling (weight 10): for every VICTIM segment, accumulate
+  parallel-exposure to AGGRESSOR copper on the SAME layer within a coupling
+  window max(3x trace width, 1.0 mm) weighted by 1/separation, PLUS broadside
+  overlap on ADJACENT copper layers with no GND plane between (separation =
+  dielectric thickness from the stackup). Normalised per victim-net mm.
+  Same-interface (same-bus) pairs are excluded -- DDR data beside its own
+  strobe is intentional; serial data beside switching power is not.
+  Verified discrimination on synthetic cases: a serial line hugging a switch
+  node for 40 mm at 0.4 mm scores 2.5 exposure/mm; crossing once scores 0;
+  40 mm at 5 mm away scores 0; a GND plane between layers shields to 0.
+
+TASK 3 -- baseline + corpus rescored (v1.4)
+  6 baseline boards + 13-board corpus rescored, quality/out/ overwritten.
+  Sanity: d1 vias still 3.6667; jog_chains (0.988621) and layer_direction
+  (0.5158) unchanged from v1.3.
+  Worst offender pairs (actual nets):
+    rp2350_fpga_eensy_prePlane: /RP2354A/FPGA.MOSI runs 9.5mm at 0.56mm from
+      +1V1 (switching rail) on In1.Cu -- the single worst in the corpus
+    orangecrab_ext_pll: IO_MOSI/IO_MISO run ~1.3mm at 0.20mm from EXT_PLL+/
+      EXT_PLL- on In1.Cu (broadside, no ground plane between)
+    orangecrab_ext_pll: IO_SDA runs 0.8mm at 0.20mm from REF_CLK on F.Cu
+    rp2350_fpga_eensy_prePlane: /RP2354A/RP.UART0_TX/RX run ~0.5mm at 0.10mm
+      from +1V1 on In1.Cu
+
+GATES: classifier unit tests pass (tests/test_si_classes.py); full suite
+untouched-but-run-once: --fast gives 276 pass / 4 known env failures
+(test_connection_width_grading, test_exact_clusters, test_plane_score,
+test_run8_locked_contact) / 110 skipped -- identical to the pre-change
+baseline; test_si_classes.py passes in-suite. Self-containment: score.py
+imports cleanly without py_router on the path (si_classes imported lazily;
+metric degrades gracefully if unavailable).
+
+Phase 2 (routing enforcement: aggressor-proximity costs for victim nets in
+the cost maps, planner corridor noise classes) is explicitly OUT of scope this
+session -- noted here as the follow-up.
