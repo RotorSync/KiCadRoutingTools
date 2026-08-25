@@ -479,8 +479,20 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             pcb_data, scope_net_ids=_sub_scope, skip_net_ids=_skip)
         _b2a, _b2b = beautify_pad_entry(
             pcb_data, config=config, scope_net_ids=_sub_scope)
-        _b_removed = list(_b_removed) + list(_b2a)
-        _b_added = list(_b2b)
+        # Pass 2b sub-passes 1 + 3: jog consolidation then pad-entry redo.
+        # Both are conservative (exact-clearance-gated incl keepout/edge,
+        # same-net-overlap-guarded, per-net connectivity-gated) and skip
+        # protected/impedance nets like stub cleanup.
+        from beautify_jog import (beautify_jog_consolidation,
+                                  beautify_pad_entry_redo)
+        _b3a, _b3b = beautify_jog_consolidation(
+            pcb_data, config=config, scope_net_ids=_sub_scope,
+            skip_net_ids=_skip)
+        _b4a, _b4b = beautify_pad_entry_redo(
+            pcb_data, config=config, scope_net_ids=_sub_scope,
+            skip_net_ids=_skip)
+        _b_removed = list(_b_removed) + list(_b2a) + list(_b3a) + list(_b4a)
+        _b_added = list(_b2b) + list(_b3b) + list(_b4b)
         if keep_input_copper:
             # Input-file copper is read-only (chained flows whose earlier
             # stages author escape stubs must still see them verbatim): PASS A
