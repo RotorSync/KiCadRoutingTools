@@ -312,6 +312,23 @@ src/
 ## Version History
 
 
+### 0.22.0 (2026-08-25)
+
+- Parallel routing core v2: PathFinder-style NEGOTIATED CONGESTION.
+  route_negotiated(requests, shared_map) routes N unresolved nets in
+  PARALLEL (rayon) against ONE frozen shared cost map inside a single FFI
+  call (no GIL). The shared map carries base obstacles plus present-congestion
+  and history costs injected into layer_proximity_costs between iterations;
+  costs are FROZEN during an iteration, so each request result is a pure
+  function of (request + frozen map) and rayon scheduling cannot change the
+  output (determinism unit tests: 1 thread vs N threads byte-identical).
+  Per-net endpoint overrides (source/target cells, allowed cells, endpoint
+  exemptions, free vias) and per-net committed-copper removal are applied to a
+  per-worker clone of the shared map, so the shared map stays immutable during
+  an iteration. Thread cap min(12, cores-2). New NegotiatedRequest pyclass
+  and route_negotiated pyfunction; GridObstacleMap gains Rust-only
+  remove_blocked_cells_plain / remove_blocked_vias_plain helpers.
+
 ### 0.21.1 (2026-08-16)
 
 - PoseRouter (diff pairs): `layer_direction_preferences` +

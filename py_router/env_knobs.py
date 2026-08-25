@@ -74,6 +74,11 @@ def refresh() -> None:
     # this phase -- the env knob is how the A/B harness toggles the engine
     # kwarg without a flag.
     g['PLANNER_ORDERING'] = _s('KICAD_PLANNER_ORDERING', '0') == '1'
+    # Parallel routing core v2: PathFinder-style negotiated-congestion pre-pass
+    # over multipoint Phase-3 tap edges. Default OFF pending the A/B verdict;
+    # KICAD_NEGOTIATED_CONGESTION=1 turns it on. No CLI flag this phase -- the
+    # env knob is how the A/B harness toggles the engine kwarg without a flag.
+    g['NEGOTIATED_CONGESTION'] = _s('KICAD_NEGOTIATED_CONGESTION', '0') == '1'
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     # #648 oracle source union: kicad-cli DRC gates the demand set, the
