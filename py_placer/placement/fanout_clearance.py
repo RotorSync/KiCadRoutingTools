@@ -2468,7 +2468,8 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     same-net copper terminating there (plus the pad's copper layer for a
     via-in-pad). mm-exact validation throughout. Returns
     (via_moves, new_segments) for the writer:
-      via_moves    = [(old_x, old_y, via_dict_at_new_pos)]
+      via_moves    = [(old_x, old_y, via dict {'x','y','size',
+                       'drill','layers','net_id','tenting_attrs'})]
       new_segments = [segment dicts {'start','end','width','layer','net_id'}]
     """
     H2H_VIA = 0.2    # JLC via-hole to via-hole floor
@@ -2951,7 +2952,31 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             st.vias = _rebuilt
             via_moves.append((old[0], old[1],
                               {'x': nx, 'y': ny, 'size': v.size, 'drill': v.drill,
-                               'layers': v.layers, 'net_id': v.net_id}))
+                               'layers': v.layers, 'net_id': v.net_id,
+                               # This via came OFF the board and goes back on:
+                               # the writer DELETES it at `old` and re-emits it
+                               # here, and the plugin's pcbnew twin does the
+                               # same. Carry its tenting/plugging spec across or
+                               # the nudge silently re-tents it (#489 s8) -- a
+                               # via-in-pad needing IPC-4761 Type VII ships
+                               # tented from a pass whose job is clearance.
+                               # Same reason and same spelling as the rip-up
+                               # restore dict, plane_io.py:777-783.
+                               # `dict(...)` copies the SPEC specifically: it is
+                               # the one value here a consumer could mutate back
+                               # into the parser Via this pass still holds live.
+                               # `layers` above is shared by reference and always
+                               # has been -- a pre-existing shape, not a claim
+                               # this line makes.
+                               # `getattr` is belt-and-braces only. Every harness
+                               # that drives this function builds a REAL Via, and
+                               # Via.tenting_attrs has a default_factory, so the
+                               # default is unreachable today. It is spelled this
+                               # way because the function is public and takes
+                               # whatever pcb_data.vias holds, which is the same
+                               # reason _via_radius reads its fields defensively.
+                               'tenting_attrs': dict(
+                                   getattr(v, 'tenting_attrs', {}) or {})}))
             nm = pcb_data.nets[v.net_id].name if v.net_id in pcb_data.nets else v.net_id
             print(f"  via-nudge: moved {nm} via ({old[0]:.3f},{old[1]:.3f}) -> "
                   f"({nx:.3f},{ny:.3f}) to free {ref}; {len(conn_layers)} "

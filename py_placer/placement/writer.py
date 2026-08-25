@@ -252,7 +252,9 @@ def write_placed_output(input_file: str, output_file: str,
     # the fanout stub start. Attached segments are untouched by design.
     if via_moves or new_segments:
         from plane_io import _remove_vias_at_positions
-        from kicad_writer import generate_via_sexpr, generate_segment_sexpr
+        from kicad_writer import (generate_via_sexpr,
+                                  generate_segment_sexpr,
+                                  INHERIT_VIA_PROTECTION)
         n2n = getattr(pcb_data, 'net_id_to_name', None) if pcb_data is not None else None
         elements = []
         if via_moves:
@@ -264,9 +266,42 @@ def write_placed_output(input_file: str, output_file: str,
             for m in via_moves:
                 v = m[2]
                 nm = n2n.get(v['net_id']) if n2n else None
-                elements.append(generate_via_sexpr(v['x'], v['y'], v['size'],
-                                                   v['drill'], v['layers'],
-                                                   v['net_id'], net_name=nm))
+                # Every via in via_moves came OFF this board a few lines up,
+                # so its OWN spec is the whole answer. That much is
+                # plane_io.py:862-866's form -- the rip-up restore, which is
+                # structurally the same act -- and deliberately NOT
+                # plane_io.py:557-563's `or
+                # prevailing_via_protection_in_text(...)`, the right default
+                # for vias this tool ADDS but a THIRD answer for one that
+                # already existed: it would stamp the majority spec of OTHER
+                # vias onto this one.
+                #
+                # `or INHERIT_VIA_PROTECTION` is where this call goes BEYOND
+                # plane_io's form, and it is the second half of #741. An absent
+                # or empty spec is not silence from the CALLER, it is the board
+                # saying nothing about this via -- so emit nothing and let it
+                # keep inheriting `(setup (tenting ...))`. Without it, None/{}
+                # reaches kicad_writer's front+back default and the via GAINS a
+                # fab attribute it never had. The GUI twin has never done that:
+                # gui_utils.apply_via_protection returns early on an empty
+                # spec, because pcbnew's *_MODE_FROM_BOARD already means
+                # inherit. plane_io's restore still carries this residue; filed
+                # separately rather than changed from here.
+                #
+                # Stating the rule HERE rather than relying on the engine key
+                # means the two halves of #741 fail independently: a move dict
+                # that lost the key inherits rather than re-tents.
+                #
+                # `.get` for this one key, and the asymmetry with the
+                # hard-indexed geometry below is deliberate rather than sloppy:
+                # a dict with no 'x'/'net_id' is not a via and SHOULD raise,
+                # while a dict with no spec is a via nobody recorded one for --
+                # a meaning this line has an answer for.
+                elements.append(generate_via_sexpr(
+                    v['x'], v['y'], v['size'], v['drill'], v['layers'],
+                    v['net_id'], net_name=nm,
+                    tenting_attrs=(v.get('tenting_attrs')
+                                   or INHERIT_VIA_PROTECTION)))
         for nsd in (new_segments or []):
             nm = n2n.get(nsd['net_id']) if n2n else None
             elements.append(generate_segment_sexpr(

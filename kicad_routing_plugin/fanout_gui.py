@@ -1970,7 +1970,7 @@ class FanoutTab(wx.Panel):
             # segment(s) back to the stub start. The CLI applies these via
             # write_placed_output; on the live board we must mirror it (else the
             # via stays put and the graze the summary claims to have fixed
-            # persists). GUI parity for placement/writer.py:119-141.
+            # persists). GUI parity for placement/writer.py:250-302.
             name_to_id, _ = _build_layer_mappings()
 
             def _layer_id(layer_name):
@@ -1985,6 +1985,21 @@ class FanoutTab(wx.Panel):
                 # This is the via NUDGE: the old via is deleted and an identical
                 # one re-added a fraction of a mm away. Carry its protection spec
                 # across or the nudge silently re-tents it (#489 §8).
+                #
+                # #741: the ENGINE now populates this key, so on this path it
+                # is always present -- and legitimately {} for a via that
+                # inherits the board's `(setup (tenting ...))`, which
+                # apply_via_protection correctly leaves alone.
+                #
+                # Note the guard below is `if not moved_attrs`: TRUTHINESS, not
+                # presence, so it fires for that inheriting via too. Harmless --
+                # _pcbnew_via_protection_attrs returns {} for a track at
+                # *_MODE_FROM_BOARD, so the re-read agrees -- but it does mean
+                # this fallback is NOT the regression detector for either half
+                # of #741. It re-derives its answer from the same track via the
+                # same call that built pcb_data, so it would MASK an engine
+                # revert. tests/test_741_via_nudge_tenting.py asserts on the
+                # engine dict for exactly that reason.
                 moved_attrs = vd.get('tenting_attrs')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
