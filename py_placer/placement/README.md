@@ -926,9 +926,20 @@ re-seating 85/92 while leaving its zone targets unmoved):
 - **`legality.PartPads` / `LegalityContext` / `grade_pad_legality`** — the
   pad+drill layer. Gate currency: rotation-inflated AABB pad rects (the
   `_Cap.pad_rects` pattern; conservative — can falsely reject, never falsely
-  accept), NPTH drills inflated per hole to `max(NPTH_TO_TRACK_CLEARANCE,
-  the hole pad's own local_clearance)` (#730; `copper_holes=False` opts a
-  SILK caller out, since that override is a copper rule), per-PAIR
+  accept), NPTH drills held off foreign copper at a STANDOFF FROM THE HOLE
+  WALL of `max(--clearance, NPTH_TO_TRACK_CLEARANCE, the board's declared
+  min_hole_clearance, the hole pad's own local_clearance)` — `check_drc`'s own
+  requirement (#730, #761). Resolved in ONE place, `PartPads.hole_keepouts`:
+  the stored `holes_local` radius is the growth ABOVE `--clearance` and the
+  consumer adds the clearance back, exactly as `fanout_clearance`'s cap gate
+  and `labels.py`'s silk test each do — before #761 legality added nothing, so
+  its modelled standoff collapsed to zero at and above the requirement.
+  `copper_holes=False` opts a SILK caller out of both copper terms (the pad
+  override and the board floor); the board floor arrives as a resolved FLOAT
+  (`resolve_npth_floor`), never a board pointer, and only at the two of six
+  `build_part_pads` call sites that read hole keep-outs. `holes_extent`
+  carries the same holes WITHOUT either copper term, so an author's keep-clear
+  can never push a part off the outline. Per-PAIR
   baselines from SEED poses ("never worse than the board you were handed"; a
   NEW different-net pad intersection is never admitted). Exact `check_drc`
   geometry runs once per CLI for reports, so summaries carry no AABB phantoms.
@@ -969,8 +980,10 @@ re-seating 85/92 while leaving its zone targets unmoved):
   individual mis-move smuggled inside a hugely-improving set (run 3's J7:
   31.6 mm from home, worse than its 15.8 mm input).
 - **`render_placement --legality`** (default ON) draws the defects the caption
-  used to only count: conflict rings/links, NPTH keepout circles, dashed-red
-  off-board pad extents; caption gains `pad-conflicts` / `hole-conflict`.
+  used to only count: conflict rings/links, NPTH keepout circles (the real
+  keep-out since #761 — it drew the bare drill at `--clearance >= 0.20`,
+  agreeing with the model's own blind spot), dashed-red off-board pad
+  extents; caption gains `pad-conflicts` / `hole-conflict`.
 
 Design lineage (see the session literature survey): Abacus/minimum-
 perturbation legalization (Spindler 2008; Brenner 2012; Kahng-Markov-Reda
