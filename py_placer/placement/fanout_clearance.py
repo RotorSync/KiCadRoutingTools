@@ -200,10 +200,14 @@ def _via_radius(via, default_size=_UNREADABLE_VIA_SIZE) -> float:
 def _via_drill_radius(via, default_drill=_UNREADABLE_VIA_DRILL) -> float:
     """The DRILL radius of a via, in mm -- the ONE implementation of the rule.
 
-    #750: this was spelled `(v.drill or 0.3) / 2.0` at three sites inside
-    valid_via_pos, while the copper radius on the SAME two lines already went
-    through _via_radius. Same shape as that function, deliberately, including
-    the two things that are easy to read as accidents:
+    #750: this was spelled `(x.drill or 0.3) / 2.0` at three sites inside
+    valid_via_pos -- twice on `v` and once on `ov` -- while the copper radius
+    in those same two gate BLOCKS already went through _via_radius. (Not on
+    the same LINES: neither drill line carried a copper term. The sharper
+    statement is that of the two radii summed at the capsule gate, `prad` is
+    measured from the board and this one was invented.) Same shape as
+    _via_radius, deliberately, including the two things that read as
+    accidents:
 
     `getattr`, because the nudger is public and its harnesses pass duck-typed
     via-likes. This DOES widen what the pass tolerates -- the old expression
@@ -216,9 +220,17 @@ def _via_drill_radius(via, default_drill=_UNREADABLE_VIA_DRILL) -> float:
     value, so the drill term goes NEGATIVE and weakens the gate it is summed
     into. With both drills negative the whole hole-to-hole threshold turns
     negative and the gate can never fire at all -- measured, the pass then
-    parks two 0.5mm barrels 0.05mm apart. Both parse paths admit it: the via
-    regex drill class carries a `-` and the float() that follows checks no
-    sign.
+    parks two 0.5mm barrels 0.05mm apart. BOTH parse paths admit a negative,
+    and for two different reasons worth stating separately: the text parser's
+    via-regex drill class carries a `-` and the `float()` after it checks no
+    sign, while build_pcb_data_from_board's `to_mm(track.GetDrill())` applies
+    no sign check either (verified on KiCad 10.0.0, which returns -0.3mm for
+    such a via rather than rejecting it).
+
+    NaN is the one remaining hole, and it is NOT closed here because it is
+    not this guard's question: both spellings propagate it, every `<`
+    against it is False, and the gate silently stops firing. Same before,
+    same after, and the same in _via_radius.
     """
     d = getattr(via, 'drill', None)
     if not d or d <= 0:
@@ -2793,10 +2805,26 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     # #750: every OTHER via's drill radius, resolved ONCE, for the same reason
     # the pads above are flattened here -- the hole-to-hole gate below runs
-    # inside the 16-angle x 12-radius sweep, so resolving per candidate would
-    # cost one call per via per CANDIDATE (383 of them on routed_output).
-    # Safe to hoist: the sweep does not mutate pcb_data.vias. The nudger
-    # rebuilds st.vias when it commits a move, which is a different list.
+    # inside the candidate sweep (16 angles x up to 12 radii), so resolving
+    # there costs one call per via per candidate. Measured on
+    # orangecrab_ext_pll (136 vias, the one tracked board that actually nudges
+    # one): 6336 valid_via_pos calls, so this replaces ~862k resolutions
+    # with 136.
+    #
+    # WHAT MAKES THE HOIST SAFE is narrower than "nothing mutates
+    # pcb_data.vias", and the wider claim is the one that invites the bug:
+    # the nudger relocates vias IN PLACE (`v.x, v.y = nx, ny` below) and
+    # processes caps one after another, so a via's COORDINATES do change
+    # between iterations. This tuple caches only the DRILL RADIUS, which no
+    # path writes, and the gate still reads `ov.x`/`ov.y` live. Folding the
+    # coordinates in here -- the obvious tidy-up, since they are right there
+    # -- is a real defect: measured on a two-cap rig, the second via lands at
+    # (5.1061, 6.1061) instead of (5.0500, 6.0000).
+    #
+    # `via_rad(ov)` on the copper line below is deliberately NOT hoisted with
+    # it: that resolver takes the operator's --default-via-size through `st`,
+    # so caching it here would put a second copy of a knob-dependent answer
+    # beside the one _Repair already owns -- the shape #732 removed.
     board_via_drills = [(ov, _via_drill_radius(ov)) for ov in pcb_data.vias]
 
     def valid_via_pos(v, nx, ny):
