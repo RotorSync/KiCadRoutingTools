@@ -173,10 +173,10 @@ ROWS = [
      '            return PairShortfall(max(0.0, reach - g), g < 0.0,',
      (T761,), 'KILLED'),
     ('resolve-npth-floor-ignores-pcb_file', 'leg',
-     '        return max(floor,
-                   float(resolve_hole_clearance(pcb_data, None, pcb_file)))',
-     '        return max(floor,
-                   float(resolve_hole_clearance(pcb_data, None, None)))',
+     """        return max(floor,
+                   float(resolve_hole_clearance(pcb_data, None, pcb_file)))""",
+     """        return max(floor,
+                   float(resolve_hole_clearance(pcb_data, None, None)))""",
      (T761,), 'KILLED'),
     ('failed-floor-resolution-is-silent', 'leg',
      """        if notes is not None:
@@ -186,7 +186,7 @@ ROWS = [
      '        pass',
      (T761,), 'KILLED'),
     ('quench-passes-no-board-floor', 'quench',
-&
+     '                npth_floor=legality.resolve_npth_floor(pcb_data, pcb_file))',
      '                npth_floor=None)',
      (T761,), 'KILLED'),
 
