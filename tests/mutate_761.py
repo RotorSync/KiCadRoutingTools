@@ -109,8 +109,8 @@ ROWS = [
 
     # ---- the broad phase -----------------------------------------------
     ('reach-drops-hole_reach', 'leg',
-     '        reach = max(reach, pa.hole_reach, pb.hole_reach)',
-     '        reach = max(reach, 0.0)',
+     '        reach = max(pad_reach, pa.hole_reach, pb.hole_reach)',
+     '        reach = max(pad_reach, 0.0)',
      (T761,), 'KILLED'),
     ('census-reach-drops-hole_reach', 'leg',
      '    census_reach = max(clearance, board_max_floor, board_max_hole,',
@@ -121,11 +121,11 @@ ROWS = [
      '            over = _kr - _er',
      (T761,), 'KILLED'),
     ('pair-cap-goes-back-to-a-hardcoded-zero', 'leg',
-     """            return PairShortfall(max(0.0, reach - g), g < 0.0,
+     """            return PairShortfall(max(0.0, pad_reach - g), g < 0.0,
                                  _hole_shortfall(pa, xa, ya, ra, rects_b,
                                                  pb, xb, yb, rb, rects_a),
                                  g < 0.0)""",
-     """            return PairShortfall(max(0.0, reach - g), g < 0.0, 0.0,
+     """            return PairShortfall(max(0.0, pad_reach - g), g < 0.0, 0.0,
                                  g < 0.0)""",
      (T761,), 'KILLED'),
 
@@ -158,8 +158,9 @@ ROWS = [
      '                    ext_grow = max(0.0, _npth_floor - clearance)',
      (T761,), 'KILLED'),
     ('the-census-passes-no-board-floor', 'leg',
-     """    parts = build_part_pads(fps, clearance, model,
-                            npth_floor=resolve_npth_floor(pcb_data))""",
+     """    parts = build_part_pads(
+        fps, clearance, model,
+        npth_floor=resolve_npth_floor(pcb_data, pcb_file, clearance_notes))""",
      '    parts = build_part_pads(fps, clearance, model)',
      (T761, T730), 'KILLED'),
     ('partpads-reads-the-board', 'leg',

@@ -317,6 +317,18 @@ class TestTheBoardFloorReachesTheKeepOut(unittest.TestCase):
             self.assertEqual(len(hits), want,
                              '%s passes npth_floor at %d site(s), expected '
                              '%d (%s)' % (rel, len(hits), want, who))
+            # ...and passes the RESOLVER, not just the keyword. A site
+            # spelling `npth_floor=None` satisfies a keyword count while
+            # supplying nothing -- which is exactly what the battery row
+            # `quench-passes-no-board-floor` does, and it SURVIVED until this
+            # clause existed.
+            resolved = [i + 1 for i, l in enumerate(src.splitlines())
+                        if 'resolve_npth_floor(' in l.split('#')[0]
+                        and not l.lstrip().startswith('def ')]
+            self.assertGreaterEqual(
+                len(resolved), want,
+                '%s names npth_floor but never calls resolve_npth_floor '
+                '(%s)' % (rel, who))
         for rel in ('py_placer/placement/labels.py',
                     'py_placer/placement/routability.py',
                     'py_placer/placement/seeder.py'):
