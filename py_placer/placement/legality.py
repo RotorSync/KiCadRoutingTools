@@ -1609,7 +1609,8 @@ class PartPads:
 
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
                  'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
-                 '_hole_cache', '_ext_cache', 'pad_floors', 'max_floor')
+                 '_hole_cache', '_keepout_cache', '_ext_cache', 'pad_floors',
+                 'max_floor', 'clearance')
 
     def __init__(self, fp, clearance: float, model=None,
                  copper_holes: bool = True):
@@ -1623,6 +1624,12 @@ class PartPads:
         self.side = footprint_side(fp)
         self.has_tht = footprint_has_through_pads(fp)
         self.seed_rot = (fp.rotation or 0.0) % 360
+        # The flat clearance this part was built at. Stored (#761) because the
+        # NPTH keep-out radius is only complete WITH it -- see hole_keepouts --
+        # and a consumer that had to supply it separately is a consumer that
+        # can forget to, which is exactly how the keep-out came to be graded
+        # without one.
+        self.clearance = float(clearance)
         self.pads_local = []    # (off_x, off_y, half_x, half_y, net_id, pside)
         self.holes_local = []   # (off_x, off_y, radius) -- NPTH keepouts, inflated
         self.holes_extent = []  # ...the same holes at their EXTENT radius (#730)
@@ -1631,10 +1638,25 @@ class PartPads:
         for p in fp.pads:
             if not _pad_carries_copper(p):
                 # Copper-less drilled pad (NPTH mounting hole): the DRILL still
-                # removes copper closer than the NPTH-to-track floor. Inflation
-                # matches fanout_clearance's foreign-pad keepouts. A
+                # removes copper closer than the NPTH-to-track floor. A
                 # paste/mask-only aperture has neither copper nor a hole and
                 # simply drops out.
+                #
+                # The inflation matches fanout_clearance's foreign-pad
+                # keepouts -- and the inflation is only HALF of the rule
+                # (#761). What is stored here is the growth ABOVE `clearance`;
+                # the requirement is that radius PLUS `clearance`, which each
+                # sibling adds at its own gap test: fanout_clearance through
+                # `_pair_or_flat` (an NPTH tuple files floor `None`, so it
+                # hands back the flat scalar, fanout_clearance.py:894/1306),
+                # and labels.py by comparing against `silk_pad_clearance`
+                # (labels.py:391). legality compared this circle against RAW
+                # pad rects and added nothing, so its modelled standoff was
+                # `max(0, requirement - clearance)` -- which collapses to ZERO
+                # once `clearance` reaches the requirement, at 0.20 for a plain
+                # hole and 0.40 for ulx3s's AUDIO1. The inflation matched; the
+                # COMPARISON did not, and only the inflation was ever checked.
+                # `hole_keepouts()` is now the one place that composes both.
                 #
                 # #730: ...or closer than the pad's OWN `(clearance ...)`
                 # override, when that is larger. That is what KiCad enforces
@@ -1715,6 +1737,7 @@ class PartPads:
         self.n_pads = len(self.pads_local)
         self._pad_cache: Dict[float, list] = {}
         self._hole_cache: Dict[float, list] = {}
+        self._keepout_cache: Dict[float, list] = {}
         self._ext_cache: Dict[float, Tuple[float, float, float, float]] = {}
 
     def _delta_key(self, rot: float) -> float:
@@ -1745,7 +1768,13 @@ class PartPads:
         return out
 
     def hole_circles(self, x: float, y: float, rot: float):
-        """[(cx, cy, radius)] NPTH keepout circles at the given pose."""
+        """[(cx, cy, radius)] NPTH hole circles at the given pose, at the
+        INFLATION radius -- the growth above `clearance`, not the requirement.
+
+        A copper consumer wants `hole_keepouts` instead. This accessor exists
+        for the caller that adds its own term at its own gap test: labels.py
+        (silk, `< config.silk_pad_clearance`, labels.py:391).
+        """
         key = self._delta_key(rot)
         cache = self._hole_cache.get(key)
         if cache is None:
@@ -1754,6 +1783,33 @@ class PartPads:
             cache = [(ox * c - oy * s, ox * s + oy * c, r)
                      for ox, oy, r in self.holes_local]
             self._hole_cache[key] = cache
+        return [(x + ox, y + oy, r) for ox, oy, r in cache]
+
+    def hole_keepouts(self, x: float, y: float, rot: float):
+        """[(cx, cy, radius)] NPTH COPPER keep-out circles at the given pose.
+
+        The one resolver for "how close may foreign copper come to this hole"
+        (#761). It is `hole_circles`' radius PLUS the flat clearance, because
+        the stored growth is `max(0, requirement - clearance)`; adding the
+        clearance back composes, per hole, to
+
+            hd/2 + max(clearance, NPTH floor, the hole pad's local_clearance)
+
+        -- a MAX rather than a sum, since the growth is already floored at 0.
+        That is `check_drc`'s own requirement (`max(npth_clr, lc)`,
+        check_drc.py:2733) and what fanout_clearance's cap gate charges.
+
+        Tested against RAW pad rects, so the whole requirement lives in this
+        radius: `_circle_rect_penetration` stays a pure geometric predicate
+        with no clearance parameter to forget.
+        """
+        key = self._delta_key(rot)
+        cache = self._keepout_cache.get(key)
+        if cache is None:
+            clr = self.clearance
+            cache = [(ox, oy, r + clr)
+                     for ox, oy, r in self.hole_circles(0.0, 0.0, rot)]
+            self._keepout_cache[key] = cache
         return [(x + ox, y + oy, r) for ox, oy, r in cache]
 
     def extent_local(self, rot: float):
@@ -1928,11 +1984,13 @@ class LegalityContext:
                     pad_short += eff - g
                     if g < 0.0:
                         overlap = True
+        # #761: keep-outs, not inflations -- the requirement is the stored
+        # growth PLUS the flat clearance, and the rects below are raw.
         hole = 0.0
-        for cx, cy, r in pb.hole_circles(xb, yb, rb):
+        for cx, cy, r in pb.hole_keepouts(xb, yb, rb):
             for a0, a1, a2, a3, _na, _sa in rects_a:
                 hole += _circle_rect_penetration(cx, cy, r, (a0, a1, a2, a3))
-        for cx, cy, r in pa.hole_circles(xa, ya, ra):
+        for cx, cy, r in pa.hole_keepouts(xa, ya, ra):
             for b0, b1, b2, b3, _nb, _sb in rects_b:
                 hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
         return PairShortfall(pad_short, overlap, hole, stack)
@@ -2096,7 +2154,7 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     for ref, pp in parts.items():
         fp = fps[ref]
         rects = pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)
-        holes = pp.hole_circles(fp.x, fp.y, fp.rotation or 0.0)
+        holes = pp.hole_keepouts(fp.x, fp.y, fp.rotation or 0.0)  # #761
         entries[ref] = (rects, holes)
         ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
         if ext is None:

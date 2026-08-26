@@ -310,6 +310,11 @@ def beautify_labels(pcb_data, pcb_file: Optional[str],
                                                           fp.rotation):
             for s in (('F', 'B') if pside is None else (pside,)):
                 pad_rects[s].append((x0, y0, x1, y1))
+        # `hole_circles`, deliberately, NOT `hole_keepouts` (#761): silk adds
+        # its own term below (`< config.silk_pad_clearance`), so this consumer
+        # was already complete -- and the keep-out accessor carries a COPPER
+        # requirement, which is the same reason build_part_pads above asks for
+        # copper_holes=False.
         hole_circles.extend(pp.hole_circles(fp.x, fp.y, fp.rotation))
 
     gate = BoardOutlineGate(pcb_data.board_info, edge_margin)
