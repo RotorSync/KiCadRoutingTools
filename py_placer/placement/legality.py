@@ -1645,7 +1645,7 @@ class PartPads:
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
                  'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
                  '_hole_cache', '_keepout_cache', '_ext_cache', 'pad_floors',
-                 'max_floor', 'clearance', 'hole_reach')
+                 'max_floor', 'clearance', 'hole_reach', 'holes_req')
 
     def __init__(self, fp, clearance: float, model=None,
                  copper_holes: bool = True, npth_floor: float = None):
@@ -1668,6 +1668,7 @@ class PartPads:
         self.pads_local = []    # (off_x, off_y, half_x, half_y, net_id, pside)
         self.holes_local = []   # (off_x, off_y, radius) -- NPTH keepouts, inflated
         self.holes_extent = []  # ...the same holes at their EXTENT radius (#730)
+        self.holes_req = []     # ...and the REQUIREMENT each one resolved to (#761)
         self.pad_floors = []    # PadFloor per copper pad, index-aligned (#697)
         self.max_floor = 0.0    # upper bound on this part's pad requirements
         _npth_floor = (defaults.NPTH_TO_TRACK_CLEARANCE if npth_floor is None
@@ -1755,11 +1756,18 @@ class PartPads:
                     # stops a declaration from pushing a part off the outline.
                     ext_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE
                                    - clearance)
+                    # The resolved requirement itself, for DISCLOSURE
+                    # (#761). Derivable from the radius only with `hd/2` in
+                    # hand, which no consumer has -- and a census that counts
+                    # a conflict without naming what it required is the same
+                    # shape of silence #697 fixed for the pad channel.
+                    npth_req = max(clearance, _npth_floor, _lc)
                     for hx, hy, hd in pad_drill_circles(p):
                         self.holes_local.append(
                             (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))
                         self.holes_extent.append(
                             (hx - fp.x, hy - fp.y, hd / 2.0 + ext_grow))
+                        self.holes_req.append(npth_req)
                 continue
             copper = [l for l in p.layers if str(l).endswith('.Cu')]
             through = (p.drill or 0) > 0
@@ -2328,17 +2336,36 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                 if pair_source:
                     required.append([key[0], key[1],
                                      round(pair_required, 4), pair_source])
+            # #761: the hole channel discloses its requirement too. It used
+            # to report a bare `hole_conflicts` count with the mm thrown away,
+            # so a user saw that a mounting hole was too close to something
+            # without ever being told how close it was allowed to be -- and
+            # that number is not the board-wide clearance whenever the hole
+            # pad declares an override or the board declares a floor.
             hole_pen = 0.0
-            for cx, cy, r in holes_b:
+            hole_req = 0.0
+            for (cx, cy, r), req in zip(holes_b, parts[other].holes_req):
                 for a0, a1, a2, a3, _na, _sa in rects_a:
-                    hole_pen += _circle_rect_penetration(cx, cy, r,
-                                                         (a0, a1, a2, a3))
-            for cx, cy, r in holes_a:
+                    pen = _circle_rect_penetration(cx, cy, r,
+                                                   (a0, a1, a2, a3))
+                    hole_pen += pen
+                    if pen > EPS and req > hole_req:
+                        hole_req = req
+            for (cx, cy, r), req in zip(holes_a, parts[ref].holes_req):
                 for b0, b1, b2, b3, _nb, _sb in rects_b:
-                    hole_pen += _circle_rect_penetration(cx, cy, r,
-                                                         (b0, b1, b2, b3))
+                    pen = _circle_rect_penetration(cx, cy, r,
+                                                   (b0, b1, b2, b3))
+                    hole_pen += pen
+                    if pen > EPS and req > hole_req:
+                        hole_req = req
             if hole_pen > EPS:
                 hole_conflicts += 1
+                # Above the board-wide clearance only -- the same bar the pad
+                # channel applies before it files a row, so a plain hole at the
+                # flat scalar stays quiet.
+                if hole_req > clearance + 1e-9:
+                    required.append([key[0], key[1], round(hole_req, 4),
+                                     'NPTH hole'])
 
     oob_count = 0
     oob_amount = 0.0
