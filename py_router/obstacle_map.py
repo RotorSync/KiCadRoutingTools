@@ -1575,6 +1575,28 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
       defect they exist to fix (measured: a -0.1 mm net-to-net overlap left in
       place; a #130 pad-via graze left unrelocated) rather than routing around
       the hole.
+
+      **Scoped by #756, and the scope is the whole argument.** This bullet is
+      about THE COPPER-TO-HOLE FLOOR -- this helper's own value, keyed on
+      ``min_hole_clearance`` -- and it still holds for it: both of that
+      function's copper-to-hole gates stay flat. It is NOT a rule about every
+      floor in that function, and reading it as one is how it was nearly cited
+      against a fix it does not cover. #756 raised the via-DRILL-to-via-DRILL
+      floor there from a hardcoded 0.20 to the board's own ``min_hole_to_hole``
+      (a different key, ``list_nets._FLOOR_SOURCES``' ``hole_to_hole``),
+      because ``check_drc`` ``_pin_up``s exactly that value and both of its
+      drill arms add it -- so the gate was the one floor in that function
+      sitting strictly BELOW what the grader charges, and the copper it
+      declined to refuse was copper the grader then flagged.
+
+      The distinguishing test is not "does refusing abandon a repair" -- it
+      does, sometimes, either way -- but **does the grader raise this floor
+      too**. Where it does not, a raise invents a refusal nobody else charges;
+      where it does, the refusal is the pass declining to emit copper that
+      would come back flagged. Measured for #756 on a purpose-built rig: at the
+      shipped 0.6 mm budget the raise cost ZERO repairs (the landing moved
+      instead), and squeezed to 0.15 mm the single repair it did cost was the
+      one whose flat landing ``check_drc`` flags.
     * ``placement/legality.PartPads`` builds its NPTH keep-out radii from a bare
       ``fp``/``clearance`` pair with no board pointer in hand. **#761 threaded
       the parameter rather than the board**: ``legality.resolve_npth_floor``
