@@ -979,9 +979,16 @@ class TestTheBgaSibling(_TmpCase):
                              'rules')
         finally:
             os.chdir(cwd)
+        # ...and a call with NO routes announces nothing. On a
+        # DECLARING board: an undeclared one takes the 'fixed default'
+        # branch and would pass with the `routes` guard removed, which
+        # is how the first draft of this arm let that mutation survive.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            manage_vias([], make_pcb(board_info=_bi(), source_path=''),
+            manage_vias([], make_pcb(board_info=_bi(),
+                                     source_path=self.board(
+                                         'bga_noroutes',
+                                         min_hole_to_hole=0.30)),
                         'F.Cu', 0.45, 0.2, 0.1)
         self.assertEqual(buf.getvalue().strip(), '',
                          'a call with no routes still announces a floor')
