@@ -312,6 +312,24 @@ src/
 ## Version History
 
 
+### 0.23.0 (2026-08-25)
+
+- Parallel routing core v2: MULTI-CONNECTION NEGOTIATED ROUTING.
+  `route_tree(requests, shared_map)` routes each unresolved multipoint net's
+  ENTIRE tap set as ONE COHERENT UNIT inside one FFI call against the frozen
+  shared cost map (base + present-congestion + history costs injected into
+  layer_proximity_costs between iterations). Parallelism moved to NET level
+  (rayon over whole nets per iteration) vs the v2 experiment's CONNECTION
+  level, so multipoint nets no longer fragment across iterations. Per net:
+  clone the frozen map once, remove its own committed copper, order taps
+  MST-style (longest-first), route the first connection, then each remaining
+  tap TO THE NET'S OWN GROWING TREE as the frontier -- returning the complete
+  net tree. Costs frozen during an iteration => each result is a pure function
+  of (taps + frozen map); determinism unit tests (1 thread vs N threads).
+  Thread cap min(12, cores-2). New NetTreeRequest pyclass and route_tree
+  pyfunction; GridObstacleMap gains Rust-only remove_blocked_cells_plain /
+  remove_blocked_vias_plain helpers.
+
 ### 0.21.1 (2026-08-16)
 
 - PoseRouter (diff pairs): `layer_direction_preferences` +

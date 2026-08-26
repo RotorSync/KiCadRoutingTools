@@ -1230,3 +1230,41 @@ impl GridObstacleMap {
         }
     }
 }
+
+/// Rust-only helpers (NOT exposed to Python). Used by the parallel
+/// negotiated-congestion core: each rayon worker removes its own net's
+/// committed copper from its clone of the shared frozen map. Same
+/// refcount/bitmap semantics as the numpy batch methods.
+impl GridObstacleMap {
+    /// Remove blocked cells from a plain slice (no numpy/GIL).
+    pub fn remove_blocked_cells_plain(&mut self, cells: &[(i32, i32, u8)]) {
+        for &(gx, gy, layer) in cells {
+            let layer = layer as usize;
+            if layer < self.num_layers {
+                let key = pack_xy(gx, gy);
+                if let Some(count) = self.blocked_cells[layer].get_mut(&key) {
+                    if *count > 1 {
+                        *count -= 1;
+                    } else {
+                        self.blocked_cells[layer].remove(&key);
+                        self.blocked_bitmap.clear(gx, gy, layer); // S2: 1->0 transition
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove blocked vias from a plain slice (no numpy/GIL).
+    pub fn remove_blocked_vias_plain(&mut self, vias: &[(i32, i32)]) {
+        for &(gx, gy) in vias {
+            let key = pack_xy(gx, gy);
+            if let Some(count) = self.blocked_vias.get_mut(&key) {
+                if *count > 1 {
+                    *count -= 1;
+                } else {
+                    self.blocked_vias.remove(&key);
+                }
+            }
+        }
+    }
+}

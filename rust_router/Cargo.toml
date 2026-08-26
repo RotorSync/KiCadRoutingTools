@@ -1,6 +1,6 @@
 [package]
 name = "grid_router"
-version = "0.21.1"
+version = "0.23.0"
 edition = "2021"
 # Versioning convention: this Rust crate's major.minor is the base for the
 # whole project. The top-level /VERSION file mirrors major.minor and bumps
@@ -17,6 +17,7 @@ pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
 numpy = "0.23"  # NumPy support for PyO3
 rustc-hash = "2.1"  # Fast hash for integer keys
 mimalloc = { version = "0.1", default-features = false }  # EXPERIMENT: page-returning allocator
+rayon = "1.12"  # parallel multi-connection negotiated routing core (v2)
 
 [profile.release]
 lto = true

@@ -548,6 +548,10 @@ def run_phase3_tap_routing(
     layer_map: Dict[str, int],
     progress_callback: Any = None,
     cancel_check: Any = None,
+    # Parallel routing core v2: run the multi-connection negotiated pre-pass over
+    # pending multipoint nets before the sequential tap loop. Default OFF pending
+    # the A/B verdict; no CLI flag yet.
+    negotiated_congestion: bool = False,
 ) -> Phase3Stats:
     """
     Route tap connections for all pending multi-point nets.
@@ -603,6 +607,51 @@ def run_phase3_tap_routing(
 
     total_multipoint_nets = len(state.pending_multipoint_nets)
     net_index = 0
+
+    # Parallel routing core v2: multi-connection negotiated pre-pass. Routes each
+    # pending multipoint net's ENTIRE tap set as ONE coherent unit IN PARALLEL
+    # against a shared frozen cost map; only commits nets whose whole tree has no
+    # over-subscribed cells (never a DRC violation). Fully-resolved nets are
+    # removed from pending_multipoint_nets; the rest fall through to the
+    # sequential loop unchanged.
+    if negotiated_congestion and state.pending_multipoint_nets:
+        try:
+            from negotiated_routing import run_negotiated_phase3_prepass
+            _nc_start = time.time()
+            _resolved, _nc_stats = run_negotiated_phase3_prepass(
+                state=state,
+                pcb_data=pcb_data,
+                config=config,
+                base_obstacles=base_obstacles,
+                all_unrouted_net_ids=all_unrouted_net_ids,
+                routed_net_ids=routed_net_ids,
+                remaining_net_ids=remaining_net_ids,
+                routed_results=routed_results,
+                results=results,
+                track_proximity_cache=track_proximity_cache,
+                layer_map=layer_map,
+                net_obstacles_cache=state.net_obstacles_cache or {},
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            _nc_wall = time.time() - _nc_start
+            try:
+                from memory_debug import get_process_memory_mb
+                _peak_mb = get_process_memory_mb()
+            except Exception:
+                _peak_mb = None
+            _peak_str = f", peak RSS {_peak_mb:.0f} MB" if _peak_mb else ""
+            print(f"  [negotiated] pre-pass: {_nc_stats['iterations']} iterations, "
+                  f"{_nc_stats['edges_routed']} edges routed, "
+                  f"{len(_resolved)}/{total_multipoint_nets} nets resolved "
+                  f"in {_nc_wall:.2f}s{_peak_str}")
+            stats.tap_edges_routed += _nc_stats['edges_routed']
+        except Exception as e:
+            import traceback
+            print(f"  [negotiated] pre-pass FAILED ({e}); falling through to "
+                  f"sequential Phase 3")
+            traceback.print_exc()
+
     _p3_pairs = list(_order_nets_by_boxed_in_risk(
         state.pending_multipoint_nets, pcb_data))
     # Net-story recording: the tap-routing order is part of every deferred

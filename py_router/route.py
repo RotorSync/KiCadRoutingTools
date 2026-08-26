@@ -484,7 +484,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Default OFF; no CLI flag this phase. Engine-level so the GUI
                 # shares it. Does NOT change any search region -- only the
                 # order in which nets are attempted.
-                planner_ordering: bool = False) -> Tuple[int, int, float]:
+                planner_ordering: bool = False,
+                # Parallel routing core v2: multi-connection negotiated pre-pass over
+                # multipoint Phase-3 tap sets. Each pending multipoint net routes its
+                # ENTIRE tap set as ONE coherent unit IN PARALLEL (rayon, one FFI
+                # call) against a shared frozen cost map; only nets whose whole tree
+                # has no over-subscribed cells are committed, so it can never create
+                # a DRC violation. Default OFF pending the A/B verdict; no CLI flag
+                # yet. Engine-level so the GUI shares it. The env knob
+                # KICAD_NEGOTIATED_CONGESTION=1 arms it for the A/B harness without
+                # a flag.
+                negotiated_congestion: bool = False) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -545,6 +555,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         If return_results=False: (successful_count, failed_count, total_time)
         If return_results=True: (successful_count, failed_count, total_time, results_data)
     """
+    # Parallel routing core v2: the env knob KICAD_NEGOTIATED_CONGESTION=1 arms
+    # the negotiated pre-pass for the A/B harness without a CLI flag (same pattern
+    # as planner_ordering). Resolved BEFORE the snapshot so the reconcile sub-run
+    # inherits the armed state.
+    if not negotiated_congestion:
+        negotiated_congestion = bool(env_knobs.NEGOTIATED_CONGESTION)
     # Snapshot of THIS call's parameters, taken before any body code runs:
     # the end-of-run reconciliation self-invocation forwards every parameter
     # verbatim (only overriding the self-referential ones) so a rescue pass
@@ -2174,6 +2190,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         layer_map=layer_map,
         progress_callback=phase3_progress_callback,
         cancel_check=cancel_check,
+        negotiated_congestion=negotiated_congestion,
     )
 
     # Issue #134: nets whose stale copper would have shorted another net on
