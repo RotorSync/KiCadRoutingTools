@@ -487,18 +487,22 @@ class TestParityWithTheChecker(unittest.TestCase):
             floor = resolve_npth_floor(pcb)
             for clearance in (0.10, 0.25, 0.40):
                 pp = PartPads(fp, clearance, None, True, floor)
-                for p in fp.pads:
-                    if not (_pad_has_no_copper(p) and (p.drill or 0) > 0):
-                        continue
-                    lc = getattr(p, 'local_clearance', 0.0) or 0.0
-                    # check_drc.py:2714 then :2733, spelled the same way
-                    npth_clr = max(clearance,
-                                   defaults.NPTH_TO_TRACK_CLEARANCE,
-                                   resolve_hole_clearance(pcb, None))
-                    with self.subTest(board=os.path.basename(board),
-                                      clearance=clearance):
-                        self.assertAlmostEqual(max(npth_clr, lc),
-                                               max(pp.holes_req), places=9)
+                # check_drc.py:2714 then :2733, spelled the same way.
+                # Compared as SETS, not per-pad against the footprint max: a
+                # max hides a hole whose own requirement is lower, which is
+                # exactly the per-hole property #730 shipped.
+                npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE,
+                               resolve_hole_clearance(pcb, None))
+                want = sorted({
+                    round(max(npth_clr,
+                              getattr(p, 'local_clearance', 0.0) or 0.0), 9)
+                    for p in fp.pads
+                    if _pad_has_no_copper(p) and (p.drill or 0) > 0})
+                with self.subTest(board=os.path.basename(board),
+                                  clearance=clearance):
+                    self.assertTrue(want, 'no NPTH pad; the arm is void')
+                    self.assertEqual(sorted({round(r, 9)
+                                             for r in pp.holes_req}), want)
 
     def test_the_requirement_is_DISCLOSED_not_just_counted(self):
         pcb, _ctx, _parts = _hole_pair(0.30)
@@ -510,8 +514,13 @@ class TestParityWithTheChecker(unittest.TestCase):
     # MUTATION: hole-disclosure-removed (KILLED).
 
     def test_a_hole_at_the_FLAT_scalar_discloses_nothing(self):
-        """The same bar the pad channel applies: `required` names pairs graded
-        ABOVE the board-wide clearance, so an ordinary hole stays quiet."""
+        """`required` names pairs graded ABOVE the board-wide clearance, so an
+        ordinary hole stays quiet.
+
+        NOT literally the pad channel's bar -- that one is `pair_source != ''`
+        and therefore sits at `model.base`, which a netclass can lift above
+        `--clearance`. This docstring said "the same bar" until a review
+        measured otherwise."""
         pcb, _ctx, _parts = _hole_pair(0.10, lc=0.0, clearance=0.25)
         rep = grade_pad_legality(pcb, 0.25, worst_n=4, exact=False)
         self.assertEqual(rep['hole_conflicts'], 1)
@@ -585,9 +594,12 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
         channel could never fire for exactly the dense connectors that carry
         mounting holes. Corpus-reachable: glasgow_revC's J5 x U30 is 5324.
 
-        Two grids of copper pads whose PRODUCT clears the cap -- 64 x 65,
-        not 64 + 65, which is the arithmetic the first draft of this arm got
-        wrong and failed on."""
+        Two grids of copper pads whose PRODUCT clears the cap. The first
+        draft asserted `n * n > PAIR_TEST_CAP` on the GRID size and then built
+        parts of `n*n + 1` pads each, so at n=40 it refused on 1600 while the
+        real product was 1601 x 1601. The pre-check now guards the thing the
+        engine actually compares -- `parts[a].n_pads * parts[b].n_pads` -- and
+        n is 8, giving 64 x 65 = 4160."""
         clearance = 0.25
         n = 8
         a_pads = [_npth(0.0, 0.0, AUDIO1_LC)]
@@ -823,6 +835,43 @@ class TestInertOnTheTrackedCorpusAtFilePoses(unittest.TestCase):
                     for name, req, gap in sorted(rows, key=lambda r: r[2] - r[1]):
                         print('        %-30s req %.3f  gap %.4f  margin %+.4f'
                               % (name, req, gap, gap - req))
+
+    def test_the_POSITIVE_control_the_inertness_claim_needs(self):
+        """"Inert on the corpus" and "wired to nothing" print the same PASS.
+
+        This is the arm that tells them apart: raise `--clearance` until the
+        keep-out DOES bind and assert exactly which boards light up. At 0.20 --
+        what `corpus_noop_sweep` and `test_placement_ab` both run at -- the
+        census is silent on all 22 boards; at 0.50 it fires on three, and only
+        in the hole channel.
+
+        Measured independently twice, by me and by a reviewer who had not seen
+        my numbers, and they agree to the count."""
+        if not self.boards:
+            print('SKIP: git cannot identify the tracked corpus')
+            self.skipTest('no git')
+        seen = {}
+        for clr in (0.20, 0.50):
+            hits = {}
+            for b in self.boards:
+                pcb = parse_kicad_pcb(b)
+                rep = grade_pad_legality(pcb, clr, worst_n=0, exact=False,
+                                         pcb_file=b)
+                if rep['hole_conflicts']:
+                    hits[os.path.basename(b)] = rep['hole_conflicts']
+            seen[clr] = hits
+        self.assertEqual(seen[0.20], {},
+                         'the corpus is no longer inert at the clearance the '
+                         'standing gates run at: %r' % seen[0.20])
+        self.assertEqual(
+            seen[0.50],
+            {'orangecrab_ext_pll.kicad_pcb': 2,
+             'rp2350_fpga_eensy_prePlane.kicad_pcb': 4,
+             'ulx3s.kicad_pcb': 1},
+            'the positive control has MOVED: %r. Either the keep-out stopped '
+            'binding -- in which case the corpus arms above are passing '
+            'vacuously -- or a board changed. Re-measure; do not adjust this '
+            'dict to match.' % seen[0.50])
 
     def test_ulx3s_is_the_tightest_and_it_clears_by_ten_microns(self):
         """The tightest margin in the change, asserted against the bound

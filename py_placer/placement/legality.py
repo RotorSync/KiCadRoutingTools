@@ -1721,7 +1721,7 @@ class PartPads:
                 # `_pair_or_flat` (an NPTH tuple files floor `None`, so it
                 # hands back the flat scalar, fanout_clearance.py:894/1306),
                 # and labels.py by comparing against `silk_pad_clearance`
-                # (labels.py:394). legality compared this circle against RAW
+                # (labels.py:399). legality compared this circle against RAW
                 # pad rects and added nothing, so its modelled standoff was
                 # `max(0, requirement - clearance)` -- which collapses to ZERO
                 # once `clearance` reaches the requirement, at 0.20 for a plain
@@ -1878,7 +1878,7 @@ class PartPads:
 
         A copper consumer wants `hole_keepouts` instead. This accessor exists
         for the caller that adds its own term at its own gap test: labels.py
-        (silk, `< config.silk_pad_clearance`, labels.py:394).
+        (silk, `< config.silk_pad_clearance`, labels.py:399).
         """
         key = self._delta_key(rot)
         cache = self._hole_cache.get(key)
@@ -2090,14 +2090,17 @@ class LegalityContext:
             # constrains the pair.
             #
             # The HOLE channel is measured anyway (#761). The cap exists for
-            # the pad x pad product; the hole loops are holes x pads, which is
-            # two orders smaller on every part that trips it -- glasgow_revC's
-            # J5 is 44 pads x 4 holes against a 121-pad neighbour, so 5324
-            # pad pairs but 660 hole tests. Returning a hardcoded `hole=0.0`
-            # here made `cur.hole > base.hole` unable to fire for exactly the
-            # dense connectors that carry mounting holes, and that is
-            # corpus-reachable, not theoretical: J5 is the one part on the 22
-            # tracked boards whose product exceeds the cap.
+            # the pad x pad product; the hole loops are holes x pads, an order
+            # smaller on the one part that trips it -- glasgow_revC's J5 is 44
+            # pads and 2 NPTH drill circles against a 121-pad neighbour that
+            # has none, so 5324 pad pairs against 242 hole tests, a factor of
+            # 22. (First written as "4 holes / 660 tests / two orders", which
+            # a fact-check re-measured; the numbers are here rather than in a
+            # commit message so the next reader can check them.) Returning a
+            # hardcoded `hole=0.0` here made `cur.hole > base.hole` unable to
+            # fire for exactly the dense connectors that carry mounting holes,
+            # and that is corpus-reachable, not theoretical: J5 is the one part
+            # on the 22 tracked boards whose product exceeds the cap.
             g = rect_gap(ea, eb)
             return PairShortfall(max(0.0, pad_reach - g), g < 0.0,
                                  _hole_shortfall(pa, xa, ya, ra, rects_b,

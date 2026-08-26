@@ -519,10 +519,21 @@ class QuenchState:
             # #761: the board's own copper-to-NPTH-hole floor, resolved
             # once. This context serves `pair_shortfall`, which reads hole
             # keep-outs, so it is one of the two call sites that need it.
+            #
+            # The notes are PRINTED rather than returned: unlike
+            # `grade_pad_legality` this constructor has no report to file them
+            # into, and a silent fallback drops the modelled floor to the flat
+            # fab value while every downstream number looks normal. Empty on
+            # every board that resolves cleanly.
+            _npth_notes = []
+            _npth = legality.resolve_npth_floor(pcb_data, pcb_file,
+                                                _npth_notes)
+            for _n in _npth_notes:
+                print('WARNING: %s' % _n)
             part_pads = legality.build_part_pads(
                 {ref: pcb_data.footprints[ref] for ref in self.parts
                  if ref in pcb_data.footprints}, clearance, pad_model,
-                npth_floor=legality.resolve_npth_floor(pcb_data, pcb_file))
+                npth_floor=_npth)
             self.legality_ctx = legality.LegalityContext(
                 part_pads, self.edge_gate, clearance,
                 pose_of=lambda r: (self.parts[r].x, self.parts[r].y,
