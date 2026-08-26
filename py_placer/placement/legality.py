@@ -1944,6 +1944,25 @@ def _sides_interact(a, b) -> bool:
     return a is None or b is None or a == b
 
 
+def _hole_shortfall(pa, xa, ya, ra, rects_b, pb, xb, yb, rb, rects_a):
+    """Total penetration of either part's NPTH keep-outs into the other's
+    copper (#761). ONE resolver, because `pair_shortfall` reaches it from two
+    branches -- the full pad sweep and the PAIR_TEST_CAP extent branch -- and
+    a second copy is how the cap branch came to report a hardcoded zero.
+
+    Keep-outs, not `hole_circles`: the requirement lives in the radius, and
+    the rects are raw.
+    """
+    hole = 0.0
+    for cx, cy, r in pb.hole_keepouts(xb, yb, rb):
+        for a0, a1, a2, a3, _na, _sa in rects_a:
+            hole += _circle_rect_penetration(cx, cy, r, (a0, a1, a2, a3))
+    for cx, cy, r in pa.hole_keepouts(xa, ya, ra):
+        for b0, b1, b2, b3, _nb, _sb in rects_b:
+            hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
+    return hole
+
+
 def _circle_rect_penetration(cx, cy, r, rect) -> float:
     """How deep a circle penetrates a rect's keepout (0 when clear)."""
     dx = max(rect[0] - cx, 0.0, cx - rect[2])
@@ -2023,14 +2042,27 @@ class LegalityContext:
         reach = max(reach, pa.hole_reach, pb.hole_reach)
         if rect_gap(ea, eb) >= reach - EPS:
             return ZERO_SHORTFALL
-        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
-            # Extent-level verdict only: charge the extent shortfall as pad
-            # shortfall so the baseline comparison still constrains the pair.
-            g = rect_gap(ea, eb)
-            return PairShortfall(max(0.0, reach - g), g < 0.0, 0.0,
-                                 g < 0.0)
         rects_a = pa.pad_rects(xa, ya, ra)
         rects_b = pb.pad_rects(xb, yb, rb)
+        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
+            # Extent-level verdict for the PAD channel only: charge the extent
+            # shortfall as pad shortfall so the baseline comparison still
+            # constrains the pair.
+            #
+            # The HOLE channel is measured anyway (#761). The cap exists for
+            # the pad x pad product; the hole loops are holes x pads, which is
+            # two orders smaller on every part that trips it -- glasgow_revC's
+            # J5 is 44 pads x 4 holes against a 121-pad neighbour, so 5324
+            # pad pairs but 660 hole tests. Returning a hardcoded `hole=0.0`
+            # here made `cur.hole > base.hole` unable to fire for exactly the
+            # dense connectors that carry mounting holes, and that is
+            # corpus-reachable, not theoretical: J5 is the one part on the 22
+            # tracked boards whose product exceeds the cap.
+            g = rect_gap(ea, eb)
+            return PairShortfall(max(0.0, reach - g), g < 0.0,
+                                 _hole_shortfall(pa, xa, ya, ra, rects_b,
+                                                 pb, xb, yb, rb, rects_a),
+                                 g < 0.0)
         floors_a = pa.pad_floors if model is not None else None
         floors_b = pb.pad_floors if model is not None else None
         pad_short = 0.0
@@ -2062,14 +2094,10 @@ class LegalityContext:
                         overlap = True
         # #761: keep-outs, not inflations -- the requirement is the stored
         # growth PLUS the flat clearance, and the rects below are raw.
-        hole = 0.0
-        for cx, cy, r in pb.hole_keepouts(xb, yb, rb):
-            for a0, a1, a2, a3, _na, _sa in rects_a:
-                hole += _circle_rect_penetration(cx, cy, r, (a0, a1, a2, a3))
-        for cx, cy, r in pa.hole_keepouts(xa, ya, ra):
-            for b0, b1, b2, b3, _nb, _sb in rects_b:
-                hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
-        return PairShortfall(pad_short, overlap, hole, stack)
+        return PairShortfall(pad_short, overlap,
+                             _hole_shortfall(pa, xa, ya, ra, rects_b,
+                                             pb, xb, yb, rb, rects_a),
+                             stack)
 
     def seed_baseline(self, a: str, b: str) -> PairShortfall:
         # The single choke point every consumer routes through (pads_ok and
