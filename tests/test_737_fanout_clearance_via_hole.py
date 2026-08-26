@@ -348,8 +348,10 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
                            V_DRILL / 2.0 + HR + CLEAR + 0.05,
                            'a drill-priced gate would refuse this landing too')
         self.assertEqual(moves, [])
-    # MUTATION: `clearance + vr` -> `clearance + (v.drill or 0.3) / 2.0` -- the
-    # requirement falls to 0.75 of centre distance and the via moves.
+    # MUTATION: `clearance + vr` -> `clearance + _via_drill_radius(v)` -- the
+    # requirement falls to 0.75 of centre distance and the via moves. (#750
+    # named that resolver; the mutant used to be spelled with the bare
+    # `(v.drill or 0.3) / 2.0` this function no longer contains.)
 
 
 class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
