@@ -1505,6 +1505,28 @@ def _copper_in_corridor(segs, vias, x0, y0, x1, y1, pad: float = 3.0) -> bool:
     return True
 
 
+def _via_drill_radius(via, fallback: float) -> float:
+    """Half the drill of an EXISTING via, for the hole-to-hole gates (#754).
+
+    Every via has a hole, so a via whose drill the board does not carry must
+    NOT be priced as if it had none: `(v.drill or 0) / 2` made the gate weaker
+    for exactly the barrel it could not measure, so a candidate was accepted at
+    a separation the fab floor forbids. Fall back on the drill the CALLER is
+    working at (`config.via_drill` / the ladder's `used_via_drill`) -- the shape
+    the sibling gate 250 lines below already used.
+
+    Guarded as `not d or d <= 0` rather than `or`, so a NEGATIVE drill cannot
+    take a different branch in the two gates (#732/#750 shape). A fallback that
+    is itself unusable yields 0.0 -- there is nothing left to measure with.
+    """
+    d = getattr(via, 'drill', None)
+    if not d or d <= 0:
+        d = fallback
+    if not d or d <= 0:
+        return 0.0
+    return d / 2.0
+
+
 def oracle_reconnect(board_file: str, net_names, config,
                      track_via_clearance: float,
                      hole_to_hole_clearance: float,
@@ -2561,7 +2583,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                     if _ok649:
                         for _v2 in pcb_data.vias:
                             _d2 = math.hypot(_v2.x - _vx, _v2.y - _vy)
-                            if _d2 < _vdr + (_v2.drill or 0) / 2 + _h2h:
+                            if _d2 < _vdr + _via_drill_radius(
+                                    _v2, config.via_drill) + _h2h:
                                 _ok649 = False
                                 break
                             if _v2.net_id != net_id and _d2 <                                         _vr + _v2.size / 2 + config.clearance:
@@ -2809,8 +2832,8 @@ def oracle_reconnect(board_file: str, net_names, config,
             for vx, vy in via_positions:
                 _near = None
                 for _ev in _own_vias:
-                    _lim = (used_via_drill + (_ev.drill or used_via_drill)) / 2 \
-                        + hole_to_hole_clearance
+                    _lim = used_via_drill / 2.0 + _via_drill_radius(
+                        _ev, used_via_drill) + hole_to_hole_clearance
                     if math.hypot(vx - _ev.x, vy - _ev.y) < _lim:
                         _near = _ev
                         break
