@@ -111,14 +111,16 @@ be forced) and neither mutation exists against the ladder. The layer-count
 inertness is still recorded, as an assertion in `TestTheLayerCountChoice` rather
 than as a row.
 
-THE BATTERY FOUND SIX DEFECTS IN THIS FILE AND IN ITSELF, corrected in place
+THE BATTERY FOUND FIVE DEFECTS IN THIS FILE AND IN ITSELF, corrected in place
 rather than quietly fixed, because that is what the counts are evidence of:
 
-  * THREE bga rows reported BROKEN -- `bga_fanout/__init__.py` is CRLF while
-    `fanout_clearance.py` is LF, and the runner reads with `newline=''` so the
-    restore is byte-identical. An LF anchor matched zero times. The runner now
-    translates the anchor to the target's own ending; BROKEN keeps meaning
-    "stale anchor".
+  * THREE bga rows reported BROKEN on a line-ending mismatch: an LF anchor
+    matched zero times against a CRLF working tree. NOT a property of the
+    files -- both are LF in git (`.gitattributes`: `*.py text eol=lf`), and a
+    fact-check refuted the first telling of this, which said the two targets
+    disagree. What converts a tree is an edit written through Python's text
+    mode on Windows. The runner now translates the anchor to whatever the
+    target on disk uses, so BROKEN keeps meaning "stale anchor".
   * `bga-drops-the-fab-wrap` SURVIVED: `manage_vias` hands `board_floor`
     HOLE_TO_HOLE_CLEARANCE as its FALLBACK, so only a sub-fab declaration
     exercises the wrap and no arm made one.

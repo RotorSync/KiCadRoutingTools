@@ -719,11 +719,21 @@ def manage_vias(
     # ball into a failed net whenever it is the only thing refusing it.
     # Measured on this file's own rig shape: a foreign 0.30 pad drill at
     # 0.45mm separation is ADDED on a board declaring nothing and BLOCKED on
-    # one declaring 0.25. A real-board A/B (orangecrab_ext_pll U4, declared
-    # 0.20 vs 0.30) was inert -- 9 tracks, 20 vias on both arms -- so this is
-    # a latent cost, not a measured regression. A ladder like the
-    # via-nudge's would need this pass to have a second rung to descend to,
-    # and it does not.
+    # one declaring 0.25.
+    #
+    # ON A REAL BOARD IT IS INERT, and the honest way to say that is a
+    # HEAD-vs-BASE comparison rather than a 0.20-vs-0.30 one. An independent
+    # re-measurement ran `bga_fanout.py -c U4` on orangecrab_ext_pll with a
+    # planted project at 0.20 and at 0.30: the two DECLARATIONS differ (2
+    # tracks / 12 vias vs 1 / 12), but that difference is PRE-EXISTING --
+    # `underpad.py` already read the board -- and running the same pair on
+    # the base tree gives byte-identical summaries on both arms. So #756's
+    # change to THIS function is inert there. An earlier version of this
+    # comment cited '9 tracks, 20 vias on both arms', which does not
+    # reproduce and compared the wrong pair.
+    #
+    # A ladder like the via-nudge's would need this pass to have a second
+    # rung to descend to, and it does not.
     #
     # NARROW ON PURPOSE. Both arms keep the 0.20 `hole_to_hole` fab term; this
     # does NOT adopt the 0.45 `pad_hole_to_hole` that

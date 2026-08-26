@@ -55,11 +55,18 @@ on the #761 branch records two rows left as a SyntaxError by unescaped `sed`
 metacharacters -- a battery that cannot start reports nothing at all, which is
 only safe because someone runs it.
 
-ANCHORS ARE WRITTEN WITH LF AND TRANSLATED TO THE TARGET'S OWN ENDING. The two
-targets disagree -- `bga_fanout/__init__.py` is CRLF, `fanout_clearance.py` is
-LF -- and the runner reads with `newline=''` so its restore is byte-identical.
-The first #756 run lost THREE bga rows to that mismatch and reported them
-BROKEN, which reads like a stale anchor and was really a line ending.
+ANCHORS ARE WRITTEN WITH LF AND TRANSLATED TO THE TARGET'S OWN ENDING. Both
+targets are LF in git -- `.gitattributes` has `*.py text eol=lf` -- so from a
+clean checkout the translation is a no-op. It is here because a WORKING TREE
+can still be CRLF: any edit written through Python's text mode on Windows
+converts the whole file, which is exactly what happened during #756, and the
+first run lost THREE bga rows to the mismatch and reported them BROKEN --
+which reads like a stale anchor and was really a line ending. The runner reads
+with `newline=''` so its restore stays byte-identical either way.
+
+An earlier version of this paragraph said the two targets DISAGREE, one CRLF
+and one LF. A fact-check refuted it: both blobs are LF, and the measurement
+behind the claim was of my own converted worktree.
 """
 from __future__ import annotations
 

@@ -807,12 +807,23 @@ class _Repair:
         #
         # An earlier draft of this note claimed the via/via drill gate was the
         # only floor in that function sitting BELOW its own grader. A review
-        # refuted it: `check_drc` also `_pin_up`s `hole_clearance` from
-        # `min_hole_clearance` (:3697) while the CONNECTOR's copper-to-hole
-        # gate there stays flat, so on #617's own declaring rig the connector
-        # it emits grades as a 0.030mm violation. That gap is #617's measured,
-        # disclosed choice and is still open; it is not a counterexample to
-        # #756, and #756 is not a licence to close it by raising.
+        # refuted it TWICE over, and both refutations are recorded here rather
+        # than the sentence simply being dropped:
+        #
+        #   * the CONNECTOR's copper-to-hole gate is flat while `check_drc`
+        #     `_pin_up`s `hole_clearance` from `min_hole_clearance` (:3697),
+        #     so on #617's own declaring rig the connector this pass emits
+        #     grades as a 0.030mm violation;
+        #   * and the VIA's own copper-to-NPTH gate is not at parity either,
+        #     in the band #730 already discloses. Measured on a mid-chain
+        #     project (rules 0.15, fab_floor_origin 0.35, an NPTH pad at
+        #     lc 0.30): the nudge charges 0.1000 where check_drc's via arm
+        #     charges 0.3000 -- the nudge UNDER-charges by 0.2000.
+        #
+        # Both gaps are measured, disclosed choices of #617 and #730 and are
+        # still open. Neither is a counterexample to #756, and #756 is not a
+        # licence to close either by raising -- the ladder is what makes the
+        # drill floor affordable, and neither of those two has one.
         #
         # One correction to how the divergence was first reported (#730's
         # thread): the two do NOT differ in both directions.
@@ -2888,10 +2899,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     #
     # WHICH IS WHY THIS COMMENT DOES NOT QUOTE THEM. An earlier draft spelled
     # both gate expressions out here to explain the point, and thereby took
-    # each of mutate_750's anchors from one occurrence to two -- four of its
-    # rows went BROKEN, and it exits 0, so it was silent. Exactly the failure
-    # the paragraph above describes, committed by the paragraph itself. Refer
-    # to the gates by name and by line, never by their text.
+    # each of mutate_750's anchors from one occurrence to two, so four of its
+    # rows stopped testing anything. Exactly the failure the paragraph above
+    # describes, committed by the paragraph itself. Refer to the gates by
+    # name and by line, never by their text.
+    #
+    # NOT SILENT, and an earlier version of this comment said it was: those
+    # rows report BROKEN and `mutate_750.py:251` is
+    # `return 1 if (wrong or broken) else 0`, so the battery exits NON-zero
+    # and names them. The harm is that four rows tested nothing until someone
+    # ran it, not that nothing would have said so. A fact-check caught the
+    # overstatement by running the four rows.
     #
     # THIS IS NOT THE RAISE #617 REFUSED, and the two do not touch the same
     # gate. #617 measured the CONNECTOR's COPPER-to-hole floor on a rig
@@ -3322,9 +3340,19 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # the pads above are flattened here -- the hole-to-hole gate below runs
     # inside the candidate sweep (16 angles x up to 12 radii), so resolving
     # there costs one call per via per candidate. Measured on
-    # orangecrab_ext_pll (136 vias, the one tracked board that actually nudges
-    # one): 6336 valid_via_pos calls, so this replaces ~862k resolutions
-    # with 136.
+    # orangecrab_ext_pll (136 vias): 6336 valid_via_pos calls, so this
+    # replaces ~862k resolutions with 136.
+    #
+    # That parenthetical used to call orangecrab "the one tracked board that
+    # actually nudges one", which #756's independent re-measurement showed is
+    # not so: at the shipped defaults its `unresolved` is EMPTY at clearance
+    # 0.10, 0.20 and 0.25, so this function is never entered on it. The only
+    # tracked board that gets past the early return is
+    # rp2350_fpga_eensy_prePlane (unresolved 1/5/7 at those three), and it
+    # emits zero via moves. Pre-existing -- unchanged at 05ebfc74 -- and
+    # corrected here rather than carried, since the measurement above is
+    # still right and only the attribution was wrong. `tests/test_746`'s
+    # corpus arm already names rp2350 as the board that reaches the nudger.
     #
     # WHAT MAKES THE HOIST SAFE is narrower than "nothing mutates
     # pcb_data.vias", and the wider claim is the one that invites the bug:
@@ -3366,8 +3394,20 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # Since #756 `H2H_PAD` is `max(declared, the fab pad-hole floor)`
         # rather than a flat 0.45, so those two numbers are the values on a
         # board that declares nothing at or above 0.45 -- which is every board
-        # this repo tracks. A board declaring MORE widens the covered window;
-        # it never narrows it, because the resolver is raise-only.
+        # this repo tracks. A board declaring MORE widens the window this
+        # arithmetic covers, and never narrows it, because the RESOLVER is
+        # raise-only.
+        #
+        # THAT IS A CLAIM ABOUT THE FLOOR, NOT ABOUT THE LANDING, and an
+        # independent re-measurement read it the other way, so say which.
+        # The emitted geometry is NOT monotone in the declaration: with two
+        # offending vias in one call, via #1 can take a rung-1 landing that
+        # leaves via #2 nothing at rung 1, so #2 falls back and the run's
+        # WORST drill gap ends smaller than the flat floor's would have.
+        # Measured over 3600 configurations: 5 of them, worst case
+        # 0.5889 -> 0.2643mm. Never below the fab floor (minimum emitted gap
+        # is 0.2000 on both arms) and never a lost repair, which are the two
+        # properties the ladder actually guarantees.
         # Past that the pass parked ring copper inside a mounting hole's
         # keep-out, and this pass WRITES the via (placement/writer.py, and the
         # plugin's pcbnew mirror). Measured at --clearance 0.25: a 1.4/0.3 via
