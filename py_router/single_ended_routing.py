@@ -476,21 +476,29 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
 
 
 def _foreign_hole_capsules(pcb_data):
-    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r) numpy
-    arrays, one row per pad whose drill carries no copper ring (mechanical /
-    mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
+    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r, lc)
+    numpy arrays, one row per pad whose drill carries no copper ring (mechanical
+    / mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
     segment / via distance trio all measure to COPPER, so they never see these
     holes; but a track crossing one is a real fab short (check_drc's track-hole
     rule, issue #233), gated by the higher NPTH-to-track floor. Holes are
     through, so the distance is layer-agnostic. Round drills degenerate to a
     zero-length capsule (a=b). Rebuilt when the board's pad count changes (pads
-    are static during routing, so this almost never refires)."""
+    are static during routing, so this almost never refires).
+
+    `lc` is the hole pad's OWN resolved `local_clearance` (#760). check_drc
+    grades this same geometry at `max(npth_clr, lc)` (#326/#505), so a consumer
+    that prices every hole at one flat floor decides below what the grader
+    requires on a pad carrying an override above the fab floor (corpus: ulx3s
+    AUDIO1, drill 1.700, override 0.400 vs the 0.20 floor). Callers opt in via
+    `_seg_foreign_hole_dist(..., base_clearance=...)`; the array is inert for
+    the 0.0 that every other corpus NPTH pad carries."""
     from check_drc import _pad_has_no_copper
     from kicad_parser import pad_drill_capsule
     sig = sum(len(p) for p in pcb_data.pads_by_net.values())
     cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
     if cache is None or cache[0] != sig:
-        nid, ax, ay, bx, by, r = [], [], [], [], [], []
+        nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []
         for pad_net, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if (getattr(pad, 'drill', 0) or 0) > 0 and _pad_has_no_copper(pad):
@@ -498,20 +506,31 @@ def _foreign_hole_capsules(pcb_data):
                     nid.append(pad_net)
                     ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
                     r.append(hr)
+                    lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
         cache = (sig, (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
                        np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
-                       np.asarray(by, dtype=float), np.asarray(r, dtype=float)))
+                       np.asarray(by, dtype=float), np.asarray(r, dtype=float),
+                       np.asarray(lc, dtype=float)))
         pcb_data._foreign_hole_cap_cache = cache
     return cache[1]
 
 
-def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2):
+def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                           base_clearance=None):
     """Min edge distance from a segment to any OTHER-net NPTH drill hole (the
     hole analogue of _seg_foreign_via_dist). Exact segment-to-capsule distance
     minus the hole radius; a negative result (segment over the hole) is returned
     as-is. Own-net holes are excluded (a track legitimately reaches its own
-    mounting-hole pad). 1e9 when there are no foreign holes."""
-    nid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    mounting-hole pad). 1e9 when there are no foreign holes.
+
+    #760: with `base_clearance` (the caller's flat NPTH floor), each hole's own
+    `local_clearance` EXCESS over that floor is subtracted from its distance --
+    the same trick #436 uses for foreign net-class clearance, so the single
+    returned number stays directly comparable against the flat floor while
+    honoring check_drc's per-hole `max(npth_clr, lc)`. Omitted (the default)
+    keeps every existing caller bit-identical, so the sites #617 deliberately
+    left flat stay flat."""
+    nid, hax, hay, hbx, hby, hr, hlc = _foreign_hole_capsules(pcb_data)
     if nid.size == 0:
         return 1e9
     R = _FOREIGN_PAD_WINDOW
@@ -523,6 +542,8 @@ def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2):
         return 1e9
     ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
     d = _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by) - rr
+    if base_clearance is not None:
+        d = d - np.maximum(0.0, hlc[near] - base_clearance)
     return float(np.min(d))
 
 

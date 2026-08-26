@@ -4455,14 +4455,28 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
     # shortfall ranking sees the same band check_drc grades at. This is a
     # DETECTOR -- raising it can only make a real violation visible to the
     # micro-shift, never refuse a repair.
-    hole_required = max(clearance, NPTH_TO_TRACK_CLEARANCE,
-                        resolve_hole_clearance(pcb_data, config)) + s.width / 2.0
+    # #760: the hole PAD's own local_clearance is the remaining term. check_drc
+    # grades copper-to-hole at max(npth_clr, lc) (#326/#505), so a hole carrying
+    # an override above the fab floor was ranked below what the grader requires.
+    # It is per-hole, not board-wide, so it is folded into the DISTANCE as a
+    # class-style excess (like the pad/seg/via terms' #436 _excess) and the
+    # scalar `hole_required` still names the flat floor.
+    hole_floor = max(clearance, NPTH_TO_TRACK_CLEARANCE,
+                     resolve_hole_clearance(pcb_data, config))
+    hole_required = hole_floor + s.width / 2.0
+    # The per-hole excess also has to be SEEABLE: the sampling window `R`
+    # below is sized from the requirement, so an override wider than it would
+    # window out the very hole it applies to. Widen by the largest excess on
+    # the board (cached with the capsules, so this costs nothing).
+    _hcaps = _foreign_hole_capsules(pcb_data)
+    hole_excess_max = (float(np.maximum(0.0, _hcaps[6] - hole_floor).max())
+                       if _hcaps[6].size else 0.0)
     x1, y1, x2, y2 = s.start_x, s.start_y, s.end_x, s.end_y
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.005) + 1)
     ts = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * ts
     sy = y1 + (y2 - y1) * ts
-    R = max(required, hole_required) + 0.2
+    R = max(required, hole_required + hole_excess_max) + 0.2
     best = None  # (shortfall, t, qx, qy)
 
     def consider(dist, i, qx, qy, req=required):
@@ -4567,7 +4581,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, fcx[j], fcy[j])
 
-    hnid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    hnid, hax, hay, hbx, hby, hr, hlc = _hcaps
     if hnid.size:
         near = ((np.maximum(hax, hbx) + hr >= sx.min() - R) &
                 (np.minimum(hax, hbx) - hr <= sx.max() + R) &
@@ -4575,6 +4589,8 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
                 (np.minimum(hay, hby) - hr <= sy.max() + R) & (hnid != net_id))
         if near.any():
             ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
+            # #760 per-hole override excess over the flat floor (see hole_floor)
+            hex_ = np.maximum(0.0, hlc[near] - hole_floor)
             abx, aby = bx - ax, by - ay
             L2 = np.where(abx * abx + aby * aby > 0, abx * abx + aby * aby, 1.0)
             tt = np.clip(((sx[:, None] - ax[None, :]) * abx[None, :] +
@@ -4584,6 +4600,7 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
             # Edge distance = axis distance - hole radius; direction points away
             # from the axis point (== away from the hole edge).
             d = np.hypot(sx[:, None] - qx, sy[:, None] - qy) - rr[None, :]
+            d = d - hex_[None, :]  # #760 per-hole local_clearance excess
             i, j = np.unravel_index(int(np.argmin(d)), d.shape)
             consider(float(d[i, j]), i, qx[i, j], qy[i, j], hole_required)
 
@@ -4662,6 +4679,24 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
     # would manufacture a counted DRC hit), but it is a trade, not a free
     # win: on a silent board the same repair proceeds.
     # tests/test_617_pcb_modification_hole_clearance.py pins both arms.
+    #
+    # #760: `npth_clr` is the board-wide floor; the hole PAD's own
+    # local_clearance is per-hole, so it is folded into the DISTANCE by passing
+    # `base_clearance=npth_clr` to _seg_foreign_hole_dist (excess over the floor
+    # is subtracted, #436 style) rather than into this scalar -- otherwise ONE
+    # overriding hole would raise the floor for every hole on the board. The
+    # same term goes to the fast pre-filter below AND to the candidate-
+    # acceptance clears(); splitting them would be worse than leaving both flat,
+    # since a graze the pre-filter cannot see is never offered a repair.
+    # This inherits #617's trade in full: on a board declaring an override, a
+    # repair whose only escape points at that hole is now REFUSED rather than
+    # made, which is the right side of the trade (check_drc counts the declared
+    # band) but is a trade. Corpus scope: ulx3s AUDIO1 only (2 pads, 0.400 over
+    # the 0.20 floor); the other 35 NPTH pads on the 22 tracked boards carry no
+    # binding override, so this is numerically inert on all of them.
+    #
+    # The IDENTICAL clears() block in nudge_grazing_octolinear (~:3687) is one
+    # of the sites #617 left flat and stays flat -- match by function, not text.
     npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
                    resolve_hole_clearance(pcb_data, config))
 
@@ -4704,7 +4739,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                       net_clearances=net_clearances, base_clearance=eff),
                 _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
                                       net_clearances=net_clearances, base_clearance=eff))
-        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2)
+        hd = _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
+                                    base_clearance=npth_clr)  # #760
         return (d >= eff + w / 2.0 - 1e-4 and
                 hd >= npth_clr + w / 2.0 - 1e-4 and
                 edge_clears(x1, y1, x2, y2, w))
@@ -4751,10 +4787,12 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                                      s.end_x, s.end_y, s.layer,
                                      net_clearances=net_clearances, base_clearance=eff)) < thr:
             return True
-        # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308).
+        # NPTH-hole graze uses the higher NPTH-to-track floor (issue #308),
+        # with each hole's own override folded into the distance (#760).
         hole_thr = npth_clr + s.width / 2.0 - 1e-4
         return _seg_foreign_hole_dist(pcb_data, s.net_id, s.start_x, s.start_y,
-                                      s.end_x, s.end_y) < hole_thr
+                                      s.end_x, s.end_y,
+                                      base_clearance=npth_clr) < hole_thr
 
     MAX_ROUNDS = 3   # a fixed worst offender can expose the second-worst
 
