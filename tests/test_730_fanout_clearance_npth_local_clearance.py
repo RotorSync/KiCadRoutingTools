@@ -1162,11 +1162,15 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
         """(total NPTH pads, {board: [binding pads]}) at this clearance.
 
         The floor is sites A/B/C's -- it carries the board's declared
-        min_hole_clearance. Site E's is STRICTLY LOWER, because `PartPads`
-        cannot see the board at all (asserted two classes up), so a hole with
-        `npth_clr < lc <= declared` binds at site E while this scan calls it
-        non-binding. Inert on the corpus today: the one board declaring above
-        the fab floor is flat_hierarchy, and all 6 of its NPTH pads are at
+        min_hole_clearance, and since #761 site E carries it too: the caller
+        resolves it once (`legality.resolve_npth_floor`) and passes the
+        scalar, so this scan and site E now select on the SAME floor. It was
+        strictly lower while `PartPads` could not see the board, which made a
+        hole with `npth_clr < lc <= declared` bind at site E while this scan
+        called it non-binding -- unreachable then and gone now, but recorded
+        because the fix, not the argument, is what closed it. Inert on the
+        corpus either way: the one board declaring above the fab floor is
+        flat_hierarchy, and all 6 of its NPTH pads are at
         lc 0.0. Stated because "selected the way the ENGINE selects" is true of
         A/B/C and only approximately true of E.
         """
