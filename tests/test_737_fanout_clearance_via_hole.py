@@ -61,9 +61,13 @@ declared value is still unread here, and the floor charged is the LOWER of the
 two candidates, so this pass refuses strictly less than the version review
 rejected.
 
-DELIBERATELY NOT CLOSED HERE: neither hole gate honours the hole pad's own
-`local_clearance`, which check_drc does honour -- that is #730, a wrong VALUE
-where this is a missing GATE.
+CLOSED SINCE, by #730: neither hole gate honoured the hole pad's own
+`local_clearance`, which check_drc does honour -- a wrong VALUE where this was
+a missing GATE. Each gate now has an ADDITIVE override sibling beside it, and
+the two arms keep their different shapes (this one's is a STEP, the
+connector's a MAX). The source guard below counts four hole gates for that
+reason. Behavioural coverage lives in
+tests/test_730_fanout_clearance_npth_local_clearance.py.
 
 Conventions this file follows (#697/#725/#731/#732/#733 and CLAUDE.md):
 
@@ -514,16 +518,22 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
         self.assertIn('clearance', vtxt,
                       'the VIA gate does not spell `clearance`, which is what '
                       'check_drc s via-hole arm grades at')
-        # This assertion is the ONLY thing in the tree that holds the
-        # connector floor. Measured: rewriting `npth_clr + hw` to
-        # `clearance + hw` passes test_617, test_370 and test_fanout_clearance
-        # (20 tests) -- including test_617's own "UNCHANGED site" arm, which
-        # exists to pin exactly that floor. Same position as the 1e-4 above,
-        # and worth the same disclosure rather than a silent reliance.
+        # This assertion WAS the only thing in the tree holding the connector
+        # floor, and that is no longer true -- amended here rather than left
+        # as a stale claim. Measured when this file shipped: rewriting
+        # `npth_clr + hw` to `clearance + hw` passed test_617, test_370 and
+        # test_fanout_clearance (20 tests), including test_617's own
+        # "UNCHANGED site" arm, which exists to pin exactly that floor.
+        # #730 added a BEHAVIOURAL arm for it --
+        # test_730's TestTheConnectorGateStaysAtTheFlatFabFloor puts a
+        # connector 1.150mm off a hole wall, over what `clearance` would
+        # require and under what `npth_clr` does -- so the mutation is now
+        # killed twice, once here and once there. This guard is kept as
+        # belt-and-braces: a source property is still the honest place to hold
+        # a source property.
         self.assertIn('npth_clr', ctxt,
                       'the CONNECTOR gate no longer spells npth_clr -- #617 '
-                      'set that floor deliberately, and NOTHING else in the '
-                      'tree catches this')
+                      'set that floor deliberately')
         # The tolerance too. This one is pinned HERE and nowhere else, and
         # deliberately so: measured, dropping `- 1e-4` from the via gate leaves
         # the whole suite green, because it only decides an exact tie and no
