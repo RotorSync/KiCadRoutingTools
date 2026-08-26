@@ -321,6 +321,43 @@ def _seg_to_rect_dist(x1, y1, x2, y2, rect):
     return best
 
 
+def _seg_seg_dist(x1, y1, x2, y2, ax, ay, bx, by) -> float:
+    """Distance between two segments -- a scalar mirror of
+    `single_ended_routing._seg_capsule_axis_dist` (#730).
+
+    Deliberately NOT `_seg_rect_dist`'s `_segs_cross`-based shape, and the
+    difference is the reason this exists rather than reusing what is already
+    here. The kernel this mirrors decides a crossing with a STRICT
+    `o1*o2 < 0`, so a segment whose endpoint lies exactly ON the other's line
+    is NOT a crossing and falls through to the endpoint minimum; `_segs_cross`
+    counts an orientation of 0 as a crossing and would return 0.0 for the same
+    geometry. The #730 override gate must agree with its two scalar siblings
+    about touching cases -- they all measure the same holes -- so it copies the
+    kernel term for term instead of approximating it. Pure Python because the
+    override list is empty on 20 of the 22 tracked boards and never long.
+    """
+    def pt_to_seg(px, py, qx1, qy1, qx2, qy2):
+        dx = qx2 - qx1
+        dy = qy2 - qy1
+        L2 = dx * dx + dy * dy
+        t = 0.0 if L2 <= 0 else min(1.0, max(
+            0.0, ((px - qx1) * dx + (py - qy1) * dy) / L2))
+        return math.hypot(px - (qx1 + t * dx), py - (qy1 + t * dy))
+
+    sdx, sdy = x2 - x1, y2 - y1
+    hdx, hdy = bx - ax, by - ay
+    o1 = sdx * (ay - y1) - sdy * (ax - x1)
+    o2 = sdx * (by - y1) - sdy * (bx - x1)
+    o3 = hdx * (y1 - ay) - hdy * (x1 - ax)
+    o4 = hdx * (y2 - ay) - hdy * (x2 - ax)
+    if o1 * o2 < 0 and o3 * o4 < 0:
+        return 0.0
+    return min(pt_to_seg(ax, ay, x1, y1, x2, y2),
+               pt_to_seg(bx, by, x1, y1, x2, y2),
+               pt_to_seg(x1, y1, ax, ay, bx, by),
+               pt_to_seg(x2, y2, ax, ay, bx, by))
+
+
 class _Cap:
     """A movable cap: pad offsets + courtyard bbox, in a seed-relative frame.
 
@@ -2683,7 +2720,138 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # clear spot" and the #130 pad-via graze the pass exists to fix persists.
     # Measured on the #370-B3 harness with a declared 0.25: raised -> 0 moves,
     # 0 connectors; flat -> 1 move, 1 connector.
+    #
+    # #730 RE-MEASURED that, because it is the reason a whole site was dropped
+    # rather than fixed, and a four-month-old number carrying that much weight
+    # deserves re-derivation rather than quotation. Same harness
+    # (tests/test_617_placement_fanout_hole_clearance.py's
+    # `_via_mover_stays_flat`), same declared 0.25, on this tree: flat -> "1
+    # move(s), 1 connector(s); copper-to-hole gap 0.2200mm"; raised -> "no
+    # clear spot", 0 and 0. The connector's only validated landing sits 0.2200
+    # off the wall, so ANY floor above 0.2200 kills it and 0.25 is above it.
+    # #617's choice stands, and `self.npth_floor` (which DOES read the board)
+    # deliberately differs from this. See the note beside that assignment.
     npth_clr = max(clearance, defaults.NPTH_TO_TRACK_CLEARANCE)
+
+    # ---- #730: the OVERRIDE hole gate ------------------------------------
+    #
+    # `_seg_foreign_hole_dist` returns a PURE minimum distance -- one number
+    # for the whole board, with no per-hole requirement in it. That is right
+    # for a flat floor and wrong for KiCad's copper-to-hole rule, which honours
+    # each hole pad's OWN `(clearance ...)`. So the holes that CARRY one are
+    # collected here and gated separately, ADDITIVELY: the two scalar gates
+    # below keep their floors and their spellings exactly, and this list only
+    # ever refuses more. That is what makes #730 raise-only.
+    #
+    # THE THRESHOLD READS THE BOARD, and that is the one board-derived value
+    # this function is allowed. check_drc's via arm is a STEP --
+    # `kicad_req = req_clr if req_clr > npth_clr + 1e-9 else clearance`
+    # (check_drc.py:2851) -- whose `npth_clr` is
+    # `max(clearance, NPTH_TO_TRACK_CLEARANCE, hole_clearance)`, the third term
+    # being the board's declared min_hole_clearance. A threshold WITHOUT that
+    # term charges `lc` on a board where the checker charges `clearance`, which
+    # is the invented-refusal class #737's own comment is about. Measured
+    # during review: declared 0.35, hole lc 0.30, a landing 0.200 off the wall
+    # -- shipped 1 move; flat threshold 0 moves (repair LOST); board-aware
+    # threshold 1 move; and check_drc grades that landing CLEAN
+    # (kicad_req 0.10, overlap -0.1000). So the flat spelling reproduces, by
+    # 0.10mm, exactly the failure #737 was written to avoid.
+    #
+    # This is NOT the read #617 refused, and the direction is the whole
+    # argument. #617 refused board-deriving a FLOOR, which raises what every
+    # candidate is charged. This is a THRESHOLD: raising it makes it HARDER for
+    # a pad override to outrank the fab floor, so a larger declared value can
+    # only ever charge LESS. Against what ships today -- no `lc` term at all --
+    # the gate is raise-only either way, and the thing that keeps it from
+    # costing repairs is not the monotonicity but that it fires ONLY for a
+    # hole whose pad carries an explicit, author-declared keep-clear above the
+    # fab floor. A per-pad declaration, not a board-wide floor: that is the
+    # distinction from #617, and it is why this one is safe to raise.
+    #
+    # DISCLOSED, not exact. `resolve_hole_clearance` returns
+    # `max(rules.min_hole_clearance, fab_floor_origin)` while check_drc's CLI
+    # pins `rules` alone, so on a mid-chain board whose recorded origin exceeds
+    # its current rule (the tigard 0.25 -> 0.15 chain that resolver's own
+    # docstring measures) this threshold sits ABOVE the checker's, and a pad
+    # with `lc` in that band is graded by the checker and not charged here.
+    # #730 narrowed, not closed. Filed rather than papered over with a third
+    # copper-to-hole resolver in this pass.
+    #
+    # Read through `pcb_data`, never off `st`: this function is public and its
+    # harnesses pass duck types carrying `caps` and `vias` and nothing else, so
+    # a `getattr(st, 'npth_floor', ...)` would silently take the default -- and
+    # the default is the LOW threshold, which is the direction that costs
+    # repairs. (`st.npth_floor` is also the wrong number: it omits `clearance`,
+    # so it is too low at --clearance 0.3.)
+    from obstacle_map import resolve_hole_clearance
+    npth_step = max(npth_clr, resolve_hole_clearance(pcb_data, None))
+
+    # The hole SET is selected with the same two predicates and the same
+    # capsule geometry `single_ended_routing._foreign_hole_capsules` uses, so
+    # the override gate and its two scalar siblings cannot disagree about which
+    # holes EXIST -- only about what one costs. That agreement is the property
+    # test_737's TestTheTwoSiblingValidatorsSeeTheSameHoles exists to hold, and
+    # a re-spelt predicate is how it would be lost, silently and by
+    # under-blocking. Built from `pads_by_net`, which KEEPS the pads of movable
+    # caps, and NOT from `board_pads`, which drops them.
+    #
+    # Almost always EMPTY: 20 of the 22 tracked boards carry no NPTH override
+    # at all, and watchy's 8 are 0.100, under the 0.20 fab floor. So the two
+    # gates below cost a zero-length loop on every board in the corpus, and
+    # the `if` in front of each is what keeps that true rather than an
+    # assertion about it.
+    override_holes = []
+    for _hnet, _hpads in getattr(pcb_data, 'pads_by_net', {}).items():
+        for _hp in _hpads:
+            if (getattr(_hp, 'drill', 0) or 0) <= 0 or not _pad_has_no_copper(_hp):
+                continue
+            _hlc = getattr(_hp, 'local_clearance', 0.0) or 0.0
+            if _hlc <= npth_step + 1e-9:
+                continue
+            (_h1, _h2, _hr) = pad_drill_capsule(_hp)
+            override_holes.append((_h1[0], _h1[1], _h2[0], _h2[1], _hr,
+                                   _hnet, _hlc))
+
+    # REACH FILTER, and it is why a board that DOES carry an override still
+    # pays almost nothing. Every point either gate tests lies within
+    # `max_shift` of an existing via, and the requirement is
+    # `hr + hlc + (vr | hw)`, so a hole further than
+    # `hr + hlc + max_shift + widest` from EVERY via can never bind. Dropping
+    # those is provably conservative -- it removes only holes no candidate can
+    # reach -- and it matters: measured during review, the unfiltered gate ran
+    # 104us per candidate against the existing gate's 37us, about 22% on top of
+    # valid_via_pos's per-candidate cost, paid on a board where the branch
+    # then fires on nothing. On the fanned ulx3s the nearest via to AUDIO1's
+    # two holes is 9.283mm and 15.055mm against a 0.6mm spiral, so the filter
+    # empties the list there and both gates cost one truth test.
+    if override_holes:
+        _widest = max([v.size / 2.0 for v in pcb_data.vias]
+                      + [sg.width / 2.0 for sg in pcb_data.segments] + [0.0])
+        override_holes = [
+            h for h in override_holes
+            if any(_point_to_seg_dist(v.x, v.y, h[0], h[1], h[2], h[3])
+                   <= h[4] + h[6] + max_shift + _widest
+                   for v in pcb_data.vias)]
+
+    def override_hole_gap(net_id, x1, y1, x2, y2):
+        """Worst `distance-to-hole-wall MINUS that hole's own requirement`
+        over the override holes, or 1e9 when there are none.
+
+        Reads like its two scalar siblings -- a distance the caller compares
+        against its own half-extent -- so all four hole gates in this function
+        are one expression shape. Same own-net exemption they make, and the
+        same measure: `_point_to_seg_dist` between the two axes, which is what
+        `_seg_capsule_axis_dist` reduces to for the endpoint cases, minus the
+        capsule radius. A round drill is a zero-length capsule, so the point
+        case falls out rather than being special-cased."""
+        best = 1e9
+        for hx1, hy1, hx2, hy2, hr, hnet, hlc in override_holes:
+            if hnet == net_id:
+                continue
+            d = _seg_seg_dist(x1, y1, x2, y2, hx1, hy1, hx2, hy2) - hr
+            if d - hlc < best:
+                best = d - hlc
+        return best
 
     def edge_ok_point(x, y, r):
         need = r + edge_margin
@@ -2936,28 +3104,30 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # drill-to-drill is a machine constraint, this is an etch constraint,
         # and check_drc's via arm makes the same own-net exemption.
         #
-        # KNOWN GAP, deliberately not closed here. Like the cap keep-out site
-        # above, this does not honour the hole pad's OWN `local_clearance` --
-        # but the arithmetic is NOT the same, and saying "as above" inside a
-        # comment whose whole point is that the track and via arms differ would
-        # be wrong. check_drc's via arm is a STEP, not a max:
-        # `lc if lc > npth_clr else clearance`. So the shortfall here is
-        # `lc - clearance` ONLY when `lc > npth_clr`, and exactly ZERO for
-        # `clearance < lc <= npth_clr` (measured: clearance 0.10, lc 0.15 ->
-        # checker wants 0.100, this gate charges 0.100). Choosing `clearance`
-        # over `npth_clr` WIDENS that shortfall by `npth_clr - clearance`, i.e.
-        # by up to 0.10mm at --clearance 0.1 -- stated in magnitude, not merely
-        # in kind.
+        # #730 is CLOSED, in the SECOND gate below rather than in this one, and
+        # the gate on the next line is deliberately unchanged -- floor,
+        # spelling and all. check_drc's via arm is a STEP, not a max:
+        # `kicad_req = lc if lc > npth_clr else clearance`. So for
+        # `clearance < lc <= npth_clr` the requirement is EXACTLY `clearance`
+        # and this gate was already right (measured: clearance 0.10, lc 0.15 ->
+        # the checker wants 0.100, this charges 0.100). Only an override ABOVE
+        # `npth_clr` outranks it, and that is what `override_holes` carries.
         #
-        # That is #730 -- a wrong VALUE where this was a missing GATE. Two
-        # things for whoever closes it: the obvious `max(clearance, lc)` is
-        # measured WRONG in both directions (it over-blocks by 0.05 at
-        # clearance 0.10 / lc 0.15), and an exact mirror needs check_drc's
-        # `npth_clr`, which includes the BOARD's declared min_hole_clearance --
-        # dragging back in the very read this function and its own source guard
-        # forbid.
+        # Which is why the obvious `max(clearance, lc)` here is wrong in BOTH
+        # directions: at clearance 0.10 / lc 0.15 it over-blocks by 0.05 and
+        # invents a refusal kicad-cli never reports -- the crkbd phantom class
+        # the block above names. Splitting the step across two gates rather
+        # than folding it into one expression is what keeps this fix
+        # RAISE-ONLY and byte-identical on every board declaring no override.
         if _seg_foreign_hole_dist(pcb_data, v.net_id, nx, ny, nx, ny) < \
                 clearance + vr - 1e-4:
+            return False
+        # ...and the step's OTHER branch: a hole whose pad declares more than
+        # `npth_step` charges that override instead of `clearance`.
+        # `override_holes` is empty on every tracked board, so this costs one
+        # truth test there.
+        if override_holes and override_hole_gap(
+                v.net_id, nx, ny, nx, ny) < vr - 1e-4:
             return False
         for (bx0, by0, bx1, by1, net, _cl, pfl) in all_cap_rects:
             # via barrel spans all layers: no layer gate here
@@ -3014,6 +3184,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             return False
         if _seg_foreign_hole_dist(pcb_data, net_id, sx, sy, ex, ey) < \
                 npth_clr + hw - 1e-4:
+            return False
+        # #730, the TRACK arm: check_drc grades a track against an NPTH hole at
+        # `max(npth_clr, lc)` -- a MAX, where the via gate above takes a STEP --
+        # so an override above the floor this gate already charges raises it,
+        # and one below it changes nothing. `override_holes` is filtered to
+        # `lc > npth_step >= npth_clr`, so every member is above and the max
+        # collapses to `lc` for all of them: the FILTER carries this arm, not
+        # the charge. `npth_clr` itself stays the flat fab floor -- #617's
+        # decision, re-measured in the note beside it.
+        if override_holes and override_hole_gap(
+                net_id, sx, sy, ex, ey) < hw - 1e-4:
             return False
         for (bx0, by0, bx1, by1, net, cl, pfl) in all_cap_rects:
             if cl != layer:

@@ -530,17 +530,71 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
         # candidate the 0.05mm spiral produces lands on one. It is kept because
         # the two sibling gates must read as one expression, which is a source
         # property, so a source guard is the honest place to hold it.
-        eps = [i + 1 for i in calls
+        # #730 added two OVERRIDE gates beside these two, and they carry the
+        # same tolerance for the same reason -- four gates measuring the same
+        # holes must read as one expression. Counted by their own call, so a
+        # third scalar gate is still caught by the `len(calls) == 2` above.
+        ogates = [i for i, l in enumerate(src) if 'override_hole_gap(' in l
+                  and 'def ' not in l]
+        self.assertEqual(len(ogates), 2,
+                         'expected exactly two #730 override-hole gates (via '
+                         'and connector); found %d at function-relative '
+                         'line(s) %s' % (len(ogates), [i + 1 for i in ogates]))
+        eps = [i + 1 for i in calls + ogates
                if '1e-4' not in ' '.join(src[i:i + 3])]
         self.assertEqual(eps, [],
-                         'a hole gate dropped the 1e-4 the other one carries, '
+                         'a hole gate dropped the 1e-4 the others carry, '
                          'at function-relative line(s) %s' % eps)
-        drift = [i + 1 for i, l in enumerate(src)
-                 if 'npth_floor' in l or 'resolve_hole_clearance' in l]
+        # THE BOARD READ. This was a blanket ban until #730, and the ban was
+        # coarser than the decision it encoded. #617 refused board-deriving a
+        # FLOOR, because a raised floor abandons landings check_drc grades
+        # clean -- measured, and still measured: declared 0.25 gives 0 moves
+        # and 0 connectors where the flat floor gives 1 and 1.
+        #
+        # #730's `npth_step` is a THRESHOLD, not a floor. It decides whether a
+        # pad's own `(clearance ...)` outranks the fab floor, so raising it
+        # makes the override gate fire LESS often -- it can only ever charge
+        # less, never more, which is the opposite direction. And the direction
+        # is not the whole argument: what keeps that gate from costing repairs
+        # is that it fires only for an explicit, author-declared per-pad
+        # keep-clear, never for a board-wide floor. That is the distinction
+        # from #617.
+        #
+        # So the guard is now POSITIONAL, because "which direction" is a
+        # property of the EXPRESSION and not of the identifier:
+        # `npth_step = max(npth_clr, resolve_hole_clearance(...))` relaxes and
+        # `npth_clr = max(npth_clr, resolve_hole_clearance(...))` -- literally
+        # the #617 mutation -- raises, and a guard phrased as "board reads are
+        # fine" would pass both.
+        board = [i for i, l in enumerate(src)
+                 if 'resolve_hole_clearance(' in l and 'import' not in l]
+        self.assertEqual(len(board), 1,
+                         'expected exactly one board-derived hole read (#730 s '
+                         'step threshold); found %d at function-relative '
+                         'line(s) %s' % (len(board), [i + 1 for i in board]))
+        self.assertRegex(src[board[0]].lstrip(), r'^npth_step\s*=',
+                         'the board-derived read is not the `npth_step` '
+                         'assignment -- #617 refused it in every other '
+                         'position, at function-relative line %d'
+                         % (board[0] + 1))
+        # ...and no GATE may add it. A threshold that leaks into a gate line is
+        # a floor wearing a threshold's name.
+        for i in calls + ogates:
+            self.assertNotIn('npth_step', ' '.join(src[i:i + 3]),
+                             'a hole gate ADDS the board-derived value at '
+                             'function-relative line %d -- threshold only'
+                             % (i + 1))
+        # `st.npth_floor` stays banned outright, and for its OWN reason rather
+        # than #617's: this function is public and its harnesses pass duck
+        # types, so `getattr(st, 'npth_floor', ...)` silently takes the
+        # default -- and the default is the LOW threshold, the direction that
+        # costs repairs. It is also the wrong number, omitting `clearance`.
+        # `pcb_data` is a real argument on every path, so the read goes there.
+        drift = [i + 1 for i, l in enumerate(src) if 'npth_floor' in l]
         self.assertEqual(drift, [],
-                         'the nudger reads a BOARD-AWARE hole floor at '
-                         'function-relative line(s) %s -- #617 refused that'
-                         % drift)
+                         'the nudger reads st.npth_floor at function-relative '
+                         'line(s) %s -- a duck-typed harness carries none, so '
+                         'the getattr default decides silently' % drift)
         # And the one constant this file HAND-MIRRORS. `H2H_PAD` is a
         # function-local literal, so it cannot be imported; three ON-THE-BRANCH
         # guards above reason about the drill test using the mirror, and would
