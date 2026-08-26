@@ -207,10 +207,18 @@ NEIGH = (3.30, 3.0)            # a SAME-NET neighbour: isolates the drill term
 H_DRILL = 1.0                  # the NPTH hole; prad 0.50
 PRAD = H_DRILL / 2.0
 
-# The function's own literals, mirrored here because they are FUNCTION-LOCAL
-# (fanout_clearance.py, inside nudge_vias_for_unresolved) and cannot be
-# imported. TestOneDrillRule re-reads them out of the source, so a change to
-# either fails loudly instead of silently invalidating the arithmetic below.
+# The function's own drill floors, mirrored here BY HAND.
+#
+# They are still function-locals, but since #756 their VALUE is
+# `resolve_drill_floors`' answer rather than a literal, so what the mirror
+# tracks is that resolver's result on a PROJECT-LESS board -- which is what
+# every rig in this file builds. TestOneDrillRule calls it and compares,
+# instead of grepping the source for `= 0.2`.
+#
+# STILL HAND-WRITTEN, deliberately: computing them from the resolver at
+# import time would make every ON-THE-BRANCH threshold below
+# self-fulfilling, tracking a moved engine value in silence. That is the
+# exact failure the guard exists to prevent.
 H2H_VIA = 0.2
 H2H_PAD = 0.45
 
@@ -771,28 +779,32 @@ class TestOneDrillRule(unittest.TestCase):
         self-fulfilling -- the arithmetic would track a moved engine value in
         silence, which is the exact failure this guard exists to prevent."""
         # (i) VALUE, on a project-less board: that is what the mirrors are OF.
-        via, pad, decl, src = FC.resolve_drill_floors(
+        # The resolver returns SIX values -- the last two are its fab terms,
+        # which the nudger uses as the ladder's second rung -- and on a
+        # project-less board all three pairs are the same numbers.
+        got = FC.resolve_drill_floors(
             make_pcb(board_info=BoardInfo(layers={},
                                           copper_layers=['F.Cu', 'B.Cu'],
                                           board_bounds=(0.0, 0.0, 4.0, 4.0)),
                      source_path=''))
-        self.assertEqual((via, pad), (H2H_VIA, H2H_PAD),
+        self.assertEqual(got,
+                         (H2H_VIA, H2H_PAD, None, 'fixed default',
+                          H2H_VIA, H2H_PAD),
                          "the engine's drill floors on a project-less board "
                          "are no longer (%s, %s), so this file's mirrors -- "
                          'and every ON-THE-BRANCH threshold computed from them '
                          '-- are stale' % (H2H_VIA, H2H_PAD))
-        self.assertEqual((decl, src), (None, 'fixed default'),
-                         'a board with no project now reports a declaration; '
-                         'the fab-fallback arm above is measuring something '
-                         'else')
-        # (ii) SHAPE: exactly one resolved assignment, and no literal one.
+        # (ii) SHAPE: the names are rebound PER RUNG by the ladder loop, so
+        # there is no single assignment to count any more -- what must exist is
+        # the loop, and what must not is a literal.
         src_lines = self._src()
-        asg = [i + 1 for i, l in enumerate(src_lines)
-               if 'H2H_VIA, H2H_PAD' in l and 'resolve_drill_floors(' in l]
-        self.assertEqual(len(asg), 1,
-                         'expected exactly one resolved-floor assignment in '
-                         'the nudger; found %d at function-relative line(s) %s'
-                         % (len(asg), asg))
+        lad = [i + 1 for i, l in enumerate(src_lines)
+               if 'for H2H_VIA, H2H_PAD in drill_ladder' in l]
+        self.assertEqual(len(lad), 1,
+                         'expected exactly one ladder loop binding the two '
+                         'floors in the nudger; found %d at function-relative '
+                         'line(s) %s. Collapsing it back to one rung is the '
+                         'change #756 measured and rejected' % (len(lad), lad))
         lit = [i + 1 for i, l in enumerate(src_lines)
                if l.lstrip().startswith(('H2H_VIA =', 'H2H_PAD ='))]
         self.assertEqual(lit, [],

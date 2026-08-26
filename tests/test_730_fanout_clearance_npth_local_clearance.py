@@ -152,9 +152,12 @@ OLD_KEEPOUT = {0.10: AUDIO1_HR + 0.20, 0.25: AUDIO1_HR + 0.25}
 AUDIO1_NEAREST_COPPER = 0.4100                                       # R60.2
 
 # ---- the ONE hand-mirrored engine constant -------------------------------
-# `H2H_PAD` is a function-local literal inside nudge_vias_for_unresolved: it
-# cannot be imported, so every threshold computed from it here is a hand
-# mirror, and the source guard below fails if the engine's moves.
+# `H2H_PAD` is a function-local inside nudge_vias_for_unresolved. Since #756
+# its VALUE is `resolve_drill_floors`' answer rather than a literal, so this
+# mirror tracks that resolver's result on a PROJECT-LESS board -- which is
+# what every rig in this file builds -- and the guard below CALLS it rather
+# than grepping for `= 0.45`. Kept hand-written on purpose: deriving it at
+# import time would make every threshold here self-fulfilling.
 # `NPTH_FLOOR` is NOT mirrored -- it is imported, right here -- and saying so
 # matters, because a reader who believes it is mirrored will look for a guard
 # that should not exist.

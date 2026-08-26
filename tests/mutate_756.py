@@ -13,11 +13,18 @@ inert row recorded as an expected survivor is a finding, while an inert row
 quietly deleted is a hole. A row whose verdict does not match its expectation
 is reported as WRONG.
 
-TWO targets, like `mutate_730.py`'s: the via-nudge resolver in
-`placement/fanout_clearance.py` and the sibling drill floor in
+TWO targets, like `mutate_730.py`'s: the via-nudge resolver and ladder in
+`placement/fanout_clearance.py`, and the sibling drill floor in
 `bga_fanout/__init__.py`. Rows are graded by more than one test file -- the
 staleness guards live in `test_730`/`test_737`/`test_750` and the rest in
 `test_756` -- and a row is KILLED if ANY of its named tests exits non-zero.
+
+THE LADDER ROWS ARE THE POINT OF THIS BATTERY. #756 first shipped a one-rung
+RAISE; a review swept 8673 configurations and found 625 losing a repair at the
+shipped budget. What ships is a two-rung ladder, and the four rows that destroy
+it -- collapse to either rung, reverse the order, stop the sweep descending --
+each restore that defect class. They are the rows to look at first if this file
+ever goes red.
 
 THIS IS THE FOURTH COPY OF THIS RUNNER (`mutate_730.py`, `mutate_750.py`,
 `mutate_761.py`). Deliberately not refactored into a shared one: that would
@@ -32,7 +39,7 @@ dirty engine, because restoring would write the COMMITTED text back over
 uncommitted work.
 
     python3 tests/mutate_756.py
-    python3 tests/mutate_756.py --row resolver-drops-the-fab-wrap
+    python3 tests/mutate_756.py --row ladder-order-reversed
 
 A row is KILLED by a FAILURE **or an ERROR**: dropping a term makes some arms
 raise rather than fail, and a battery that counted only failures would call
@@ -47,6 +54,12 @@ Edits are applied with `str.replace(old, new, 1)`, never `sed`. Commit bb8f4477
 on the #761 branch records two rows left as a SyntaxError by unescaped `sed`
 metacharacters -- a battery that cannot start reports nothing at all, which is
 only safe because someone runs it.
+
+ANCHORS ARE WRITTEN WITH LF AND TRANSLATED TO THE TARGET'S OWN ENDING. The two
+targets disagree -- `bga_fanout/__init__.py` is CRLF, `fanout_clearance.py` is
+LF -- and the runner reads with `newline=''` so its restore is byte-identical.
+The first #756 run lost THREE bga rows to that mismatch and reported them
+BROKEN, which reads like a stale anchor and was really a line ending.
 """
 from __future__ import annotations
 
@@ -69,46 +82,48 @@ T737 = os.path.join(_TESTS, 'test_737_fanout_clearance_via_hole.py')
 T730 = os.path.join(_TESTS, 'test_730_fanout_clearance_npth_local_clearance.py')
 T370 = os.path.join(_TESTS, 'test_370_tierb_fixes.py')
 
-# The resolver's return, quoted once so several rows can anchor on parts of it.
-_RET = ("    return max(declared, fab_via), max(declared, fab_pad), "
-        "declared, src")
+# The resolver's return, quoted once so several rows anchor on parts of it.
+_RET = ("    return (max(declared, fab_via), max(declared, fab_pad), declared, "
+        "src,\n            fab_via, fab_pad)")
+
+_LADDER = ("    drill_ladder = [(_h2h_via, _h2h_pad)]\n"
+           "    if (_h2h_via, _h2h_pad) != (_fab_via, _fab_pad):\n"
+           "        drill_ladder.append((_fab_via, _fab_pad))")
 
 # (name, target, old, new, tests, expect)
 ROWS = [
     # --- the defect itself: the board read ---------------------------------
     ('resolver-never-reads-the-board', 'fc',
-     """    path = getattr(pcb_data, 'source_path', "") or ""
-    if not path:
-        return fab_via, fab_pad, None, 'fixed default'""",
-     """    path = ""
-    if not path:
-        return fab_via, fab_pad, None, 'fixed default'""",
+     '    path = getattr(pcb_data, \'source_path\', "") or ""',
+     '    path = ""',
      (T756,), 'KILLED'),
 
     # The evasion a source-only guard misses: the resolver still EXISTS, is
-    # still called, and still returns a 4-tuple -- it just answers the old
+    # still called, and still returns a 6-tuple -- it just answers the old
     # literals. This is the row that proves test_756 owns what the three
     # staleness guards explicitly do NOT (see test_750's corrected note).
     ('resolver-hard-wired-to-the-old-literals', 'fc',
-     '    from fab_tiers import fab_floor_min\n',
-     "    return 0.2, 0.45, None, 'fixed default'\n"
-     '    from fab_tiers import fab_floor_min\n',
+     '    import os.path\n',
+     "    return 0.2, 0.45, None, 'fixed default', 0.2, 0.45\n"
+     '    import os.path\n',
      (T756, T750, T737, T730), 'KILLED'),
 
     # --- the raise-only wrap ------------------------------------------------
     ('resolver-drops-the-fab-wrap', 'fc',
      _RET,
-     '    return declared, declared, declared, src',
+     '    return declared, declared, declared, src, fab_via, fab_pad',
      (T756,), 'KILLED'),
 
     ('resolver-drops-the-fab-wrap-on-the-VIA-arm-only', 'fc',
      _RET,
-     '    return declared, max(declared, fab_pad), declared, src',
+     '    return (declared, max(declared, fab_pad), declared, src,\n'
+     '            fab_via, fab_pad)',
      (T756,), 'KILLED'),
 
     ('resolver-drops-the-fab-wrap-on-the-PAD-arm-only', 'fc',
      _RET,
-     '    return max(declared, fab_via), declared, declared, src',
+     '    return (max(declared, fab_via), declared, declared, src,\n'
+     '            fab_via, fab_pad)',
      (T756,), 'KILLED'),
 
     # --- the two fab keys ---------------------------------------------------
@@ -119,17 +134,26 @@ ROWS = [
 
     ('via-floor-reads-the-PAD-fab-key', 'fc',
      "    fab_via, fab_pad = fmin['hole_to_hole'], fmin['pad_hole_to_hole']",
-     "    fab_via, fab_pad = fmin['pad_hole_to_hole'], fmin['pad_hole_to_hole']",
+     "    fab_via, fab_pad = fmin['pad_hole_to_hole'], "
+     "fmin['pad_hole_to_hole']",
      (T756, T750), 'KILLED'),
 
-    # --- the CWD probe guard ------------------------------------------------
-    # Without the short-circuit, `read_design_rules("")` probes ".kicad_pro"
-    # relative to the PROCESS CWD -- test_756 plants exactly that file.
+    # --- the fab TIER channel, which nothing tested until a fact-check said so
+    ('resolver-deaf-to-the-fab-tier-and-overrides', 'fc',
+     "    fmin = fab_floor_min(len([l for l in (_cu or []) "
+     "if str(l).endswith('.Cu')]))",
+     "    fmin = fab_floor_min(2, tier='standard', overrides={})",
+     (T756,), 'KILLED'),
+
+    # --- the CWD probe guard, both halves -----------------------------------
     ('cwd-probe-guard-dropped', 'fc',
-     """    if not path:
-        return fab_via, fab_pad, None, 'fixed default'
-""",
-     '',
+     '    if not path or os.path.isdir(path):',
+     '    if False:',
+     (T756,), 'KILLED'),
+
+    ('cwd-probe-guard-keeps-empty-but-drops-isdir', 'fc',
+     '    if not path or os.path.isdir(path):',
+     '    if not path:',
      (T756,), 'KILLED'),
 
     # --- `declared` must mean "the board said this" -------------------------
@@ -139,94 +163,104 @@ ROWS = [
      "                                defaults.HOLE_TO_HOLE_CLEARANCE)",
      (T756,), 'KILLED'),
 
+    # --- THE LADDER ---------------------------------------------------------
+    # The four ways to destroy it, each restoring the class of defect #756
+    # measured and rejected.
+    ('ladder-collapsed-to-the-declared-rung-only', 'fc',
+     "    if (_h2h_via, _h2h_pad) != (_fab_via, _fab_pad):\n"
+     "        drill_ladder.append((_fab_via, _fab_pad))",
+     '    pass',
+     (T756, T750), 'KILLED'),
+
+    ('ladder-collapsed-to-the-fab-rung-only', 'fc',
+     '    drill_ladder = [(_h2h_via, _h2h_pad)]',
+     '    drill_ladder = [(_fab_via, _fab_pad)]',
+     (T756,), 'KILLED'),
+
+    ('ladder-order-reversed', 'fc',
+     _LADDER,
+     "    drill_ladder = [(_fab_via, _fab_pad)]\n"
+     "    if (_h2h_via, _h2h_pad) != (_fab_via, _fab_pad):\n"
+     "        drill_ladder.append((_h2h_via, _h2h_pad))",
+     (T756,), 'KILLED'),
+
+    ('sweep-does-not-descend-the-ladder', 'fc',
+     '            for H2H_VIA, H2H_PAD in drill_ladder:',
+     '            for H2H_VIA, H2H_PAD in drill_ladder[:1]:',
+     (T756, T750), 'KILLED'),
+
     # --- the disclosure -----------------------------------------------------
     ('raised-disclosure-deleted', 'fc',
-     """        print(f"  via-nudge drill floors: via-hole {H2H_VIA:g}mm, pad-hole "
-              f"{H2H_PAD:g}mm (from the board's own min_hole_to_hole)")""",
-     '        pass',
+     '        print(f"  via-nudge drill floors: via-hole {_h2h_via:g}mm, '
+     'pad-hole "',
+     '        _unused = (f"  via-nudge drill floors: via-hole {_h2h_via:g}mm, '
+     'pad-hole "',
+     (T756,), 'KILLED'),
+
+    # The typo class a substring assertion cannot see -- a fact-check found
+    # BOTH disclosure arms surviving this before they pinned the full clause.
+    ('raised-disclosure-swaps-its-two-floors', 'fc',
+     '        print(f"  via-nudge drill floors: via-hole {_h2h_via:g}mm, '
+     'pad-hole "\n              f"{_h2h_pad:g}mm; the board\'s own '
+     'min_hole_to_hole "',
+     '        print(f"  via-nudge drill floors: via-hole {_h2h_pad:g}mm, '
+     'pad-hole "\n              f"{_h2h_via:g}mm; the board\'s own '
+     'min_hole_to_hole "',
      (T756,), 'KILLED'),
 
     ('below-fab-disclosure-deleted', 'fc',
-     """        print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "
-              f"{H2H_VIA:g}mm fab hole-to-hole floor; using {H2H_VIA:g}mm.")""",
-     '        pass',
+     '        print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "',
+     '        _unused = (f"  Board min_hole_to_hole {_h2h_decl:g}mm is '
+     'below the "',
+     (T756,), 'KILLED'),
+
+    ('below-fab-disclosure-names-the-declared-value-as-the-floor', 'fc',
+     '              f"{_fab_via:g}mm fab hole-to-hole floor; using "',
+     '              f"{_h2h_decl:g}mm fab hole-to-hole floor; using "',
      (T756,), 'KILLED'),
 
     ('disclosure-fires-at-the-packaged-default-too', 'fc',
-     '            _h2h_decl > defaults.HOLE_TO_HOLE_CLEARANCE:',
-     '            _h2h_decl >= defaults.HOLE_TO_HOLE_CLEARANCE:',
+     '            (_h2h_via > _fab_via or _h2h_pad > _fab_pad):',
+     '            (_h2h_via >= _fab_via or _h2h_pad >= _fab_pad):',
+     (T756,), 'KILLED'),
+
+    ('fallback-is-silent', 'fc',
+     '                        print(f"  via-nudge: no spot cleared the '
+     'board\'s "',
+     '                        _unused = (f"  via-nudge: no spot cleared the '
+     'board\'s "',
      (T756,), 'KILLED'),
 
     # --- the two gates the floors feed --------------------------------------
-    # Kept from mutate_750's rows deliberately: #756 preserved both expression
-    # spellings precisely so those rows keep applying, and a row here proves
-    # the preserved spelling is still load-bearing rather than decorative.
+    # #756 preserved both expression spellings precisely so mutate_750's rows
+    # keep applying; rows here prove the preserved spelling is load-bearing.
     ('h2h-via-gate-deleted', 'fc',
-     """            # net-INDEPENDENT: two holes collide whatever they carry
-            if d < vdr + ovdr + H2H_VIA:
-                return False""",
+     '            # net-INDEPENDENT: two holes collide whatever they carry\n'
+     '            if d < vdr + ovdr + H2H_VIA:\n'
+     '                return False',
      '            pass',
      (T756, T750), 'KILLED'),
 
-    ('h2h-pad-gate-deleted', 'fc',
-     """                if _point_to_seg_dist(nx, ny, c1x, c1y, c2x, c2y) < \\
-                        vdr + prad + H2H_PAD:
-                    return False""",
-     '                pass',
-     (T737, T730), 'KILLED'),
+    ('pad-gate-charges-the-VIA-floor', 'fc',
+     '                        vdr + prad + H2H_PAD:',
+     '                        vdr + prad + H2H_VIA:',
+     (T756, T737), 'KILLED'),
 
-    # --- the assignment's position ------------------------------------------
-    # A GENUINE move back above the early return is semantically inert for
-    # every caller that has work to do; recorded as an expected survivor rather
-    # than omitted, so its survival is not read as a hole. What it costs is a
-    # project read and a printed line on a call with nothing to do, which no
-    # arm asserts and which is a transcript question, not a correctness one.
-    ('assignment-moved-back-above-the-early-return', 'fc',
-     [('    H2H_VIA, H2H_PAD, _h2h_decl, _h2h_src = '
-       'resolve_drill_floors(pcb_data)\n', ''),
-      ('    via_moves, new_segments = [], []\n',
-       '    H2H_VIA, H2H_PAD, _h2h_decl, _h2h_src = '
-       'resolve_drill_floors(pcb_data)\n'
-       '    via_moves, new_segments = [], []\n')],
-     None,
-     (T756, T750), 'SURVIVED'),
-
-    # The first draft of the row above INSERTED a second assignment instead of
-    # moving the one that is there, and test_750's shape guard killed it. That
-    # is the guard working, so the mutation is kept under the name it actually
-    # has -- a duplicated assignment is a real hazard (two board reads, two
-    # disclosure lines, and a later reader deleting "the" one).
-    ('assignment-DUPLICATED-above-the-early-return', 'fc',
-     '    via_moves, new_segments = [], []\n',
-     '    H2H_VIA, H2H_PAD, _h2h_decl, _h2h_src = '
-     'resolve_drill_floors(pcb_data)\n'
-     '    via_moves, new_segments = [], []\n',
-     (T756, T750), 'KILLED'),
-
-    # --- the layer-count read -----------------------------------------------
-    # Also inert TODAY, and that is exactly what test_756's change detector
-    # says out loud: fab_floor_min carries 0.20/0.45 in all four cells, so no
-    # layer count can move either answer. Recorded so the day that stops being
-    # true, this row flips to KILLED and someone reads the note.
-    ('layer-count-forced-to-the-multilayer-bucket', 'fc',
-     "    fmin = fab_floor_min(len([l for l in (_cu or []) "
-     "if str(l).endswith('.Cu')]))",
-     '    fmin = fab_floor_min(4)',
-     (T756,), 'SURVIVED'),
+    # --- the self-skip a source arm greps for ------------------------------
+    ('via-loop-self-skip-deleted', 'fc',
+     '            if ov is v:\n                continue\n',
+     '',
+     (T756,), 'KILLED'),
 
     # --- the bga sibling ----------------------------------------------------
     ('bga-via-arm-reverted-to-the-flat-constant', 'bga',
-     """                    + _h2h - 1e-6:
-                return "drill hole-to-hole vs an existing via\"""",
-     """                    + HOLE_TO_HOLE_CLEARANCE - 1e-6:
-                return "drill hole-to-hole vs an existing via\"""",
+     '                    + _h2h - 1e-6:',
+     '                    + HOLE_TO_HOLE_CLEARANCE - 1e-6:',
      (T756,), 'KILLED'),
 
     ('bga-pad-arm-reverted-to-the-flat-constant', 'bga',
-     """            if d < vdr + prad + _h2h - 1e-6:
-                return "drill hole-to-hole vs a pad drill\"""",
-     """            if d < vdr + prad + HOLE_TO_HOLE_CLEARANCE - 1e-6:
-                return "drill hole-to-hole vs a pad drill\"""",
+     '            if d < vdr + prad + _h2h - 1e-6:',
+     '            if d < vdr + prad + HOLE_TO_HOLE_CLEARANCE - 1e-6:',
      (T756, T370), 'KILLED'),
 
     ('bga-drops-the-fab-wrap', 'bga',
@@ -235,17 +269,30 @@ ROWS = [
      (T756, T370), 'KILLED'),
 
     ('bga-never-reads-the-board', 'bga',
-     '''        getattr(pcb_data, 'source_path', "") or "", 'hole_to_hole','''
-     '\n',
-     "        '', 'hole_to_hole',\n",
+     "        _h2h_decl, _h2h_src = _board_floor(_src_path, 'hole_to_hole', "
+     "None,\n                                           "
+     "HOLE_TO_HOLE_CLEARANCE)",
+     "        _h2h_decl, _h2h_src = HOLE_TO_HOLE_CLEARANCE, 'fixed default'",
+     (T756,), 'KILLED'),
+
+    # The HIGH finding a review caught: without this the GUI's unsaved board
+    # reads the process CWD's .kicad_pro as its own rules.
+    ('bga-cwd-probe-guard-dropped', 'bga',
+     '    if not _src_path or os.path.isdir(_src_path):',
+     '    if False:',
+     (T756,), 'KILLED'),
+
+    ('bga-announces-on-a-call-with-no-routes', 'bga',
+     "    if routes and _h2h_src == 'board constraint':",
+     "    if _h2h_src == 'board constraint':",
      (T756,), 'KILLED'),
 
     # The tidy-up #756 explicitly refused: charging the nudger's 0.45 pad-hole
-    # floor here too. It is a THIRD change with its own before/after, and the
-    # arm that pins the refusal must actually fire.
+    # floor here too. A THIRD change with its own before/after, and the arm
+    # that pins the refusal must actually fire.
     ('bga-pad-arm-adopts-the-nudgers-045', 'bga',
      '            if d < vdr + prad + _h2h - 1e-6:',
-     "            if d < vdr + prad + max(_h2h, 0.45) - 1e-6:",
+     '            if d < vdr + prad + max(_h2h, 0.45) - 1e-6:',
      (T756, T370), 'KILLED'),
 ]
 
@@ -276,15 +323,9 @@ def run(only=None):
             path = TARGETS[tgt]
             base = orig[tgt]
             edits = old if isinstance(old, list) else [(old, new)]
-            # Rows are written with LF. `base` is read with newline='' so the
-            # restore is byte-identical, which means a CRLF target never
-            # matches a multi-line anchor -- and reports BROKEN, which reads
-            # like a stale anchor and is really a line-ending mismatch. The
-            # first #756 run lost THREE bga rows to exactly this
-            # (bga_fanout/__init__.py is CRLF, fanout_clearance.py is LF), so
-            # the anchor is translated to the target's own ending here rather
-            # than every row being hand-written twice. BROKEN keeps its real
-            # meaning; the restore stays byte-identical.
+            # Rows are written with LF; `base` is read with newline='' so the
+            # restore is byte-identical. Translate rather than hand-write every
+            # row twice -- see the module docstring for what this cost once.
             if '\r\n' in base:
                 edits = [(o.replace('\n', '\r\n'), n.replace('\n', '\r\n'))
                          for o, n in edits]

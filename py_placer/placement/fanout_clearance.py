@@ -185,13 +185,24 @@ def resolve_cap_edge_clearance(pcb_file, explicit=None):
 def resolve_drill_floors(pcb_data):
     """The two DRILL-to-drill floors the via-nudge gates at (#756).
 
-    Returns ``(via_mm, pad_mm, declared, source)``:
+    Returns ``(via_mm, pad_mm, declared, source, fab_via, fab_pad)``:
 
       via_mm    via-drill <-> via-drill   (the nudger's ``H2H_VIA``)
       pad_mm    via-drill <-> pad-drill   (the nudger's ``H2H_PAD``)
       declared  the board's own ``min_hole_to_hole`` in mm, or None
       source    'board constraint' | 'fixed default' | 'unreadable project'
                 (`board_floor`'s vocabulary, minus 'cli' -- there is no flag)
+      fab_via   the fab floor the first two are raised FROM, and the second
+      fab_pad   rung of the caller's ladder
+
+    THE FAB TERMS ARE RETURNED, not recomputed by the caller, for two reasons
+    a review found the hard way. The nudger needs them as its FALLBACK rung --
+    it prefers the declared floor and re-sweeps at the fab one rather than
+    abandoning a repair -- and the disclosure has to compare against the
+    RESOLVED fab term rather than `defaults.HOLE_TO_HOLE_CLEARANCE`: with an
+    overrides file raising the fab hole-to-hole above the packaged 0.20, a
+    board declaring between the two was announced as having raised a floor the
+    fab override had actually won.
 
     Both floors were flat literals inside `nudge_vias_for_unresolved` --
     ``H2H_VIA = 0.2``, ``H2H_PAD = 0.45`` -- hand-copied from `fab_tiers` and
@@ -214,8 +225,14 @@ def resolve_drill_floors(pcb_data):
     There is no separate pad-hole board rule to read; ``min_hole_to_hole``
     governs any two holes, which is why `list_nets.effective_floors` floors
     both of its keys at it (:124-127). The 0.45 is a FAB floor only, and it is
-    why this pass stays 0.25mm STRICTER than its own grader on the pad arm.
-    #756 does not change that, deliberately.
+    why this pass is STRICTER than its own grader on the pad arm.
+
+    HOW MUCH stricter is ``max(d, 0.45) - max(0.20, d)``, which DECAYS: 0.25 at
+    a declaration of 0.20 or below, 0.15 at 0.30, and 0 at 0.45 and above. An
+    earlier draft said a flat "0.25mm, and #756 does not change that"; a review
+    measured it and both halves were wrong. #756 does change it, in the
+    direction of agreement with the grader, and only a board declaring nothing
+    keeps the full 0.25.
 
     RAISE-ONLY, in the code and not only in this docstring. `board_floor` is
     board-AUTHORITATIVE, not raise-only: its own docstring (list_nets.py
@@ -254,9 +271,17 @@ def resolve_drill_floors(pcb_data):
     `read_design_rules("")` probes ``".kicad_pro"`` RELATIVE TO THE PROCESS CWD
     (list_nets.py:156-157), so a stray file of that name would be read as this
     board's rules. `obstacle_map.resolve_hole_clearance` guards identically
-    (:1591-1593). The qfn/bga twins (qfn_fanout/__init__.py:362,
-    bga_fanout/underpad.py:672) do NOT; filed, not fixed here.
+    (its `if not path: return 0.0`). The qfn/bga twins
+    (qfn_fanout/__init__.py:362, bga_fanout/underpad.py:672) do NOT; filed, not
+    fixed here -- and `bga_fanout/__init__.py`'s `manage_vias`, which #756 also
+    touches, got the guard rather than joining them. Cited by expression rather
+    than by line number: an earlier draft named :1591-1593, which is prose at
+    both revisions, and the real guard has moved twice in this row already.
     """
+    # `os.path` only, and locally: this module's convention is to import
+    # py_router names inside the function body, and the isdir guard below
+    # is the only reason this function needs the stdlib one.
+    import os.path
     from fab_tiers import fab_floor_min
     # The SAME `.Cu` filter _Repair.__init__ applies to the SAME field, so the
     # two halves of this pass cannot disagree about the layer count -- and no
@@ -273,8 +298,14 @@ def resolve_drill_floors(pcb_data):
     # `pad_hole_to_hole`, so it is the wrong helper for this pair.)
     fab_via, fab_pad = fmin['hole_to_hole'], fmin['pad_hole_to_hole']
     path = getattr(pcb_data, 'source_path', "") or ""
-    if not path:
-        return fab_via, fab_pad, None, 'fixed default'
+    # `isdir` as well as empty: `board_floor` does `splitext(path)[0] +
+    # '.kicad_pro'`, so a DIRECTORY-shaped source_path ('.', './', any folder)
+    # reads that folder's project as this board's rules. Not reachable from
+    # `parse_kicad_pcb` or `build_pcb_data_from_board` -- both hand over an
+    # abspath to a file -- but the guard costs one stat and the failure it
+    # prevents is silent.
+    if not path or os.path.isdir(path):
+        return fab_via, fab_pad, None, 'fixed default', fab_via, fab_pad
     from list_nets import board_floor
     # fallback=None, NOT defaults.HOLE_TO_HOLE_CLEARANCE (the qfn/bga
     # spelling): `declared` has to mean "the board said this", or the caller's
@@ -282,8 +313,9 @@ def resolve_drill_floors(pcb_data):
     # declaration that does not exist.
     declared, src = board_floor(path, 'hole_to_hole', None, None)
     if declared is None:
-        return fab_via, fab_pad, None, src
-    return max(declared, fab_via), max(declared, fab_pad), declared, src
+        return fab_via, fab_pad, None, src, fab_via, fab_pad
+    return (max(declared, fab_via), max(declared, fab_pad), declared, src,
+            fab_via, fab_pad)
 
 
 def _via_radius(via, default_size=_UNREADABLE_VIA_SIZE) -> float:
@@ -758,23 +790,29 @@ class _Repair:
         # inside that function; this is the second instance and it is now
         # written down at BOTH ends rather than only at the far one.
         #
-        # RE-SCOPED BY #756, because as written above this reads as a rule
-        # about every floor in that function and it is not. It is a rule about
-        # a floor whose raise THE GRADER DOES NOT ALSO APPLY: refusing the one
-        # candidate then abandons a defect while inventing a refusal nobody
-        # else charges. Where check_drc raises too, the gate's strictness is
-        # not an invented refusal -- it is the pass declining to emit copper it
-        # would immediately be flagged for, and the honest trade is a visible
-        # "no clear spot" against silent sub-floor copper.
+        # STILL TRUE AFTER #756, and #756 is worth reading as the case that
+        # tested it rather than as an exception to it. That change wanted the
+        # via/via DRILL floor to follow the board's `min_hole_to_hole`, which
+        # is a raise on this very function -- and a one-rung raise was measured
+        # and REJECTED for exactly the reason stated above. A review swept 8673
+        # configurations of the pass's own rig shape: 625 lost the repair at the
+        # shipped 0.6mm budget, 13 of them where the abandoned landing was one
+        # `check_drc` grades CLEAN.
         #
-        # THE COPPER-TO-HOLE FLOORS STAY FLAT, both of them, and that is what
-        # keeps this an exception rather than an erosion: the via's own
-        # copper-to-NPTH gate already charges exactly what check_drc charges,
-        # and the CONNECTOR's is the measured, disclosed #617 under-block. The
-        # one floor #756 moved is the via/via DRILL gate, which was the only
-        # one in that function sitting strictly BELOW its own grader
-        # (check_drc `_pin_up`s hole_to_hole_clearance from min_hole_to_hole
-        # and both drill arms add it). See `resolve_drill_floors`.
+        # What shipped instead is a two-rung LADDER -- prefer the declared
+        # floor, fall back to the fab floor -- so that site simply STOPPED
+        # being all-or-nothing for that floor. The rule did not need bending;
+        # the site changed shape. Anything that collapses the ladder back to
+        # one rung re-enters this paragraph.
+        #
+        # An earlier draft of this note claimed the via/via drill gate was the
+        # only floor in that function sitting BELOW its own grader. A review
+        # refuted it: `check_drc` also `_pin_up`s `hole_clearance` from
+        # `min_hole_clearance` (:3697) while the CONNECTOR's copper-to-hole
+        # gate there stays flat, so on #617's own declaring rig the connector
+        # it emits grades as a 0.030mm violation. That gap is #617's measured,
+        # disclosed choice and is still open; it is not a counterexample to
+        # #756, and #756 is not a licence to close it by raising.
         #
         # One correction to how the divergence was first reported (#730's
         # thread): the two do NOT differ in both directions.
@@ -2825,25 +2863,41 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # were flat literals here -- `H2H_VIA = 0.2`, `H2H_PAD = 0.45` -- so on a
     # board declaring `min_hole_to_hole` ABOVE the JLC floor this pass parked a
     # relocated via at 0.20 while check_drc graded the same pair at the
-    # declared value. Not a difference of opinion with the checker: the via/via
-    # gate was the ONE floor in this function sitting strictly BELOW what the
-    # grader charges (`_pin_up`, check_drc.py:3686, feeding BOTH drill arms --
+    # declared value (`_pin_up`, check_drc.py:3686, feeding BOTH drill arms --
     # via/via :2605, pad/via :2667). See resolve_drill_floors.
+    #
+    # NOT THE ONLY SUCH FLOOR, and an earlier draft of this comment claimed it
+    # was. A review refuted that by measurement: the CONNECTOR's copper-to-hole
+    # gate is flat at `max(clearance, NPTH_TO_TRACK_CLEARANCE)` while check_drc
+    # `_pin_up`s `hole_clearance` from the board's `min_hole_clearance`
+    # (check_drc.py:3697) and both its copper-to-hole arms add it -- so on the
+    # #617 rig's own declaring board, the connector this pass emits grades as a
+    # 0.030mm copper-to-hole violation. That floor stays flat here, by #617's
+    # measurement, and it is a KNOWN gap rather than a refutation of this one.
+    # What is true of the via/via drill gate is narrower: it was below its
+    # grader AND, unlike the connector's, it can be raised without cost --
+    # because of the ladder below.
     #
     # BELOW the early return on purpose: a call with nothing unresolved now
     # reads no project and prints nothing.
     #
-    # THE NAMES AND BOTH GATES ARE UNCHANGED. Only the right-hand side moved;
-    # `vdr + prad + H2H_PAD` and `vdr + ovdr + H2H_VIA` below stay
-    # byte-identical, which is what keeps tests/mutate_750.py's expression rows
-    # APPLYING -- a `str.replace` whose needle stops matching returns the file
-    # unchanged and the battery then reports SURVIVED for a mutation it never
-    # made.
+    # THE NAMES AND BOTH GATE EXPRESSIONS ARE UNCHANGED, so
+    # tests/mutate_750.py's rows keep APPLYING: a `str.replace` whose needle
+    # stops matching returns the file unchanged, and the battery then reports
+    # SURVIVED for a mutation it never made.
+    #
+    # WHICH IS WHY THIS COMMENT DOES NOT QUOTE THEM. An earlier draft spelled
+    # both gate expressions out here to explain the point, and thereby took
+    # each of mutate_750's anchors from one occurrence to two -- four of its
+    # rows went BROKEN, and it exits 0, so it was silent. Exactly the failure
+    # the paragraph above describes, committed by the paragraph itself. Refer
+    # to the gates by name and by line, never by their text.
     #
     # THIS IS NOT THE RAISE #617 REFUSED, and the two do not touch the same
     # gate. #617 measured the CONNECTOR's COPPER-to-hole floor on a rig
-    # carrying ONE via -- `if ov is v: continue` fires, so the via/via gate
-    # never executes there at all -- and that rig declares `min_hole_clearance`,
+    # carrying ONE via -- the self-skip at the top of the board_via_drills
+    # loop fires, so the via/via gate never executes there at all -- and that
+    # rig declares `min_hole_clearance`,
     # a different key. Read the note beside `npth_clr` below, and the amended
     # asymmetry note at _Repair.__init__, before assuming this erodes either.
     #
@@ -2865,19 +2919,68 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # not is that warning reached from the emitting side. So charge D. Measured
     # above: the 0.2400 row, which sits inside that band at D=0.25, keeps its
     # repair even at the squeezed budget.
-    H2H_VIA, H2H_PAD, _h2h_decl, _h2h_src = resolve_drill_floors(pcb_data)
+    _h2h_via, _h2h_pad, _h2h_decl, _h2h_src, _fab_via, _fab_pad = \
+        resolve_drill_floors(pcb_data)
+
+    # THE LADDER, and it is the whole reason this is safe. Rung 1 is what the
+    # board asks for; rung 2 is the fab floor, i.e. EXACTLY what shipped before
+    # #756. The sweep below tries rung 1 in full and only descends when it
+    # returns nothing, so the pass CANNOT lose a repair it used to make -- the
+    # fallback is the old behaviour, unchanged, reached by construction rather
+    # than by argument.
+    #
+    # That matters because the plain raise was measured and it DID cost
+    # repairs. A review swept 8673 configurations of this pass's own rig shape
+    # (cap bar below, offending via, same-net neighbour above) at the shipped
+    # 0.6mm budget: 625 lost the repair, and 13 of those had a flat landing
+    # `check_drc` grades CLEAN -- the raise printing "no clear spot" while
+    # leaving a violation the flat floor had CURED. One measured case: flat
+    # relocated the barrel and graded 0 violations; raised abandoned it and
+    # graded 2, including the 0.220mm hole-to-hole the move had been fixing.
+    # The mechanism is the search order -- r ascending, then angle, FIRST
+    # accept wins -- so the accepted landing is the WORST legal one, and when
+    # the escape is bounded the whole reachable set can sit inside the band.
+    #
+    # The ladder dissolves that class rather than disclosing it. It also
+    # retires the objection this change had to answer at all: the pass is no
+    # longer ALL-OR-NOTHING for this floor, which is the property
+    # `obstacle_map.resolve_hole_clearance` and `_Repair.__init__` both warn
+    # about, so the doctrine is not bent -- it stops applying.
+    #
+    # Rung 2 is omitted when it would be identical, so a board that declares
+    # nothing sweeps exactly once and is byte-identical in work as well as in
+    # result.
+    drill_ladder = [(_h2h_via, _h2h_pad)]
+    if (_h2h_via, _h2h_pad) != (_fab_via, _fab_pad):
+        drill_ladder.append((_fab_via, _fab_pad))
+
     if _h2h_src == 'board constraint' and \
-            _h2h_decl > defaults.HOLE_TO_HOLE_CLEARANCE:
-        print(f"  via-nudge drill floors: via-hole {H2H_VIA:g}mm, pad-hole "
-              f"{H2H_PAD:g}mm (from the board's own min_hole_to_hole)")
-    elif _h2h_src == 'board constraint' and _h2h_decl < H2H_VIA:
-        # `_h2h_decl < H2H_VIA` IS `_h2h_decl < the fab floor`, since H2H_VIA
-        # is the max of the two -- the qfn spelling with the fab term
-        # substituted by its equal, so the resolver need not return a fifth
-        # value. Never SILENTLY relaxed: a board file cannot lower a fab floor
-        # without saying so.
+            (_h2h_via > _fab_via or _h2h_pad > _fab_pad):
+        # The board raised at least one of the two. Name BOTH resolved floors
+        # and say which of them the board actually moved, because on a typical
+        # declaration (0.20 < d <= 0.45) only the via one moves and the pad one
+        # is still the fab number -- an earlier draft printed both under "from
+        # the board's own min_hole_to_hole" and a review called that out as
+        # attributing a fab floor to the board.
+        _moved = ' and '.join(
+            [n for n, a, b in (('via-hole', _h2h_via, _fab_via),
+                               ('pad-hole', _h2h_pad, _fab_pad)) if a > b])
+        print(f"  via-nudge drill floors: via-hole {_h2h_via:g}mm, pad-hole "
+              f"{_h2h_pad:g}mm; the board's own min_hole_to_hole "
+              f"{_h2h_decl:g}mm raised {_moved} (fab floor "
+              f"{_fab_via:g}/{_fab_pad:g}), and is PREFERRED -- the fab floor "
+              f"is still tried if nothing clears at it")
+    elif _h2h_src == 'board constraint' and _h2h_decl < _fab_via:
+        # Against the RESOLVED fab term, not the packaged default. A review
+        # measured the difference: with an overrides file raising the fab
+        # hole-to-hole to 0.30 and a board declaring 0.25, the old spelling
+        # took the `if` branch and announced 0.30 as coming "from the board's
+        # own min_hole_to_hole" -- the fab override had won and the board had
+        # lost, and the transcript said the opposite. Never SILENTLY relaxed
+        # either: a board file cannot lower a fab floor without saying so.
         print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "
-              f"{H2H_VIA:g}mm fab hole-to-hole floor; using {H2H_VIA:g}mm.")
+              f"{_fab_via:g}mm fab hole-to-hole floor; using "
+              f"{_fab_via:g}/{_fab_pad:g}.")
     # Printed only when the number is NOT the packaged default, which is the
     # qfn/bga convention and deliberately not `resolve_cap_edge_clearance`'s
     # unconditional one a few hundred lines above. Both conventions live in
@@ -3527,20 +3630,46 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                 if _point_in_poly(v.x, v.y, z.polygon) and z.layer not in conn_layers:
                     conn_layers[z.layer] = (min(conn_layers.values()) if conn_layers
                                             else defaults.TRACK_WIDTH)
+            # #756: TWO RUNGS, not one. `drill_ladder` is [declared] or
+            # [declared, fab]; `H2H_VIA`/`H2H_PAD` are rebound per rung and the
+            # two gates below read them as closure variables, so the whole
+            # sweep re-runs at the looser floor only when the tighter one
+            # cleared nothing. Rung 2 IS the pre-#756 behaviour, which is what
+            # makes this incapable of losing a repair -- see the ladder comment
+            # at the top of this function for the 8673-configuration sweep that
+            # made a one-rung raise unacceptable.
+            #
+            # DO NOT COLLAPSE THESE INTO ONE PASS AT max(...) OR min(...).
+            # max() is the one-rung raise this replaced. min() would take the
+            # fab floor always and make the declaration inert. The point is
+            # ORDER: prefer the board, keep the repair.
             found = None
-            r = 0.05
-            while found is None and r <= max_shift + 1e-9:
-                for k in range(16):
-                    ang = k * math.pi / 8
-                    nx = round(v.x + r * math.cos(ang), 4)
-                    ny = round(v.y + r * math.sin(ang), 4)
-                    if not valid_via_pos(v, nx, ny):
-                        continue
-                    if all(connector_clear(v.net_id, layer, w, v.x, v.y, nx, ny)
-                           for layer, w in conn_layers.items()):
-                        found = (nx, ny)
-                        break
-                r += 0.05
+            for H2H_VIA, H2H_PAD in drill_ladder:
+                r = 0.05
+                while found is None and r <= max_shift + 1e-9:
+                    for k in range(16):
+                        ang = k * math.pi / 8
+                        nx = round(v.x + r * math.cos(ang), 4)
+                        ny = round(v.y + r * math.sin(ang), 4)
+                        if not valid_via_pos(v, nx, ny):
+                            continue
+                        if all(connector_clear(v.net_id, layer, w,
+                                               v.x, v.y, nx, ny)
+                               for layer, w in conn_layers.items()):
+                            found = (nx, ny)
+                            break
+                    r += 0.05
+                if found is not None:
+                    if (H2H_VIA, H2H_PAD) != drill_ladder[0]:
+                        # Said out loud: the board asked for more than this
+                        # landing gives, and the pass took the landing rather
+                        # than the refusal. An operator who cares can widen
+                        # --max-displacement or move the neighbour.
+                        print(f"  via-nudge: no spot cleared the board's "
+                              f"{_h2h_decl:g}mm min_hole_to_hole for {ref}'s "
+                              f"via at ({v.x:.2f}, {v.y:.2f}); fell back to "
+                              f"the {H2H_VIA:g}mm fab floor")
+                    break
             if found is None:
                 print(f"  via-nudge: no clear spot for {ref}'s offending via "
                       f"at ({v.x:.2f}, {v.y:.2f}) within {max_shift}mm")

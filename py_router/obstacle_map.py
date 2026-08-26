@@ -1576,27 +1576,30 @@ def resolve_hole_clearance(pcb_data: PCBData, config,
       place; a #130 pad-via graze left unrelocated) rather than routing around
       the hole.
 
-      **Scoped by #756, and the scope is the whole argument.** This bullet is
-      about THE COPPER-TO-HOLE FLOOR -- this helper's own value, keyed on
-      ``min_hole_clearance`` -- and it still holds for it: both of that
-      function's copper-to-hole gates stay flat. It is NOT a rule about every
-      floor in that function, and reading it as one is how it was nearly cited
-      against a fix it does not cover. #756 raised the via-DRILL-to-via-DRILL
-      floor there from a hardcoded 0.20 to the board's own ``min_hole_to_hole``
-      (a different key, ``list_nets._FLOOR_SOURCES``' ``hole_to_hole``),
-      because ``check_drc`` ``_pin_up``s exactly that value and both of its
-      drill arms add it -- so the gate was the one floor in that function
-      sitting strictly BELOW what the grader charges, and the copper it
-      declined to refuse was copper the grader then flagged.
+      **This bullet survived #756, which tried to raise a floor there and
+      found out why not.** That change wanted
+      ``nudge_vias_for_unresolved``'s via-DRILL-to-via-DRILL floor to follow
+      the board's ``min_hole_to_hole`` (a different key from this helper's --
+      ``list_nets._FLOOR_SOURCES``' ``hole_to_hole`` rather than
+      ``hole_clearance``), because ``check_drc`` ``_pin_up``s exactly that
+      value and both of its drill arms add it, so the pass was emitting drill
+      pairs its own grader then flagged.
 
-      The distinguishing test is not "does refusing abandon a repair" -- it
-      does, sometimes, either way -- but **does the grader raise this floor
-      too**. Where it does not, a raise invents a refusal nobody else charges;
-      where it does, the refusal is the pass declining to emit copper that
-      would come back flagged. Measured for #756 on a purpose-built rig: at the
-      shipped 0.6 mm budget the raise cost ZERO repairs (the landing moved
-      instead), and squeezed to 0.15 mm the single repair it did cost was the
-      one whose flat landing ``check_drc`` flags.
+      A ONE-RUNG RAISE WAS MEASURED AND REJECTED, by this bullet's own
+      argument: a review swept 8673 configurations of that pass's rig shape and
+      625 lost the repair at the shipped 0.6 mm budget, 13 of them abandoning a
+      landing ``check_drc`` grades CLEAN. What shipped is a two-rung ladder --
+      prefer the declared floor, re-sweep at the fab floor when nothing clears
+      -- whose second rung is the pre-#756 behaviour exactly. So the site
+      stopped being all-or-nothing for that floor rather than the rule being
+      bent for it, and the copper-to-hole floors this helper serves are
+      untouched and still flat.
+
+      **The lesson to carry, and it cost two reviews to get right:** "the
+      grader raises this floor too" is a reason to WANT a raise, never on its
+      own a licence to take one here. The question this bullet asks -- what
+      happens when the one candidate is refused -- still has to be answered,
+      and a ladder is how you answer it without giving up either.
     * ``placement/legality.PartPads`` builds its NPTH keep-out radii from a bare
       ``fp``/``clearance`` pair with no board pointer in hand. **#761 threaded
       the parameter rather than the board**: ``legality.resolve_npth_floor``

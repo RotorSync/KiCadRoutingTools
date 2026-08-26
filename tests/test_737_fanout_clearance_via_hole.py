@@ -173,7 +173,11 @@ from placement.fanout_clearance import nudge_vias_for_unresolved
 CLEAR = 0.1                    # the VIA gate's floor, and check_drc's
                                # -> npth_clr 0.20, the SIBLING's floor
 NPTH_FLOOR = defaults.NPTH_TO_TRACK_CLEARANCE       # 0.20
-H2H_PAD = 0.45                 # the function's own literal, mirrored here
+# Hand-mirrored: since #756 the engine's H2H_PAD is `resolve_drill_floors`'
+# answer on a project-less board (what every rig here builds), not a
+# literal. The guard below calls the resolver and compares; it stays
+# hand-written so the thresholds cannot track a moved value in silence.
+H2H_PAD = 0.45
 V_SIZE, V_DRILL = 1.4, 0.3     # vr 0.70, ring 0.55 -- past the masking bound
 VR = V_SIZE / 2.0
 H_DRILL = 1.0                  # hr 0.50
