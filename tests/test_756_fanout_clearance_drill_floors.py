@@ -69,7 +69,67 @@ gate, so the engine's own epsilon was their entire margin; nothing exercised the
 and nothing drove the PAD gate with a board-raised floor, so the pad half of the
 resolver was a return value nobody spent.
 
-MUTATION_TABLE_PLACEHOLDER
+MUTATION BATTERY, 31 rows across TWO targets: 31 KILLED, 0 survived, 0 broken.
+The counts make the `# MUTATION:` notes checkable rather than decorative, so
+they are recorded here and the battery ships as `tests/mutate_756.py`:
+
+    pad-floor-reads-the-VIA-fab-key                    22 assertions
+    via-floor-reads-the-PAD-fab-key                    18
+    resolver-hard-wired-to-the-old-literals            12  the source-guard evasion
+    h2h-via-gate-deleted                               11  + perturbs test_750
+    resolver-never-reads-the-board                     10  THE DEFECT
+    via-loop-self-skip-deleted                          6
+    resolver-drops-the-fab-wrap                         4
+    resolver-drops-the-fab-wrap-on-the-PAD-arm-only     4
+    ladder-collapsed-to-the-fab-rung-only               4      ladder-order-reversed                               4   |  THE LADDER: each
+    ladder-collapsed-to-the-declared-rung-only          3   |  restores the class
+    sweep-does-not-descend-the-ladder                   2  /   #756 rejected
+    bga-pad-arm-adopts-the-nudgers-045                  4  the refused tidy-up
+    pad-gate-charges-the-VIA-floor                      3
+    bga-never-reads-the-board                           3
+    resolver-deaf-to-the-fab-tier-and-overrides         2  had NO test before
+    disclosure-fires-at-the-packaged-default-too        2
+    bga-pad-arm-reverted-to-the-flat-constant           2
+    resolver-drops-the-fab-wrap-on-the-VIA-arm-only     1
+    cwd-probe-guard-dropped                             1
+    cwd-probe-guard-keeps-empty-but-drops-isdir         1
+    fallback-passed-instead-of-None                     1
+    raised-disclosure-deleted                           1
+    raised-disclosure-swaps-its-two-floors              1  had NO test before
+    below-fab-disclosure-deleted                        1
+    below-fab-disclosure-names-the-declared-value...    1  had NO test before
+    fallback-is-silent                                  1
+    bga-via-arm-reverted-to-the-flat-constant           1  had NO test before
+    bga-drops-the-fab-wrap                              1  had NO test before
+    bga-cwd-probe-guard-dropped                         1  the HIGH finding
+    bga-announces-on-a-call-with-no-routes              1
+
+NO EXPECTED SURVIVORS, unlike the sibling batteries -- and that is a change from
+the first #756 run, which had two. Both described the old one-rung shape (an
+assignment that could be moved above the early return; a layer bucket that could
+be forced) and neither mutation exists against the ladder. The layer-count
+inertness is still recorded, as an assertion in `TestTheLayerCountChoice` rather
+than as a row.
+
+THE BATTERY FOUND SIX DEFECTS IN THIS FILE AND IN ITSELF, corrected in place
+rather than quietly fixed, because that is what the counts are evidence of:
+
+  * THREE bga rows reported BROKEN -- `bga_fanout/__init__.py` is CRLF while
+    `fanout_clearance.py` is LF, and the runner reads with `newline=''` so the
+    restore is byte-identical. An LF anchor matched zero times. The runner now
+    translates the anchor to the target's own ending; BROKEN keeps meaning
+    "stale anchor".
+  * `bga-drops-the-fab-wrap` SURVIVED: `manage_vias` hands `board_floor`
+    HOLE_TO_HOLE_CLEARANCE as its FALLBACK, so only a sub-fab declaration
+    exercises the wrap and no arm made one.
+  * `bga-via-arm-reverted-to-the-flat-constant` SURVIVED: of that function's
+    TWO drill arms the rig only ever presented a PAD drill.
+  * `bga-announces-on-a-call-with-no-routes` SURVIVED: the arm passed an
+    UNDECLARED board, so the branch short-circuits before the `routes` term and
+    removing it changes nothing.
+  * `assignment-moved-back-above-the-early-return` was KILLED against its
+    expectation, because the row INSERTED a second assignment rather than
+    moving the one that was there.
 
 Runs in-process; ~40-90 s depending on the machine and on contention (the ladder
 sweep dominates). The only shelling out is one `git ls-files`.
@@ -680,6 +740,29 @@ class TestTheFabTierChannel(unittest.TestCase):
         fab_tiers.set_default_fab_tier('standard', {'hole_to_hole': 0.05})
         self.assertEqual(resolve_drill_floors(_projectless())[0], 0.05)
     # MUTATION: a max() against the packaged default added "for safety". 1 row.
+
+
+class TestTheLayerCountChoice(unittest.TestCase):
+    """The resolver picks a fab bucket by copper-layer count. Today it cannot
+    be wrong about it, and that is worth ASSERTING rather than narrating."""
+
+    def test_the_layer_count_cannot_change_either_floor_TODAY(self):
+        """A CHANGE DETECTOR, not a wiring test. `_FAB_FLOORS` carries 0.20 and
+        0.45 in all four cells, and `fab_floor_ladder` overlays a
+        LAYER-INDEPENDENT override dict, so `fab_floor_min(n)[k]` is
+        n-independent for both keys under every tier and every override file.
+        The resolver therefore reads `board_info.copper_layers` for a bucket it
+        cannot currently mis-pick -- and this arm is what turns a future
+        per-layer hole floor into a failure instead of a silent mis-bucket."""
+        for k in ('hole_to_hole', 'pad_hole_to_hole'):
+            self.assertEqual(fab_floor_min(2)[k], fab_floor_min(4)[k],
+                             '%s now differs by layer bucket; re-read '
+                             "resolve_drill_floors' layer-count choice, and "
+                             'note that the two halves of the pass derive it '
+                             'separately' % k)
+    # MUTATION: none in the battery, and that is a disclosure rather than an
+    # omission -- it guards a `fab_tiers` table #756 does not touch, so no edit
+    # to the code under test can move it.
 
 
 class TestTheLadderIsNotCollapsible(unittest.TestCase):
