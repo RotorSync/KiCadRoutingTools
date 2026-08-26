@@ -46,11 +46,35 @@ def test_windows_versioned_layout_sorts_newest_first():
 
 
 def test_candidates_cover_the_real_windows_install():
-    """The versioned glob and both Program Files roots are searched."""
-    src = kef.kicad_python_candidates.__doc__ + \
-        open(kef.__file__, encoding='utf-8').read()
-    assert 'Program Files (x86)' in src
-    assert "'*', 'bin'" in src or '*\\bin' in src
+    """The versioned layout and both Program Files roots are searched.
+
+    This asserted the module SOURCE contained 'Program Files (x86)' and a
+    `'*', 'bin'` glob. That is a prose scan: it passes just as happily when the
+    strings sit in a comment, and it broke the moment #763 moved the platform
+    knowledge into `kicad_locate` -- while the behaviour it named was intact.
+    Asserted behaviourally now, against a simulated Windows tree, which also
+    covers the drives the old wording could not describe.
+    """
+    import kicad_locate as kl
+
+    tree = {r'C:\Program Files', r'C:\Program Files\KiCad',
+            r'C:\Program Files\KiCad\10.0', r'C:\Program Files\KiCad\10.0\bin',
+            r'C:\Program Files (x86)', r'C:\Program Files (x86)\KiCad',
+            r'C:\Program Files (x86)\KiCad\9.0'}
+    got = kl.kicad_python_candidates(
+        system='Windows', environ={'ProgramFiles': r'C:\Program Files',
+                                   'ProgramFiles(x86)': r'C:\Program Files (x86)'},
+        globber=lambda pat: sorted(
+            d for d in tree
+            if len(d.split('\\')) == len(pat.split('\\'))
+            and all(a == b or b == '*'
+                    for a, b in zip(d.split('\\'), pat.split('\\')))),
+        isdir=lambda p: p in tree, drives=[], winreg_mod=False)
+    assert r'C:\Program Files\KiCad\10.0\bin\python.exe' in got, got
+    assert r'C:\Program Files (x86)\KiCad\9.0\bin\python.exe' in got, got
+    # ...and the newest version comes first, or a KiCad 10 user is handed 9.
+    assert got.index(r'C:\Program Files\KiCad\10.0\bin\python.exe') < \
+        got.index(r'C:\Program Files (x86)\KiCad\9.0\bin\python.exe'), got
     # sys.executable is a candidate: under the GUI plugin, THIS interpreter is
     # KiCad's python and needs no search at all.
     assert sys.executable in kef.kicad_python_candidates()

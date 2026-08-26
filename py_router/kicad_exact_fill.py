@@ -31,7 +31,6 @@ reason (not just the symptom) when falling back.
 """
 from __future__ import annotations
 
-import glob
 import os
 import re
 import shutil
@@ -39,6 +38,8 @@ import subprocess
 import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple
+
+import kicad_locate
 
 EXACT_FILL_TIMEOUT = 300
 
@@ -158,15 +159,12 @@ def _win_version_key(path: str):
     <ver>. Plain string sorting orders "9.0" above "10.0", which would hand a
     KiCad 10 user their old KiCad 9 interpreter.
 
-    Matches BOTH separators instead of using os.path: off-Windows,
-    os.path.dirname does not split a backslash path, so an os.path-based key
-    collapses to a constant -- correct on the only platform that matters, and
-    untestable everywhere else.
+    Thin wrapper over kicad_locate.path_version_key (#763 moved the platform
+    knowledge to ONE module); kept because it is this module's published name
+    for the key and is pinned by tests. `(0,)` rather than `()` for an
+    unversioned path, preserving the original ordering contract.
     """
-    m = re.search(r'[\\/]KiCad[\\/]([0-9][0-9.]*)[\\/]', path)
-    if not m:
-        return (0,)
-    return tuple(int(p) for p in re.findall(r'\d+', m.group(1))) or (0,)
+    return kicad_locate.path_version_key(path) or (0,)
 
 
 def _this_interpreter() -> str:
@@ -212,48 +210,23 @@ def kicad_python_candidates() -> List[str]:
     `py_tools/validate_pcb_data`) so a platform's install layout is described
     ONCE. Each caller still verifies -- they want different modules (pcbnew
     here, pcbnew + wx for the GUI launchers).
+
+    The platform layouts themselves live in `kicad_locate` (#763): they were
+    duplicated here and in install_plugin.py, and BOTH copies hardcoded drive
+    C:, so a KiCad on D: was invisible to every consumer. `_this_interpreter()`
+    stays here -- it is about THIS process (the GUI's pcbnew host binary), not
+    about where KiCad is installed.
     """
-    cands = [os.environ.get('KICAD_PYTHON') or '',
-             # THIS interpreter, when it is already KiCad's python (the GUI
-             # plugin) or a Linux system python with pcbnew installed.
-             # _this_interpreter(), NOT sys.executable: in the GUI the latter
-             # is the pcbnew HOST BINARY and spawning it opens the app instead
-             # of running a script (see _this_interpreter's docstring).
-             _this_interpreter(),
-             "/Applications/KiCad/KiCad.app/Contents/Frameworks/"
-             "Python.framework/Versions/Current/bin/python3"]
-    # Windows installs into a VERSIONED directory
-    # (C:\Program Files\KiCad\10.0\bin\python.exe). The unversioned path
-    # kept below exists on no KiCad >= 6, so globbing is the only thing that
-    # finds a real Windows install -- without it find_kicad_python() returned
-    # None for EVERY Windows user and every exact-fill consumer silently
-    # degraded to its raster approximation (#647).
-    for base in (r"C:\Program Files\KiCad", r"C:\Program Files (x86)\KiCad"):
-        base = os.path.expandvars(base)
-        cands.extend(sorted(glob.glob(os.path.join(base, '*', 'bin',
-                                                   'python.exe')),
-                            key=_win_version_key, reverse=True))
-        cands.append(os.path.join(base, 'bin', 'python.exe'))
-    cands.append("/usr/bin/python3")  # Linux distro KiCad ships pcbnew here
-    seen, out = set(), []
-    for c in cands:
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    return kicad_locate.kicad_python_candidates(
+        # THIS interpreter, when it is already KiCad's python (the GUI plugin)
+        # or a Linux system python with pcbnew installed. _this_interpreter(),
+        # NOT sys.executable: in the GUI the latter is the pcbnew HOST BINARY
+        # and spawning it opens the app instead of running a script (see
+        # _this_interpreter's docstring).
+        this_interpreter=_this_interpreter())
 
 
 _KICAD_PYTHON_MEMO: List[Optional[str]] = []
-
-
-def _windows_versioned_pythons():
-    """Standard Windows installs are VERSIONED (C:\\Program Files\\KiCad\\
-    10.0\\bin\\python.exe); the versionless path above matches none of them,
-    which silently disabled every exact-fill consumer on Windows. Newest
-    version first."""
-    import glob
-    return sorted(glob.glob(r"C:\Program Files\KiCad\*\bin\python.exe"),
-                  reverse=True)
 
 
 def find_kicad_python() -> Optional[str]:
