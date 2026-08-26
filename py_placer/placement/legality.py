@@ -1671,7 +1671,15 @@ class PartPads:
         self.holes_req = []     # ...and the REQUIREMENT each one resolved to (#761)
         self.pad_floors = []    # PadFloor per copper pad, index-aligned (#697)
         self.max_floor = 0.0    # upper bound on this part's pad requirements
-        _npth_floor = (defaults.NPTH_TO_TRACK_CLEARANCE if npth_floor is None
+        # `copper_holes` gates the BOARD floor exactly as it gates the
+        # pad's own override, and for the same reason: a declared
+        # `min_hole_clearance` is a COPPER rule, and KiCad has no silk-to-hole
+        # rule at all. Gating only the override left silk taking the board's
+        # copper declaration -- caught by this change's own silk arm, which is
+        # why that arm asserts against an OFFERED floor rather than merely
+        # against the default.
+        _npth_floor = (defaults.NPTH_TO_TRACK_CLEARANCE
+                       if (npth_floor is None or not copper_holes)
                        else max(defaults.NPTH_TO_TRACK_CLEARANCE,
                                 float(npth_floor)))
         for p in fp.pads:
@@ -1689,7 +1697,7 @@ class PartPads:
                 # `_pair_or_flat` (an NPTH tuple files floor `None`, so it
                 # hands back the flat scalar, fanout_clearance.py:894/1306),
                 # and labels.py by comparing against `silk_pad_clearance`
-                # (labels.py:391). legality compared this circle against RAW
+                # (labels.py:394). legality compared this circle against RAW
                 # pad rects and added nothing, so its modelled standoff was
                 # `max(0, requirement - clearance)` -- which collapses to ZERO
                 # once `clearance` reaches the requirement, at 0.20 for a plain
@@ -1846,7 +1854,7 @@ class PartPads:
 
         A copper consumer wants `hole_keepouts` instead. This accessor exists
         for the caller that adds its own term at its own gap test: labels.py
-        (silk, `< config.silk_pad_clearance`, labels.py:391).
+        (silk, `< config.silk_pad_clearance`, labels.py:394).
         """
         key = self._delta_key(rot)
         cache = self._hole_cache.get(key)
