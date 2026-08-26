@@ -683,10 +683,12 @@ class TestSilkAndExtentsDoNotMove(unittest.TestCase):
                     [round(H_DRILL / 2.0
                            + max(0.0, NPTH_FLOOR - clearance), 9)])
                 # ...and no board floor either, even when one is OFFERED.
-                # Offered, not merely defaulted: the first version of the
-                # engine change gated only the pad override on `copper_holes`
-                # and let silk take the board's declared copper rule, and an
-                # arm that passed `None` here would have missed it.
+                # Offered, not merely defaulted, and the distinction is the
+                # whole arm: `labels.py` -- the only `copper_holes=False`
+                # caller in the tree -- passes NO floor, so the default path
+                # is silent about the branch. This is a latent hole for a
+                # future silk caller, not a shipped defect; silk output is
+                # byte-identical across the whole of #761.
                 self.assertEqual(
                     [round(r, 9) for _x, _y, r in silk.holes_local],
                     [round(r, 9) for _x, _y, r in

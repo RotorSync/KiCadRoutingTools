@@ -1690,10 +1690,18 @@ class PartPads:
         # `copper_holes` gates the BOARD floor exactly as it gates the
         # pad's own override, and for the same reason: a declared
         # `min_hole_clearance` is a COPPER rule, and KiCad has no silk-to-hole
-        # rule at all. Gating only the override left silk taking the board's
-        # copper declaration -- caught by this change's own silk arm, which is
-        # why that arm asserts against an OFFERED floor rather than merely
-        # against the default.
+        # rule at all.
+        #
+        # It is HARDENING, not a defect fix, and the commit that added it
+        # (#761) claimed otherwise -- corrected here rather than left
+        # standing. `labels.py:303`, the only `copper_holes=False` caller,
+        # passes no `npth_floor` at all, so silk took the flat fab floor with
+        # or without this gate; measured, silk output is byte-identical across
+        # the whole change. What the silk arm caught is a latent hole that any
+        # future silk caller supplying a floor would fall into, which is worth
+        # closing but is not what the commit said it was.  The arm still
+        # asserts against an OFFERED floor rather than the default, because
+        # that is the only way to see this branch at all.
         _npth_floor = (defaults.NPTH_TO_TRACK_CLEARANCE
                        if (npth_floor is None or not copper_holes)
                        else max(defaults.NPTH_TO_TRACK_CLEARANCE,
