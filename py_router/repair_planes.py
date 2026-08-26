@@ -44,7 +44,8 @@ from startup_checks import exit_on_error_if_main
 exit_on_error_if_main(__name__)
 
 from kicad_parser import parse_kicad_pcb, PCBData, Segment, Via, KICAD_10_MIN_VERSION, pad_is_plated_through
-from kicad_writer import generate_segment_sexpr, generate_gr_line_sexpr, generate_via_sexpr
+from kicad_writer import (generate_segment_sexpr, generate_gr_line_sexpr,
+                          generate_via_sexpr, via_net_name)
 from routing_config import GridRouteConfig
 from plane_io import extract_zones
 from plane_region_connector import (route_disconnected_regions,
@@ -3206,7 +3207,6 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
         from kicad_writer import prevailing_via_protection_in_text
         _default_via_attrs = prevailing_via_protection_in_text(content)
         for via in vias:
-            via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
             sexpr = generate_via_sexpr(
                 x=via['x'],
                 y=via['y'],
@@ -3214,7 +3214,10 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
                 drill=via['drill'],
                 layers=['F.Cu', 'B.Cu'],  # Through-hole vias
                 net_id=via['net_id'],
-                net_name=via_net_name,
+                # #749 D: the ONE resolver -- net 0 is absent from every map,
+                # and a numeric ref emitted alongside a spec used to be a via
+                # the parser could not read back at all (#748).
+                net_name=via_net_name(via['net_id'], net_id_to_name),
                 tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
             )
             via_sexprs.append(sexpr)

@@ -4030,7 +4030,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _vi666 = [
                         {'x': v.x, 'y': v.y, 'size': v.size,
                          'drill': v.drill, 'layers': v.layers,
-                         'net_id': v.net_id}
+                         'net_id': v.net_id,
+                         # #749 A: these are PRE-EXISTING vias -- copper the
+                         # model still holds and the write dropped -- so they
+                         # carry their own protection back, and one that had
+                         # none keeps INHERITING the board's `(setup ...)`
+                         # rather than gaining the prevailing spec on the way
+                         # in. Without both keys a re-emitted via-in-pad ships
+                         # tented instead of filled+capped+plated.
+                         'tenting_attrs': dict(
+                             getattr(v, 'tenting_attrs', None) or {}),
+                         'inherit_when_unspecified': True}
                         for _, _, _mv in _lost666 for v in _mv]
                     import tempfile as _tf666, shutil as _sh666
                     _fd666, _tmp666 = _tf666.mkstemp(suffix='.kicad_pcb')

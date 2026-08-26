@@ -1526,7 +1526,8 @@ def oracle_reconnect(board_file: str, net_names, config,
     """
     from dataclasses import replace
     from kicad_parser import parse_kicad_pcb, is_kicad_10
-    from kicad_writer import generate_segment_sexpr, generate_via_sexpr
+    from kicad_writer import (generate_segment_sexpr, generate_via_sexpr,
+                              prevailing_via_protection_in_text)
     from plane_region_connector import (build_base_obstacles,
                                         route_plane_connection_wide)
 
@@ -1817,6 +1818,14 @@ def oracle_reconnect(board_file: str, net_names, config,
         with open(board_file, 'r', encoding='utf-8') as f:
             content = f.read()
         v10 = is_kicad_10(content)
+        # #749 B: every via the oracle emits below -- the exact-fill strap weld,
+        # the escalated/sliver weld, the main link route -- is NEW copper, and
+        # all three passed no spec at all, so each got the writer's hardcoded
+        # front+back tenting whatever the board said. New copper wants the
+        # board's own convention (#489 s8), which is what this reads; none of
+        # the three has a spec of its own to carry. Per round, from the text the
+        # round is working on, so a weld emitted earlier in the run counts.
+        _new_via_attrs = prevailing_via_protection_in_text(content)
         new_sexprs = []
         content_dirty = False
         progress = False
@@ -2128,7 +2137,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         new_sexprs.append(generate_via_sexpr(
                             _v.x, _v.y, _v.size, _v.drill,
                             [routing_layers[0], routing_layers[-1]], net_id,
-                            net_name=net_name if v10 else None))
+                            net_name=net_name if v10 else None,
+                            tenting_attrs=_new_via_attrs))
                         pcb_data.vias.append(_v)
                         emitted_vias.append(_v)
                     print(f"    {net_name}: exact-fill strap OK (escalated: "
@@ -2631,7 +2641,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                         new_sexprs.append(generate_via_sexpr(
                             _v.x, _v.y, _v.size, _v.drill,
                             [routing_layers[0], routing_layers[-1]], net_id,
-                            net_name=net_name if v10 else None))
+                            net_name=net_name if v10 else None,
+                            tenting_attrs=_new_via_attrs))
                         pcb_data.vias.append(_v)
                         emitted_vias.append(_v)
                     print(f"    {net_name}: ({ax:.2f},{ay:.2f})"
@@ -2874,7 +2885,8 @@ def oracle_reconnect(board_file: str, net_names, config,
                 new_sexprs.append(generate_via_sexpr(
                     vx, vy, used_via_size, used_via_drill,
                     [routing_layers[0], routing_layers[-1]], net_id,
-                    net_name=net_name if v10 else None))
+                    net_name=net_name if v10 else None,
+                    tenting_attrs=_new_via_attrs))
             # Same-round visibility (cross-net short fix): later links in
             # this round rebuild their obstacle maps from pcb_data, so the
             # copper just routed must exist there -- two different-net links

@@ -1987,8 +1987,18 @@ class FanoutTab(wx.Panel):
                             abs(pcbnew.ToMM(pos.y) - old_y) < 1e-3):
                         if not moved_attrs:
                             try:
-                                from kicad_parser import _pcbnew_via_protection_attrs
-                                moved_attrs = _pcbnew_via_protection_attrs(track)
+                                # #751: the resolver, not the raw live-object
+                                # reader. On a pcbnew whose SWIG wrapper omits
+                                # the protection enums the latter answers {}
+                                # for EVERY via, so this re-read was inert on
+                                # the shipping KiCad 10 rather than only on an
+                                # inheriting via.
+                                from kicad_parser import (
+                                    pcbnew_via_protection_attrs,
+                                    via_protection_attrs_from_board_file)
+                                moved_attrs = pcbnew_via_protection_attrs(
+                                    track,
+                                    via_protection_attrs_from_board_file(board))
                             except Exception:
                                 moved_attrs = None
                         board.RemoveNative(track)

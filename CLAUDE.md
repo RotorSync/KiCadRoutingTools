@@ -614,6 +614,35 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   loses its spec and is re-stamped with front+back tenting, which is wrong for
   via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
   default to `kicad_writer.prevailing_via_protection(pcb.vias)` — the board's own
-  convention — instead of a hardcoded policy. GUI side:
-  `gui_utils.apply_via_protection(pcb_via, attrs)`. `fab_notes.print_via_in_pad_note`
+  convention — instead of a hardcoded policy. When RE-PLACING a via, also pass
+  `inherit_when_unspecified=True` (#741). `None` **and `{}`** otherwise both mean
+  "the caller has no opinion", which on KiCad 10 output stamps front+back
+  tenting (on a numeric-net board they emit nothing) — and `{}` is exactly what
+  `Via.tenting_attrs` holds for a via that carries no spec, so handing it back
+  verbatim is the bug. With the flag an empty spec emits nothing, so the via
+  keeps inheriting the board's `(setup ...)` — what it had, and what the GUI
+  side (`gui_utils.apply_via_protection`, early-return on an empty spec) has
+  always done. Spell it `tenting_attrs=v.tenting_attrs,
+  inherit_when_unspecified=True` — a keyword rather than a sentinel VALUE,
+  because the repo's own idiom for carrying a spec is `dict(...)`, which would
+  turn any dict-shaped sentinel back into a plain `{}` and silently restore the
+  bug. **Every emit site must also keep the board's net DIALECT**, via the ONE
+  resolver `kicad_writer.via_net_name(net_id, net_id_to_name)` (#749 D):
+  `net_id_to_name` has no key 0 on ANY board, so a plain `.get` sends every
+  no-net via down the numeric dialect. `docs/api-kicad-writer.md` has the table
+  of which site passes what, and
+  `tests/test_749_via_protection_emit_sites.py` walks the AST to catch a new
+  site that forgets. **#748** is the parser half of the same story: its
+  numeric-net via pattern had no gap for the protection tokens, so a numeric
+  ref emitted next to a spec was a via `extract_vias` could not read back at
+  ALL -- an invisible barrel, not just a lost spec. Both dialects now read the
+  whole family in any position, and each via is matched inside its own
+  paren-balanced block, so no pattern can run out of one via into the next (on
+  a MIXED-dialect board -- which this repo's own fanout step produces -- that
+  used to invent a barrel and swallow a real one). GUI side:
+  `gui_utils.apply_via_protection(pcb_via, attrs)` writes, and
+  `kicad_parser.pcbnew_via_protection_attrs(via, text_specs)` READS -- not the
+  private `_pcbnew_via_protection_attrs`, which answers `{}` for every via on
+  the shipping KiCad 10.0.0 because its SWIG wrapper omits the
+  `TENTING_MODE_*` family (#751); the resolver falls back to the board file. `fab_notes.print_via_in_pad_note`
   emits the IPC-4761 note from the shared engines when a run puts vias in pads.

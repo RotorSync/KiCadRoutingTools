@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import PCBData, parse_kicad_pcb, _unescape_kicad_string
-from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, move_copper_text_to_silkscreen,
+from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, via_net_name,
+                          move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
                           add_teardrops_to_vias,
                           prevailing_via_protection_in_text as _prevailing_via_protection_in_text,
@@ -556,10 +557,13 @@ def write_plane_output(
     # holds the board's existing vias.
     _default_via_attrs = _prevailing_via_protection_in_text(content)
     for via in new_vias:
-        via_net_name = net_id_to_name.get(via['net_id']) if net_id_to_name else None
         elements.append(generate_via_sexpr(
             via['x'], via['y'], via['size'], via['drill'],
-            via['layers'], via['net_id'], net_name=via_net_name,
+            via['layers'], via['net_id'],
+            # #749 D: the ONE resolver -- net 0 is absent from every map, and a
+            # numeric ref emitted next to a spec used to be a via the parser
+            # could not read back (#748).
+            net_name=via_net_name(via['net_id'], net_id_to_name),
             tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
         ))
 
@@ -860,10 +864,19 @@ def restore_failed_reroute_nets(
 
     elements: List[str] = []
     for v in restored_vias:
-        nm = net_id_to_name.get(v['net_id']) if net_id_to_name else None
+        # #749 C: this is a RESTORE -- these vias came off the board -- so
+        # carrying the spec is only half of it. A restored via that carried NO
+        # spec was inheriting the board's `(setup ...)`, and handing {} back
+        # without the flag re-stamps it with front+back tenting it never had.
+        # (Not the `or _default_via_attrs` form used for vias this tool ADDS a
+        # few hundred lines up: that would stamp the majority spec of OTHER
+        # vias onto one that already existed.)
         elements.append(generate_via_sexpr(v['x'], v['y'], v['size'], v['drill'],
-                                           v['layers'], v['net_id'], net_name=nm,
-                                           tenting_attrs=v.get('tenting_attrs')))
+                                           v['layers'], v['net_id'],
+                                           net_name=via_net_name(v['net_id'],
+                                                                 net_id_to_name),
+                                           tenting_attrs=v.get('tenting_attrs'),
+                                           inherit_when_unspecified=True))
     for s in restored_segs:
         nm = net_id_to_name.get(s['net_id']) if net_id_to_name else None
         elements.append(generate_segment_sexpr(s['start'], s['end'], s['width'],

@@ -14,7 +14,7 @@ from typing import List, Dict, Optional
 from terminal_colors import RED, RESET
 from kicad_parser import is_kicad_10, board_uses_name_nets, KICAD_10_MIN_VERSION
 from kicad_writer import (
-    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr,
+    generate_segment_sexpr, generate_via_sexpr, generate_gr_line_sexpr, via_net_name,
     generate_gr_text_sexpr, swap_segment_nets_at_positions,
     swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers,
     move_copper_text_to_silkscreen, move_copper_graphics_to_silkscreen,
@@ -223,7 +223,12 @@ def _apply_diff_pair_target_swaps(content: str, target_swap_info: List[Dict],
         return content
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     print(f"Applying {len(target_swap_info)} target swap(s) to output file...")
     for swap in target_swap_info:
@@ -287,7 +292,12 @@ def _apply_single_ended_target_swaps(content: str, single_ended_target_swap_info
         return content
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     print(f"Applying {len(single_ended_target_swap_info)} single-ended target swap(s) to output file...")
     for swap in single_ended_target_swap_info:
@@ -328,7 +338,12 @@ def _apply_polarity_swaps(content: str, pad_swaps: List[Dict], pcb_data,
         return content
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     print(f"Applying {len(pad_swaps)} polarity fix(es) (swapping target pads and stubs)...")
     for swap in pad_swaps:
@@ -383,7 +398,12 @@ def _generate_routing_text(results: List[Dict], all_swap_vias: List,
     routing_text = ""
 
     def _net_name(net_id):
-        return net_id_to_name.get(net_id) if net_id_to_name else None
+        # #749 D: ONE resolver. net 0 is absent from every map, so a no-net
+        # element used to fall to the numeric dialect on a name-net board -- and
+        # for a VIA a numeric ref emitted alongside a protection spec was a
+        # shape extract_vias could not read back at all (#748). This file has
+        # FOUR copies of this function; they all get it.
+        return via_net_name(net_id, net_id_to_name)
 
     def _via_attrs(via):
         return getattr(via, 'tenting_attrs', None) or default_via_attrs

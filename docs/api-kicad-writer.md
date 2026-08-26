@@ -122,7 +122,8 @@ yourself:
 ```python
 generate_segment_sexpr(start, end, width, layer, net_id, net_name=None) -> str
 generate_via_sexpr(x, y, size, drill, layers, net_id,
-                   free=False, net_name=None) -> str
+                   free=False, net_name=None, tenting_attrs=None,
+                   inherit_when_unspecified=False) -> str
 generate_gr_line_sexpr(start, end, width, layer) -> str      # debug graphics
 generate_gr_text_sexpr(text, x, y, layer, size=0.5, angle=0) -> str
 generate_zone_sexpr(net_id, net_name, layer, polygon_points,
@@ -141,6 +142,99 @@ from kicad_writer import generate_segment_sexpr
 print(generate_segment_sexpr((100.0, 100.0), (105.0, 100.0),
                              0.25, 'F.Cu', 42))
 ```
+
+### Via protection (`tenting_attrs`)
+
+`tenting_attrs` is a via's own protection spec -- `Via.tenting_attrs`, the
+`(tenting ...)` / `(covering ...)` / `(plugging ...)` / `(capping ...)` /
+`(filling ...)` family, see `docs/api-kicad-parser.md`. Which value you pass
+is read together with `inherit_when_unspecified`, and the four combinations
+are not interchangeable (#489 s8, #741):
+
+| `tenting_attrs` | `inherit_when_unspecified` | Emitted |
+|---|---|---|
+| a non-empty parsed spec | either | that spec, in canonical token order |
+| `None` or `{}` | `True` | nothing -- the via keeps inheriting the board's `(setup ...)` |
+| `None` or `{}` | `False` (default) | front+back tenting on KiCad 10 output (`net_name=` given) |
+| `None` or `{}` | `False`, numeric net | nothing |
+
+`{}` is the trap, and it is worth stating plainly because it is exactly what
+`Via.tenting_attrs` holds for a via that carries no spec: passing it back
+verbatim, without the flag, reads as "no opinion" and stamps the default. So
+re-placing a via is `tenting_attrs=v.tenting_attrs,
+inherit_when_unspecified=True`, never `tenting_attrs=v.tenting_attrs` alone.
+
+The decision is a KEYWORD rather than a sentinel VALUE on purpose. A sentinel
+would have to survive being copied, and the copy idiom this repo actually uses
+for a spec is `dict(via.tenting_attrs or {})` -- which turns any dict-shaped
+sentinel straight back into a plain `{}` and silently restores the bug.
+Carrying the decision separately from the value cannot be undone by copying the
+value.
+
+**Pass the spec back for any via that already existed.** A via you re-place
+without it -- rip-up, sub-grid nudge, tap relocation -- is re-stamped with
+front+back tenting, which is wrong for via-in-pad (it needs IPC-4761 Type VII:
+filled + capped + plated).
+
+**Pass `inherit_when_unspecified=True` for any via that already existed**, so
+the re-placement does not *gain* an attribute the board never gave it. This is
+what the GUI side has always done -- `gui_utils.apply_via_protection` returns
+early on an empty spec, because pcbnew's `*_MODE_FROM_BOARD` already means
+inherit.
+
+**And keep the board's net dialect**, with `via_net_name(net_id,
+net_id_to_name)` -- the ONE resolver, used by every emit site (#749 D).
+`net_id_to_name` has no key `0` on any board (`extract_nets` records
+`name_to_id[""] = 0` but never builds a `Net` for id 0), so a plain `.get`
+sends every no-net via down the numeric dialect. On a name-net board that is
+the mixed-dialect state `tests/stress/fix_mixed_net_refs.py` exists to undo.
+
+It used to be worse than a dialect slip: `generate_via_sexpr` picks the dialect
+from `net_name` and the protection tokens from `tenting_attrs` independently,
+and `extract_vias`' numeric pattern had no gap for those tokens -- so a numeric
+ref emitted alongside a spec produced a via the parser could not read back at
+all, and the barrel VANISHED from the model. That is #748, fixed in the parser:
+both dialects now tolerate the protection family in any position. The resolver
+still matters, because emitting the board's own dialect is right regardless.
+
+### Which sites pass what
+
+| Site | Vias it emits | What it passes |
+|---|---|---|
+| `output_writer` | routed + swap vias | own spec, else the board's prevailing |
+| `add_tracks_and_vias_to_pcb` | depends on caller | the via dict's `tenting_attrs` / `inherit_when_unspecified`; prevailing when it carries neither (#749 A) |
+| `route.py` #666 re-emit | PRE-EXISTING copper the write lost | own spec + `inherit_when_unspecified=True` |
+| `bga_fanout`, `qfn_fanout`, `route_planes` | new | nothing, so prevailing |
+| `kicad_oracle` (3 weld/link sites) | new | the board's prevailing (#749 B) |
+| `plane_io.create_plane` / `repair_planes` | new | own spec, else prevailing |
+| `plane_io.restore_failed_reroute_nets` | RESTORED | own spec + `inherit_when_unspecified=True` (#749 C) |
+| `py_placer/placement/writer.py` | re-placed (the #313 nudge) | own spec + `inherit_when_unspecified=True` (#741) |
+
+`tests/test_749_via_protection_emit_sites.py` walks the AST of every module in
+that table and fails on a `generate_via_sexpr` call with no `tenting_attrs=`,
+so a NEW emit site that forgets is caught rather than discovered on a board.
+
+**GUI side**, `kicad_parser.pcbnew_via_protection_attrs(via, text_specs)` is the
+reader, not `_pcbnew_via_protection_attrs`: the shipping KiCad 10.0.0 SWIG
+wrapper does not export the `TENTING_MODE_*` family, so the live-object reader
+answers `{}` for every via and the resolver falls back to the board file (#751).
+
+**A known CLI/GUI divergence on NEW vias, pre-existing and deliberately left.**
+The prevailing-convention default exists because the TEXT writer has no
+board-level policy to consult: emit no token and `via_protection_sexpr` falls
+through to front+back tenting, which on a hackrf-class board is actively wrong.
+The GUI has no such problem -- it builds a `PCB_VIA` and calls
+`apply_via_protection`, which returns early on an empty spec and leaves every
+mode at `*_MODE_FROM_BOARD`, i.e. inheriting the board's own `(setup ...)`. So a
+new via gets the board's PER-VIA majority spec on the CLI and the board's SETUP
+default in the GUI. Those agree on every board in the corpus and can differ in
+principle. Not closed here because the GUI behaviour is the more faithful of the
+two, and making it stamp explicit tokens to match would be a change no issue
+asked for.
+
+For vias you **add**, `prevailing_via_protection(pcb.vias)` /
+`prevailing_via_protection_in_text(content)` gives the board's own convention,
+which is the right default for new copper.
 
 ## Modifying existing copper
 
