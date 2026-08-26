@@ -55,31 +55,59 @@ so nobody restores them:
     parks two vias 0.28mm apart, both FOREIGN -- so the copper term
     short-circuits and H2H_VIA alone decides that arm's landing. What is
     true is weaker: no assertion KEYS on it, so deleting the gate goes green
-    there. The battery records that, and records that deleting the gate
-    perturbs test_732's landing too, so that row is not attributable to this
-    file alone.
-  * "H2H_PAD is covered only as a negative." `tests/test_737_...py:691-716`
+    there -- measured, test_732 runs 12 tests OK against an engine whose
+    H2H_VIA gate is `pass`. It DOES steer that arm's landing (via #2 goes
+    (151.32, 116.1389) -> (151.57, 116.5889) without the gate), but the arm
+    asserts `moves[0][0]`, the START x, which does not move. So THIS file is
+    the sole gate on that row, and trimming
+    `test_a_sane_drill_is_refused_by_BOTH_spellings` as redundant with
+    test_732 would remove the only thing holding it.
+  * "H2H_PAD is covered only as a negative."
+    `test_737:693-711`'s `test_the_617_rig_relocates_to_exactly_the_same_place`
     pins a landing to four places that H2H_PAD binds with 0.006588 mm of
-    headroom, and says so in as many words.
+    headroom -- landing (1.1148, 1.6772) to NPTH (1.0, 0.98) is 0.706588
+    against a drill-gate need of 0.700000. That number is stated in test_737's
+    module docstring at :80-84, not beside the arm.
 
 BRACKETING THE CONSTANT, because pinning `_UNREADABLE_VIA_DRILL == 0.3` on
 its own is a source assertion, not a behavioural one. Arm C places the NPTH
 hole so that the resolved value lands between two decisions:
 
-    hole at x=4.12 (candidate 1.07 from it)  ->  REFUSED   => fallback > 0.24
-    hole at x=4.20 (candidate 1.15 from it)  ->  ACCEPTED  => fallback <= 0.40
+    hole at x=4.12  ->  REFUSED   => fallback > 0.2714
+    hole at x=4.20  ->  ACCEPTED  => fallback <= 0.4000
 
-so the fallback is bracketed to (0.24, 0.40] by behaviour, and `drill=0.0`
-lands identically to `drill=0.3` in both -- which a fallback of 0, or of
-`_UNREADABLE_VIA_SIZE`, would not do.
+so the fallback is bracketed to (0.2714, 0.4000] by behaviour, and
+`drill=0.0` lands identically to `drill=0.3` in both -- which a fallback of
+0, or of `_UNREADABLE_VIA_SIZE`, would not do.
+
+THE LOWER BOUND IS NOT THE AXIAL ARITHMETIC, and a review caught me writing
+that it was. (0.24, 0.40] came from the first candidate alone; the rig admits
+at least FOUR -- (3.05, 3.0), (3.0462, 3.0191), (3.0354, 3.0354) and
+(3.0383, 3.0924) -- and REFUSED means refusing all of them. The farthest is
+1.085671 from the hole, so the real bound is f > 0.271342. Confirmed by
+patching the constant and running this file:
+
+    constant   REFUSED arm   ACCEPTED arm
+      0.25       3 FAIL          ok        <- inside the bracket I first wrote
+      0.27       3 FAIL          ok
+      0.28         ok            ok
+      0.30         ok            ok        <- shipped
+      0.40         ok            ok
+      0.41         ok          3 FAIL
+
+so both ends bind, and 0.25 -- which the first bracket declared safe -- turns
+the REFUSED arm red. Exactly the sort of bound that reads as tight and is
+not.
 
 INPUTS WHERE THE TWO SPELLINGS DIFFER, measured over the whole class rather
 than assumed. `-0.0` does NOT differ (it is falsy, so both substitute) and
 `nan` does NOT differ (both propagate it, and `d < nan + ...` is False either
 way) -- do not "tidy" a -0.3 into a -0.0 here, and do not add a NaN arm.
-`-1e-9` and `-inf` do differ but cannot survive the via regex, whose drill
-class carries no `e`, so a board declaring one loses the via entirely. The
-reachable class is plain decimal negatives, which BOTH parse paths admit:
+`-1e-9` and `-inf` do differ, but only as SPELLINGS a board cannot use: the
+drill class admits no `e`, so the token `1e-9` is unmatchable and the via is
+dropped whole. The VALUE is reachable -- `(drill -0.000000001)` matches and
+floats to exactly -1e-9 -- so the honest statement is that the reachable
+class is plain decimal negatives, which BOTH parse paths admit:
 the class carries a `-` and the `float()` after it checks no sign.
 
 The second delta is the `getattr`: the old expression raised AttributeError
@@ -189,9 +217,12 @@ H2H_PAD = 0.45
 # A foreign-net (2) cap pad rect whose right edge is 0.32 from the via -- just
 # inside the offender threshold VR + CLEAR = 0.35, so the cap is grazed and the
 # offender loop runs -- while the r = 0.05 candidate at (3.05, 3.00) sits 0.37
-# from it and is admitted. Every other candidate on the first two rings is
-# either closer to the rect or off the +x ray, which is what makes LANDING the
-# only one and lets a refusal be asserted as `moves == []`.
+# from it and is admitted. LANDING is the FIRST candidate the sweep reaches,
+# NOT the only admitted one: measured, the rect also admits (3.0462, 3.0191),
+# (3.0354, 3.0354) and (3.0383, 3.0924). So `moves == []` says the gate under
+# test refused EVERY admitted candidate -- the stronger claim, and the reason
+# the bracket's lower bound comes from the farthest of them rather than from
+# LANDING (see the docstring).
 RECT = (2.0, 2.9, 2.68, 3.1, 2)
 
 # The value the three removed sites hard-coded, mirrored the way test_732
@@ -200,9 +231,12 @@ RECT = (2.0, 2.9, 2.68, 3.1, 2)
 OLD_NUDGER_DRILL_RADIUS = 0.3 / 2.0
 
 # Arm C's two hole positions and the bracket they impose on the fallback.
-BRACKET_REFUSE_X = 4.12        # candidate 1.07 away -> refused  => f > 0.24
-BRACKET_ACCEPT_X = 4.20        # candidate 1.15 away -> accepted => f <= 0.40
-BRACKET_LO, BRACKET_HI = 0.24, 0.40
+BRACKET_REFUSE_X = 4.12        # refuses EVERY admitted candidate => f > 0.2714
+BRACKET_ACCEPT_X = 4.20        # admits the first one            => f <= 0.4000
+# Measured by sweeping the resolver's default at 0.001, NOT derived from the
+# axial candidate -- see the docstring for the two wrong brackets that came
+# from doing it the other way round.
+BRACKET_LO, BRACKET_HI = 0.2714, 0.4000
 
 
 class _FakeCap:
@@ -328,7 +362,7 @@ class TestTheGateThatStoppedFiring(unittest.TestCase):
         self.assertEqual(moves, [])
     # MUTATION: the guard back to `or` -> the via moves to (3.05, 3.00) and
     # both the print and the count assertions fail. This arm kills 6 of the
-    # battery's 15 rows -- the two guard re-spellings, both constant moves,
+    # battery's 16 rows -- the two guard re-spellings, both constant moves,
     # the diameter/radius slip, and the deleted gate.
 
     def test_TWO_negative_drills_switched_the_gate_OFF(self):
@@ -368,7 +402,8 @@ class TestTheGateThatStoppedFiring(unittest.TestCase):
         self.assertEqual(moves, [])
     # MUTATION: either constant move -> the substituted radius changes and
     # the ON-THE-BRANCH equality between the two spellings fires. Killed by 4
-    # rows. (An earlier version of this note claimed the arm could NOT see a
+    # rows, of which only 2 are constant moves (the others are the
+    # diameter/radius slip and the deleted gate). (An earlier version of this note claimed the arm could NOT see a
     # constant move; the battery says otherwise, which is why the notes are
     # written after it runs and carry its counts.)
 
@@ -411,6 +446,9 @@ class TestEachViaContributesITSOWNDrill(unittest.TestCase):
                                       'vdr + vdr are indistinguishable here')
         self.assertAlmostEqual(_via_drill_radius(v) + _via_drill_radius(ov)
                                + H2H_VIA, 0.6, places=9)
+    # MUTATION: returns-the-diameter-not-the-radius -- the two radii double
+    # and the 0.6 equality fires. Killed by 1 row; it is the ON-THE-BRANCH
+    # guard for the two arms below, not a claim of its own.
 
     def test_a_neighbour_inside_the_SUMMED_floor_is_refused(self):
         v, ov, pcb = self._board(self.NEAR)
@@ -495,8 +533,14 @@ class TestTheFallbackResolvesToExactlyPointThree(unittest.TestCase):
     def _land(self, v_drill, hole_x):
         v, _hole, pcb = _hole_board(v_drill, hole_x)
         # ON THE BRANCH: for the 0.0/None rows the fallback really is taken.
+        # `assertFalse(v.drill)` would be TAUTOLOGICAL here -- Via is a plain
+        # dataclass with no normalisation, so `v.drill is v_drill` and the
+        # assertion cannot fail under `not v_drill`. Assert the RESOLVED value
+        # instead, which is what the gate below actually consumes.
         if not v_drill:
-            self.assertFalse(v.drill, 'the fallback branch is not taken')
+            self.assertAlmostEqual(_via_drill_radius(v),
+                                   _UNREADABLE_VIA_DRILL / 2.0, places=12,
+                                   msg='the fallback branch is not taken')
         moves, _segs, _out, land = _run(pcb)
         return len(moves), land
 
@@ -635,6 +679,9 @@ class TestOneDrillRule(unittest.TestCase):
             self.assertEqual(hits, [],
                              '%s still resolves a drill inline -- %s'
                              % (where, '; '.join(hits)))
+    # MUTATION: literal-restored-at-the-capsule-gate -- the evasion that
+    # keeps the constant's NAME. Killed by 1 row, and this is the ONLY arm
+    # that sees it structurally.
 
     def test_the_resolver_is_actually_CALLED_twice_and_where(self):
         """Absence alone is evadable: `(ov.drill or _UNREADABLE_VIA_DRILL)`
@@ -648,6 +695,9 @@ class TestOneDrillRule(unittest.TestCase):
                          'the pad drill-capsule gate no longer reads vdr')
         self.assertEqual(len(self._hits('vdr + ovdr + H2H_VIA')), 1,
                          'the via-to-via gate no longer reads the resolver')
+    # MUTATION: 6 rows -- every edit that moves, renames or duplicates a call
+    # site. The widest net in the file, and the reason absence alone is not
+    # enough: it is what catches `(ov.drill or _UNREADABLE_VIA_DRILL)`.
 
     def test_the_offender_radii_are_resolved_BEFORE_the_candidate_sweep(self):
         """Not a style point. The gate runs inside the 16-angle x 12-radius
@@ -660,6 +710,9 @@ class TestOneDrillRule(unittest.TestCase):
         self.assertLess(pre[0], use[0],
                         'the precompute no longer precedes the gate that '
                         'reads it, so it is not a precompute')
+    # MUTATION: 4 rows, of which precompute-inlined-per-candidate is the one
+    # this arm exists for -- semantically inert, so NO behavioural arm can see
+    # it and this is its only gate.
 
     def test_the_gate_reads_the_offenders_position_LIVE(self):
         """NOT COVERED BEHAVIOURALLY, and disclosed rather than skipped.
@@ -671,7 +724,10 @@ class TestOneDrillRule(unittest.TestCase):
         via's coordinates DO change between iterations. Folding them into the
         same tuple is the obvious tidy-up and is a real defect: measured on a
         two-cap rig during review, the second via lands at (5.1061, 6.1061)
-        instead of (5.0500, 6.0000).
+        instead of (5.0500, 6.0000). Those coordinates are a REVIEW
+        measurement and are deliberately not re-derivable from this repo: the
+        rig is not shipped, because a two-cap geometry tuned to expose one
+        mutant is not a general guard and would read as one.
 
         A 400-seed randomized old-vs-new fuzz did NOT catch that mutant --
         only 8 seeds moved two vias at all -- so a behavioural arm here would
@@ -693,6 +749,9 @@ class TestOneDrillRule(unittest.TestCase):
         self.assertEqual(len(dist), 1,
                          'the via-to-via gate no longer measures to ov.x/ov.y '
                          'as they are NOW')
+    # MUTATION: 4 rows, of which positions-cached-alongside-the-radius is the
+    # one this arm exists for -- the silent tidy-up, invisible to a 400-seed
+    # fuzz, and this is its only gate.
 
     def test_this_files_mirrored_floors_are_still_the_engines(self):
         """H2H_VIA/H2H_PAD are function-local literals and cannot be
@@ -720,6 +779,10 @@ class TestThePadSideStillRefusesToInvent(unittest.TestCase):
                       'the pad capsule now has a fallback of its own; #750 '
                       'named the VIA drill precisely because the pad drill '
                       'beside it is measured')
+    # MUTATION: NONE in the battery, and that is a disclosure rather than an
+    # omission. It guards a line #750 did not touch, against a "consistency"
+    # pass that has not been written; mutating it would only be mutating this
+    # arm's own subject to watch it fire.
 
     def test_the_writer_still_emits_the_drill_the_board_declared(self):
         """The gate prices an unreadable drill at 0.3; the writer must still

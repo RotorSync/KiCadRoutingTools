@@ -2821,6 +2821,12 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # -- is a real defect: measured on a two-cap rig, the second via lands at
     # (5.1061, 6.1061) instead of (5.0500, 6.0000).
     #
+    # It also snapshots MEMBERSHIP, not just the radius: the gate used to walk
+    # pcb_data.vias live. Inert today -- nothing in this function appends to,
+    # slices or rebinds that list -- but a future edit that adds a via
+    # mid-pass (a stitching barrel, a split) would be invisible to the
+    # hole-to-hole gate and to nothing else, so add it here too.
+    #
     # `via_rad(ov)` on the copper line below is deliberately NOT hoisted with
     # it: that resolver takes the operator's --default-via-size through `st`,
     # so caching it here would put a second copy of a knob-dependent answer
