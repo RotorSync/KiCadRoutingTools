@@ -151,25 +151,48 @@ print(generate_segment_sexpr((100.0, 100.0), (105.0, 100.0),
 is read together with `inherit_when_unspecified`, and the four combinations
 are not interchangeable (#489 s8, #741):
 
-| `tenting_attrs` | `inherit_when_unspecified` | Emitted |
-|---|---|---|
-| a non-empty parsed spec | either | that spec, in canonical token order |
-| `None` or `{}` | `True` | nothing -- the via keeps inheriting the board's `(setup ...)` |
-| `None` or `{}` | `False` (default) | front+back tenting on KiCad 10 output (`net_name=` given) |
-| `None` or `{}` | `False`, numeric net | nothing |
+| `tenting_attrs` | Emitted |
+|---|---|
+| a non-empty parsed spec | that spec, in canonical token order |
+| `None` or `{}` | **nothing** -- the via inherits the board's `(setup ...)`, in either net dialect |
 
-`{}` is the trap, and it is worth stating plainly because it is exactly what
-`Via.tenting_attrs` holds for a via that carries no spec: passing it back
-verbatim, without the flag, reads as "no opinion" and stamps the default. So
-re-placing a via is `tenting_attrs=v.tenting_attrs,
-inherit_when_unspecified=True`, never `tenting_attrs=v.tenting_attrs` alone.
+`inherit_when_unspecified` no longer changes the output: emitting nothing for an
+empty spec is now the behaviour in every case. It is kept because callers pass
+it and because it still records, at the call site, that a via ALREADY EXISTED.
+The old KiCad-10 fallback to front+back tenting is gone -- see below.
 
-The decision is a KEYWORD rather than a sentinel VALUE on purpose. A sentinel
-would have to survive being copied, and the copy idiom this repo actually uses
-for a spec is `dict(via.tenting_attrs or {})` -- which turns any dict-shaped
-sentinel straight back into a plain `{}` and silently restores the bug.
-Carrying the decision separately from the value cannot be undone by copying the
-value.
+### Why an unspecified via emits nothing
+
+Probed against pcbnew 10.0.0: a via left at `TENTING_MODE_FROM_BOARD`
+serialises with **no token**, and a token appears **only** when the via
+explicitly overrides the board -- KiCad writes one even when the overriding
+value equals the board default. So a token is a statement that this via is
+special. Stamping one on a via the tool added converts an inheriting via into
+an override, which is not a decision this tool was ever asked to make.
+
+Two rules were retired to get here:
+
+* **The hardcoded front+back tenting** on KiCad-10 output. Measured over 886
+  corpus boards, three (`nanovoltmeter_marge`, `hexberry_fpga`, `pedal_404`)
+  declare `(tenting (front no) (back no))` board-wide, and every via the tool
+  added to them came back tented -- tenting a via the designer said to leave
+  exposed, which is a fab error rather than a cosmetic one. It hid because
+  KiCad's FACTORY policy is tented front+back, so on an ordinary board the
+  stamp and the inheritance agree.
+* **`prevailing_via_protection` as the added-via default** (the #489 s8 rule).
+  Across those same 886 boards a prevailing spec never once disagreed with the
+  board's own `(setup ...)`, so it only ever wrote a redundant token -- and the
+  tool then read its OWN stamps back as "the board's convention" on the next
+  run. orangecrab_ext_pll's 136 `(tenting …)` tokens are byte-identical to
+  `generate_via_sexpr` output; hackrf_one's pristine source has **0/498** vias
+  declaring anything, its 498 tokens being KiCad 10's upgrade migration writing
+  out the factory defaults. The function remains correct and available; it is
+  simply not a default.
+
+`prevailing_via_protection(vias)` / `prevailing_via_protection_in_text(content)`
+still answer "what do this board's vias actually say", which is the right
+question if you ever need a new via to match its neighbours rather than the
+board policy. No writer calls them today.
 
 **Pass the spec back for any via that already existed.** A via you re-place
 without it -- rip-up, sub-grid nudge, tap relocation -- is re-stamped with
@@ -201,12 +224,12 @@ still matters, because emitting the board's own dialect is right regardless.
 
 | Site | Vias it emits | What it passes |
 |---|---|---|
-| `output_writer` | routed + swap vias | own spec, else the board's prevailing |
-| `add_tracks_and_vias_to_pcb` | depends on caller | the via dict's `tenting_attrs` / `inherit_when_unspecified`; prevailing when it carries neither (#749 A) |
+| `output_writer` | routed + swap vias | the via's own spec, else nothing |
+| `add_tracks_and_vias_to_pcb` | depends on caller | the via dict's `tenting_attrs` / `inherit_when_unspecified`, else nothing (#749 A) |
 | `route.py` #666 re-emit | PRE-EXISTING copper the write lost | own spec + `inherit_when_unspecified=True` |
-| `bga_fanout`, `qfn_fanout`, `route_planes` | new | nothing, so prevailing |
-| `kicad_oracle` (3 weld/link sites) | new | the board's prevailing (#749 B) |
-| `plane_io.create_plane` / `repair_planes` | new | own spec, else prevailing |
+| `bga_fanout`, `qfn_fanout`, `route_planes` | new | nothing -> inherits `(setup ...)` |
+| `kicad_oracle` (3 weld/link sites) | new | nothing, spelled out as `None` (#749 B) |
+| `plane_io.create_plane` / `repair_planes` | new | the via's own spec, else nothing |
 | `plane_io.restore_failed_reroute_nets` | RESTORED | own spec + `inherit_when_unspecified=True` (#749 C) |
 | `py_placer/placement/writer.py` | re-placed (the #313 nudge) | own spec + `inherit_when_unspecified=True` (#741) |
 
@@ -219,22 +242,14 @@ reader, not `_pcbnew_via_protection_attrs`: the shipping KiCad 10.0.0 SWIG
 wrapper does not export the `TENTING_MODE_*` family, so the live-object reader
 answers `{}` for every via and the resolver falls back to the board file (#751).
 
-**A known CLI/GUI divergence on NEW vias, pre-existing and deliberately left.**
-The prevailing-convention default exists because the TEXT writer has no
-board-level policy to consult: emit no token and `via_protection_sexpr` falls
-through to front+back tenting, which on a hackrf-class board is actively wrong.
-The GUI has no such problem -- it builds a `PCB_VIA` and calls
+**CLI and GUI now agree on new vias.** The GUI builds a `PCB_VIA` and calls
 `apply_via_protection`, which returns early on an empty spec and leaves every
-mode at `*_MODE_FROM_BOARD`, i.e. inheriting the board's own `(setup ...)`. So a
-new via gets the board's PER-VIA majority spec on the CLI and the board's SETUP
-default in the GUI. Those agree on every board in the corpus and can differ in
-principle. Not closed here because the GUI behaviour is the more faithful of the
-two, and making it stamp explicit tokens to match would be a change no issue
-asked for.
+mode at `*_MODE_FROM_BOARD` -- inheriting the board's `(setup ...)`. The CLI
+emits no token, which is the same thing in the file. There is no longer a
+CLI-only default to drift.
 
-For vias you **add**, `prevailing_via_protection(pcb.vias)` /
-`prevailing_via_protection_in_text(content)` gives the board's own convention,
-which is the right default for new copper.
+For vias you **add**, pass nothing: no token means the via inherits the board's
+`(setup ...)`, which is what KiCad does for a via a user places.
 
 ## Modifying existing copper
 

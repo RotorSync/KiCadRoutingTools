@@ -3202,10 +3202,9 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     # Generate via S-expressions
     via_sexprs = []
     if vias:
-        # Repair vias follow the board's own via protection convention instead
-        # of a hardcoded front+back tenting (#489 §8).
-        from kicad_writer import prevailing_via_protection_in_text
-        _default_via_attrs = prevailing_via_protection_in_text(content)
+        # A repair via emits no protection token and inherits the board's
+        # `(setup ...)` policy, as a via placed in KiCad does (see
+        # add_tracks_and_vias_to_pcb).
         for via in vias:
             sexpr = generate_via_sexpr(
                 x=via['x'],
@@ -3218,7 +3217,7 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
                 # and a numeric ref emitted alongside a spec used to be a via
                 # the parser could not read back at all (#748).
                 net_name=via_net_name(via['net_id'], net_id_to_name),
-                tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
+                tenting_attrs=via.get('tenting_attrs')
             )
             via_sexprs.append(sexpr)
 

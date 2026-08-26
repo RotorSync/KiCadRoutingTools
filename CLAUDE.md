@@ -613,8 +613,21 @@ pcb = parse_kicad_pcb('path/to/file.kicad_pcb')
   existed — a RE-PLACED via (rip-up, sub-grid nudge, tap relocation) otherwise
   loses its spec and is re-stamped with front+back tenting, which is wrong for
   via-in-pad (needs IPC-4761 Type VII filled+capped+plated). Vias the tool ADDS
-  default to `kicad_writer.prevailing_via_protection(pcb.vias)` — the board's own
-  convention — instead of a hardcoded policy. When RE-PLACING a via, also pass
+  emit **no protection token at all**, so they inherit the board's own
+  `(setup ...)` policy — what pcbnew does for a via the GUI adds and KiCad for
+  one the user places. Probed against pcbnew 10.0.0: a via at
+  `*_MODE_FROM_BOARD` serialises with NO token and a token appears **only** for
+  an explicit override, so anything stamped turns an inheriting via into an
+  override. The old rules — a hardcoded front+back tenting, then
+  `prevailing_via_protection(pcb.vias)` — are both retired: measured over 886
+  corpus boards a prevailing spec NEVER disagreed with the board's own setup, so
+  it only wrote a redundant token, and the tool then read its OWN stamps back as
+  "the board's convention" next run. The hardcoded default was worse than
+  redundant: three boards (nanovoltmeter_marge, hexberry_fpga, pedal_404) declare
+  `(tenting (front no) (back no))` board-wide and had every added via stamped
+  tented — a fab error, hidden because KiCad's FACTORY policy is tented so the
+  two agree on an ordinary board. `prevailing_via_protection` still exists and is
+  still correct; it is just not a default any more. When RE-PLACING a via, also pass
   `inherit_when_unspecified=True` (#741). `None` **and `{}`** otherwise both mean
   "the caller has no opinion", which on KiCad 10 output stamps front+back
   tenting (on a numeric-net board they emit nothing) — and `{}` is exactly what

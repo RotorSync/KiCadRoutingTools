@@ -14,7 +14,6 @@ from kicad_writer import (generate_via_sexpr, generate_segment_sexpr, via_net_na
                           move_copper_text_to_silkscreen,
                           move_copper_graphics_to_silkscreen, add_teardrops_to_pads,
                           add_teardrops_to_vias,
-                          prevailing_via_protection_in_text as _prevailing_via_protection_in_text,
     strip_zero_length_edge_cuts)
 # E3: the one guarded squared-distance kernel (length_sq < 1e-10 degenerate guard).
 from geometry_utils import point_to_segment_dist_sq as _pt_seg_dist_sq
@@ -551,11 +550,9 @@ def write_plane_output(
     if zone_sexpr:
         elements.append(zone_sexpr)
 
-    # Add vias. A reused via carries its own protection spec; a new stitching
-    # via follows the board's convention rather than a hardcoded tenting
-    # policy (#489 §8). Read from the file text being written, which already
-    # holds the board's existing vias.
-    _default_via_attrs = _prevailing_via_protection_in_text(content)
+    # Add vias. A reused via carries its own protection spec; a NEW stitching
+    # via emits no token and inherits the board's `(setup ...)` policy, exactly
+    # as a via placed in KiCad does (see add_tracks_and_vias_to_pcb).
     for via in new_vias:
         elements.append(generate_via_sexpr(
             via['x'], via['y'], via['size'], via['drill'],
@@ -564,7 +561,7 @@ def write_plane_output(
             # numeric ref emitted next to a spec used to be a via the parser
             # could not read back (#748).
             net_name=via_net_name(via['net_id'], net_id_to_name),
-            tenting_attrs=via.get('tenting_attrs') or _default_via_attrs
+            tenting_attrs=via.get('tenting_attrs')
         ))
 
     # Add segments
@@ -864,13 +861,11 @@ def restore_failed_reroute_nets(
 
     elements: List[str] = []
     for v in restored_vias:
-        # #749 C: this is a RESTORE -- these vias came off the board -- so
-        # carrying the spec is only half of it. A restored via that carried NO
-        # spec was inheriting the board's `(setup ...)`, and handing {} back
-        # without the flag re-stamps it with front+back tenting it never had.
-        # (Not the `or _default_via_attrs` form used for vias this tool ADDS a
-        # few hundred lines up: that would stamp the majority spec of OTHER
-        # vias onto one that already existed.)
+        # #749 C: this is a RESTORE -- these vias came off the board -- so they
+        # get their real spec back, and one that carried none keeps inheriting
+        # the board's `(setup ...)` rather than gaining a token. Both halves
+        # matter: handing {} back used to re-stamp the via with front+back
+        # tenting it never had.
         elements.append(generate_via_sexpr(v['x'], v['y'], v['size'], v['drill'],
                                            v['layers'], v['net_id'],
                                            net_name=via_net_name(v['net_id'],

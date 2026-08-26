@@ -44,8 +44,10 @@ from kicad_writer import (DEFAULT_VIA_TENTING, add_tracks_and_vias_to_pcb,  # no
                           via_net_name)
 
 # A board whose own vias all declare a NON-default convention: hackrf_one's
-# shape (everything explicitly off), which is what makes "the tool stamped
-# tenting yes" visible at all.
+# shape (everything explicitly off). Used here as the thing an added via must
+# NOT pick up -- see A1. (Measured since: hackrf_one's own tokens are KiCad 10's
+# upgrade migration writing out the factory defaults, not designer intent; its
+# pristine source has 0/498 vias declaring anything.)
 HOUSE_SPEC = {'covering': '(front no) (back no)', 'plugging': '(front no) (back no)'}
 TYPE_VII = {'tenting': '(front no) (back no)',
             'covering': '(front yes) (back yes)',
@@ -108,19 +110,28 @@ def run():
 
     tmp = tempfile.mkdtemp(prefix='t749_')
     try:
-        # --- A1: a NEW via follows the board's convention, not front+back
-        # tenting. On main this site passed no spec at all, so the writer's
-        # `net_name is not None` fallback stamped DEFAULT_VIA_TENTING.
-        _, got = _emit(tmp, [{'x': 10.0, 'y': 10.0, 'size': 0.6, 'drill': 0.3,
-                              'layers': ['F.Cu', 'B.Cu'], 'net_id': 1}])
+        # --- A1: a NEW via emits NOTHING and inherits the board's
+        # `(setup ...)`. It gets neither the writer's old hardcoded front+back
+        # tenting NOR the board's prevailing per-via spec: pcbnew leaves a via
+        # it adds at *_MODE_FROM_BOARD, and KiCad writes no token for such a
+        # via, so anything we stamp turns an inheriting via into an OVERRIDE.
+        # Measured cost of getting this wrong: three corpus boards declare
+        # `(tenting (front no) (back no))` board-wide and had every added via
+        # stamped tented.
+        out, got = _emit(tmp, [{'x': 10.0, 'y': 10.0, 'size': 0.6, 'drill': 0.3,
+                                'layers': ['F.Cu', 'B.Cu'], 'net_id': 1}])
         check(len(got) == 1, f"A1: emitted {len(got)} vias, expected 1")
         if got:
-            check(got[0].tenting_attrs == HOUSE_SPEC,
-                  f"A1: a NEW via got {got[0].tenting_attrs}, expected the "
-                  f"board's own convention {HOUSE_SPEC}")
+            check(got[0].tenting_attrs == {},
+                  f"A1: a NEW via got {got[0].tenting_attrs}, expected NO "
+                  f"protection token at all so it inherits the board policy")
             check(got[0].tenting_attrs != DEFAULT_VIA_TENTING,
                   "A1: the new via was stamped with the hardcoded front+back "
                   "tenting, which is what #489 s8 set out to stop")
+            check(got[0].tenting_attrs != HOUSE_SPEC,
+                  f"A1: the new via was stamped with the board's PREVAILING "
+                  f"per-via spec {HOUSE_SPEC}; that is still an override, and "
+                  f"on a board whose setup disagrees it is the wrong one")
 
         # --- A2: a PRE-EXISTING via carries its own spec back.
         _, got = _emit(tmp, [{'x': 11.0, 'y': 11.0, 'size': 0.6, 'drill': 0.3,

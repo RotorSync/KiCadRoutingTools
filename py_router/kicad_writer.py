@@ -319,14 +319,29 @@ def via_protection_sexpr(tenting_attrs: dict = None,
     restores the bug. Carrying the DECISION separately from the VALUE cannot be
     undone by copying the value.
     """
-    if tenting_attrs:
-        spec = tenting_attrs
-    elif inherit_when_unspecified:
-        spec = {}
-    elif net_name is not None:
-        spec = DEFAULT_VIA_TENTING
-    else:
-        spec = {}
+    # No spec -> emit NOTHING, in either dialect. The via then carries no
+    # protection token, which in KiCad means `*_MODE_FROM_BOARD`: it follows the
+    # board's own `(setup ...)` policy.
+    #
+    # This used to fall through to DEFAULT_VIA_TENTING on KiCad-10 output, and
+    # that was wrong in KiCad's own terms. Probed against pcbnew 10.0.0: a via
+    # left at FROM_BOARD serialises with NO token, and the token appears ONLY
+    # when the via explicitly overrides -- so stamping one converted an
+    # inheriting via into an OVERRIDE, which is not a thing this tool was ever
+    # asked to decide.
+    #
+    # Measured cost of the old behaviour, over 886 corpus boards: three
+    # (nanovoltmeter_marge, hexberry_fpga, pedal_404) declare
+    # `(tenting (front no) (back no))` board-wide -- do not tent -- and every
+    # via the tool added to them was stamped `(front yes) (back yes)`, silently
+    # contradicting the board. Tenting a via meant to stay exposed is a fab
+    # error, not a cosmetic one. On a board whose policy is KiCad's factory
+    # default the two agree, which is why this hid for so long.
+    #
+    # `inherit_when_unspecified` is therefore now the behaviour in ALL cases.
+    # The parameter is kept because callers pass it and it still records, at the
+    # call site, that a via ALREADY EXISTED -- see generate_via_sexpr.
+    spec = tenting_attrs if tenting_attrs else {}
     if not spec:
         return ""
     def _one(token: str, inner: str) -> str:
@@ -1037,10 +1052,6 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
 
     # Generate via S-expressions
     if vias:
-        # A via this call ADDS follows the board's own protection convention
-        # rather than a hardcoded front+back tenting (#489 s8). Read from the
-        # text being written, which still holds the board's existing vias.
-        default_via_attrs = prevailing_via_protection_in_text(content)
         for via in vias:
             # #749 A: this writer had NO tenting_attrs parameter at all, and it
             # also takes remove_vias -- so a via removed and re-added round-trips
@@ -1056,9 +1067,17 @@ def add_tracks_and_vias_to_pcb(input_path: str, output_path: str,
             # {} is what Via.tenting_attrs holds for a via that inherits the
             # board's `(setup ...)`, so without it such a via would silently
             # GAIN the prevailing spec on the way back in.
+            # A via this call ADDS carries no spec and so emits no token: it
+            # INHERITS the board's `(setup ...)` policy, which is what pcbnew
+            # does for a via the GUI adds and what KiCad does for one the user
+            # places. Copying the board's PREVAILING per-via spec onto it (the
+            # #489 s8 rule) is retired -- measured over 886 corpus boards, a
+            # prevailing spec never once disagreed with the board's own setup,
+            # so it only ever wrote a redundant token that turned an inheriting
+            # via into an override. Worse, the tool then read its OWN stamps
+            # back as "the board's convention" on the next run.
             existing = bool(via.get('inherit_when_unspecified'))
-            attrs = via.get('tenting_attrs') or (None if existing
-                                                 else default_via_attrs)
+            attrs = via.get('tenting_attrs')
             v = generate_via_sexpr(
                 via['x'],
                 via['y'],

@@ -1526,8 +1526,7 @@ def oracle_reconnect(board_file: str, net_names, config,
     """
     from dataclasses import replace
     from kicad_parser import parse_kicad_pcb, is_kicad_10
-    from kicad_writer import (generate_segment_sexpr, generate_via_sexpr,
-                              prevailing_via_protection_in_text)
+    from kicad_writer import generate_segment_sexpr, generate_via_sexpr
     from plane_region_connector import (build_base_obstacles,
                                         route_plane_connection_wide)
 
@@ -1819,13 +1818,11 @@ def oracle_reconnect(board_file: str, net_names, config,
             content = f.read()
         v10 = is_kicad_10(content)
         # #749 B: every via the oracle emits below -- the exact-fill strap weld,
-        # the escalated/sliver weld, the main link route -- is NEW copper, and
-        # all three passed no spec at all, so each got the writer's hardcoded
-        # front+back tenting whatever the board said. New copper wants the
-        # board's own convention (#489 s8), which is what this reads; none of
-        # the three has a spec of its own to carry. Per round, from the text the
-        # round is working on, so a weld emitted earlier in the run counts.
-        _new_via_attrs = prevailing_via_protection_in_text(content)
+        # the escalated/sliver weld, the main link route -- is NEW copper. It
+        # emits no protection token and inherits the board's `(setup ...)`
+        # policy; None is spelled out rather than omitted so the three call
+        # sites state the decision instead of relying on a default.
+        _new_via_attrs = None
         new_sexprs = []
         content_dirty = False
         progress = False

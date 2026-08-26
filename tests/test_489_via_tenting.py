@@ -11,10 +11,14 @@ solder out of the barrel.
 Covers:
   * the parser reads all five tokens off a real multi-line via block
   * the writer re-emits a via's own spec verbatim (whitespace normalised)
-  * a NEW via adopts the board's prevailing convention instead of tenting-yes
-  * with no board spec at all, previous behaviour is unchanged (v10 tenting yes,
-    v9 numeric-net output silent)
-  * prevailing_via_protection is a deterministic majority
+  * a via with NO spec emits NO protection token in EITHER dialect, so it
+    inherits the board's `(setup ...)` policy -- what pcbnew does for a via the
+    GUI adds and KiCad for one the user places. (Inverted from what #489 s8
+    first shipped; see the comment at that check.)
+  * prevailing_via_protection is a deterministic majority. It is no longer the
+    default for vias the tool adds -- over 886 corpus boards a prevailing spec
+    never once disagreed with the board's own setup -- but it stays correct and
+    is still the honest answer to "what do this board's vias say".
   * the via-in-pad fab note fires on a same-net pad hit and not otherwise
 
 Run with:  python3 tests/test_489_via_tenting.py
@@ -115,13 +119,30 @@ def run():
     check(order == ['covering', 'plugging', 'capping', 'filling'],
           f"tokens should emit in canonical order, got {order}")
 
-    # ----------------------------------- unchanged behaviour with nothing to say
-    v10 = generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND')
-    check('(tenting (front yes) (back yes))' in v10,
-          f"with no spec, KiCad 10 output must keep today's tenting; got:\n{v10}")
-    v9 = generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5)
-    check('tenting' not in v9,
-          f"numeric-net (KiCad 9) output must stay silent; got:\n{v9}")
+    # -------------------------------- nothing to say -> say NOTHING, either way
+    # This assertion is INVERTED from the one #489 s8 originally shipped, which
+    # required KiCad-10 output to carry `(tenting (front yes) (back yes))` when
+    # the caller passed no spec. Probed against pcbnew 10.0.0: a via left at
+    # TENTING_MODE_FROM_BOARD serialises with NO token, and a token appears only
+    # when the via OVERRIDES the board -- so the old default silently converted
+    # every via this tool added into an override.
+    #
+    # Measured over 886 corpus boards: three (nanovoltmeter_marge,
+    # hexberry_fpga, pedal_404) declare `(tenting (front no) (back no))`
+    # board-wide, and every via the tool added to them came back stamped
+    # `(front yes) (back yes)` -- tenting a via the designer said to leave
+    # exposed, which is a fab error. It hid because KiCad's FACTORY policy is
+    # tented front+back, so on an ordinary board the stamp and the inheritance
+    # agree.
+    for label, out in (
+            ('KiCad 10 (named net)',
+             generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5, net_name='GND')),
+            ('KiCad 9 (numeric net)',
+             generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5))):
+        for token in ('tenting', 'covering', 'plugging', 'capping', 'filling'):
+            check(f'({token}' not in out,
+                  f"{label}: a via with no spec must emit NO {token} token and "
+                  f"inherit the board's (setup ...); got:\n{out}")
 
     # ------------------------------------------- prevailing convention, majority
     def _v(spec):
@@ -143,8 +164,8 @@ def run():
     t2 = prevailing_via_protection([_v(b), _v(a)])
     check(t1 == t2, f"a tie must break deterministically, got {t1} vs {t2}")
 
-    # A new via on a board whose vias all decline protection must follow suit,
-    # NOT arrive tented.
+    # Passed EXPLICITLY, a prevailing spec still round-trips: the function is
+    # unchanged, only its use as the added-via default is retired.
     board_text = REAL_VIA + REAL_VIA.replace(uuid, "0000ffff-1111-2222-3333-444444444444")
     prevailing = prevailing_via_protection_in_text(board_text)
     check(prevailing is not None and prevailing.get('capping') == 'no',
@@ -155,6 +176,66 @@ def run():
           f"a new via must not be stamped tented on a board that declines it; got:\n{new_out}")
     check(prevailing_via_protection_in_text(PLAIN_VIA) is None,
           "a board with no protection tokens has no prevailing spec")
+
+    # --------------------- a board that says DO NOT TENT must be obeyed (e2e)
+    # The regression this whole inversion exists for, through the real writer
+    # rather than the sexpr helper. nanovoltmeter_marge, hexberry_fpga and
+    # pedal_404 in the stress corpus all carry exactly this setup, and every via
+    # the tool added to them came back tented.
+    import shutil as _sh, tempfile as _tf
+    from kicad_writer import add_tracks_and_vias_to_pcb
+    # version >= KICAD_10_MIN_VERSION (20250000) ON PURPOSE. A `(setup
+    # (tenting ...))` block is a KiCad-10 feature, and below that threshold
+    # is_kicad_10() is False, add_tracks_and_vias_to_pcb drops net_id_to_name,
+    # the via emits `(net N)` -- and the OLD fallback emitted no tenting for the
+    # numeric dialect anyway. The check would then pass against the very bug it
+    # exists to catch. Verified by reverting the fix: this now FAILS.
+    NO_TENT_BOARD = """(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general (thickness 1.6))
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(2 "B.Cu" signal)
+\t\t(44 "Edge.Cuts" user)
+\t)
+\t(setup
+\t\t(tenting
+\t\t\t(front no)
+\t\t\t(back no)
+\t\t)
+\t)
+\t(net 0 "")
+\t(net 1 "/SIG")
+\t(gr_line (start 0 0) (end 40 0) (stroke (width 0.1) (type solid)) (layer "Edge.Cuts") (uuid "e0000000-0000-0000-0000-000000000001"))
+)
+"""
+    _tmp = _tf.mkdtemp(prefix='no_tent_')
+    try:
+        _src = os.path.join(_tmp, 'in.kicad_pcb')
+        _dst = os.path.join(_tmp, 'out.kicad_pcb')
+        with open(_src, 'w', encoding='utf-8') as _f:
+            _f.write(NO_TENT_BOARD)
+        add_tracks_and_vias_to_pcb(
+            _src, _dst, [],
+            [{'x': 10.0, 'y': 10.0, 'size': 0.6, 'drill': 0.3,
+              'layers': ['F.Cu', 'B.Cu'], 'net_id': 1}],
+            net_id_to_name={0: '', 1: '/SIG'})
+        with open(_dst, encoding='utf-8') as _f:
+            _out = _f.read()
+        _via = _out[_out.index('\t(via'):]
+        check('(tenting' not in _via,
+              "a board declaring `(tenting (front no) (back no))` must not have "
+              "the tool stamp tenting on the vias it adds -- that tents a via "
+              "the designer said to leave exposed. Got:\n" + _via[:400])
+        _parsed = kp.extract_vias(_out, {'': 0, '/SIG': 1})
+        check(len(_parsed) == 1 and _parsed[0].tenting_attrs == {},
+              f"the added via must carry no spec at all, got "
+              f"{[v.tenting_attrs for v in _parsed]}")
+    finally:
+        _sh.rmtree(_tmp, ignore_errors=True)
 
     # ------------------------------------------------- via-in-pad fab note
     pad = Pad(component_ref='U1', pad_number='A1', global_x=10.0, global_y=10.0,
