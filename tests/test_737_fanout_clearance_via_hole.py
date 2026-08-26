@@ -618,14 +618,29 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
                          'the nudger reads st.npth_floor at function-relative '
                          'line(s) %s -- a duck-typed harness carries none, so '
                          'the getattr default decides silently' % drift)
-        # And the one constant this file HAND-MIRRORS. `H2H_PAD` is a
-        # function-local literal, so it cannot be imported; three ON-THE-BRANCH
-        # guards above reason about the drill test using the mirror, and would
-        # silently reason about the wrong number if the engine's changed.
-        self.assertIn('H2H_PAD = %s' % H2H_PAD, ' '.join(src),
-                      "the engine's H2H_PAD is no longer %s, so this file's "
-                      'mirror -- and the drill-test arithmetic in every '
-                      'ON-THE-BRANCH guard here -- is stale' % H2H_PAD)
+        # And the one constant this file HAND-MIRRORS. Since #756 `H2H_PAD`
+        # is `resolve_drill_floors`' answer rather than a literal, so the
+        # mirror is checked against the resolver on a project-less board --
+        # which is what every rig here builds, and which takes the fab floor.
+        # Three ON-THE-BRANCH guards above reason about the drill test using
+        # the mirror and would silently reason about the wrong number if the
+        # engine's moved. The literal ban is the other half: a value check
+        # alone would pass a resolver hard-wired back to 0.45.
+        self.assertEqual(
+            FC.resolve_drill_floors(
+                make_pcb(board_info=BoardInfo(layers={},
+                                              copper_layers=['F.Cu', 'B.Cu'],
+                                              board_bounds=(0.0, 0.0, 4.0, 4.0)),
+                         source_path=''))[1],
+            H2H_PAD,
+            "the engine's pad drill floor on a project-less board is no "
+            "longer %s, so this file's mirror -- and the drill-test "
+            'arithmetic in every ON-THE-BRANCH guard here -- is stale'
+            % H2H_PAD)
+        self.assertEqual(
+            [i + 1 for i, l in enumerate(src)
+             if l.lstrip().startswith('H2H_PAD =')], [],
+            'H2H_PAD is a literal again -- #756 exists because it was')
     # MUTATION: re-spell either gate's floor, drop any of the four 1e-4s, add
     # a fifth hole gate, move the board read out of `npth_step`, or assign
     # `npth_clr` twice -- one of the counts or lists above changes. (The

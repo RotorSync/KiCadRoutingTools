@@ -754,16 +754,65 @@ class TestOneDrillRule(unittest.TestCase):
     # fuzz, and this is its only gate.
 
     def test_this_files_mirrored_floors_are_still_the_engines(self):
-        """H2H_VIA/H2H_PAD are function-local literals and cannot be
-        imported, so every threshold computed above is a hand mirror."""
-        joined = ' '.join(self._src())
-        for name, val in (('H2H_VIA', H2H_VIA), ('H2H_PAD', H2H_PAD)):
-            self.assertIn('%s = %s' % (name, val), joined,
-                          "the engine's %s is no longer %s, so this file's "
-                          'mirror -- and every ON-THE-BRANCH threshold in it '
-                          '-- is stale' % (name, val))
-    # MUTATION: H2H_VIA -> H2H_PAD at the via-to-via gate is a typo class this
-    # does NOT catch (both names still exist); the behavioural arms do.
+        """TWO HALVES, because either alone is evadable (#756).
+
+        The mirrors above are no longer mirrors of LITERALS: #756 made both
+        floors `resolve_drill_floors`' answer, board-first and raise-only. So
+        mirror the ANSWER on the kind of board every rig in this file builds --
+        one with no project, which takes the fab floors -- and, separately, pin
+        the SHAPE that makes the answer board-derived at all.
+
+        Value alone would pass a resolver hard-wired to `return 0.2, 0.45,
+        None, 'fixed default'`; shape alone would pass a resolver whose fab
+        fallback silently moved to 0.15. Both halves are load-bearing.
+
+        The mirrors stay HAND-WRITTEN. Computing them from the resolver at
+        import time would make every ON-THE-BRANCH threshold in this file
+        self-fulfilling -- the arithmetic would track a moved engine value in
+        silence, which is the exact failure this guard exists to prevent."""
+        # (i) VALUE, on a project-less board: that is what the mirrors are OF.
+        via, pad, decl, src = FC.resolve_drill_floors(
+            make_pcb(board_info=BoardInfo(layers={},
+                                          copper_layers=['F.Cu', 'B.Cu'],
+                                          board_bounds=(0.0, 0.0, 4.0, 4.0)),
+                     source_path=''))
+        self.assertEqual((via, pad), (H2H_VIA, H2H_PAD),
+                         "the engine's drill floors on a project-less board "
+                         "are no longer (%s, %s), so this file's mirrors -- "
+                         'and every ON-THE-BRANCH threshold computed from them '
+                         '-- are stale' % (H2H_VIA, H2H_PAD))
+        self.assertEqual((decl, src), (None, 'fixed default'),
+                         'a board with no project now reports a declaration; '
+                         'the fab-fallback arm above is measuring something '
+                         'else')
+        # (ii) SHAPE: exactly one resolved assignment, and no literal one.
+        src_lines = self._src()
+        asg = [i + 1 for i, l in enumerate(src_lines)
+               if 'H2H_VIA, H2H_PAD' in l and 'resolve_drill_floors(' in l]
+        self.assertEqual(len(asg), 1,
+                         'expected exactly one resolved-floor assignment in '
+                         'the nudger; found %d at function-relative line(s) %s'
+                         % (len(asg), asg))
+        lit = [i + 1 for i, l in enumerate(src_lines)
+               if l.lstrip().startswith(('H2H_VIA =', 'H2H_PAD ='))]
+        self.assertEqual(lit, [],
+                         'a drill floor is a LITERAL again at function-'
+                         'relative line(s) %s -- #756 exists because both '
+                         'were' % lit)
+    # MUTATION: a fab-floor move (fab_tiers 0.20 -> 0.15) -> killed by (i)
+    # only. A literal re-hardcoded AT THE ASSIGNMENT -> killed by (ii) only.
+    # NOT CAUGHT HERE, and this note said the opposite until the battery was
+    # actually run: the RESOLVER hard-wired to `return 0.2, 0.45, None, 'fixed
+    # default'` SURVIVES all three files' guards -- measured. (ii) reads
+    # `_src()`, which is scoped to nudge_vias_for_unresolved, so the assignment
+    # line still matches; and (i) is exactly the answer a hard-wire returns.
+    # That is not a hole in this guard, it is its scope: this file's mirrors
+    # are about the PROJECT-LESS value and a hard-wire leaves them correct.
+    # `tests/test_756_...py` owns "is it board-derived at all" and kills it.
+    # STILL NOT CAUGHT, and it was not before #756 either: H2H_VIA <-> H2H_PAD
+    # swapped at the via-to-via gate, since both names stay in scope. The
+    # behavioural arms and mutate_750's h2h-via-floor-swapped-for-the-pad-one
+    # carry that one.
 
 
 class TestThePadSideStillRefusesToInvent(unittest.TestCase):

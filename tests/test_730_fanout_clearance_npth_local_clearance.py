@@ -1100,13 +1100,30 @@ class TestOneHoleRule(unittest.TestCase):
                       'sibling gates keep')
 
     def test_this_files_mirrored_constants_are_still_the_engines(self):
-        """`H2H_PAD` is a function-local literal and cannot be imported, so the
-        drill-gate arithmetic in this file's ON-THE-BRANCH guards is a hand
-        mirror that would silently reason about the wrong number."""
-        joined = ' '.join(self._nudger_src())
-        self.assertIn('H2H_PAD = %s' % H2H_PAD, joined,
-                      "the engine's H2H_PAD is no longer %s, so this file's "
-                      'mirror is stale' % H2H_PAD)
+        """`H2H_PAD` is a function-local whose VALUE is now
+        `resolve_drill_floors`' answer (#756), not a literal, so the mirror is
+        checked against the resolver on the kind of board this file builds --
+        one with no project, which takes the fab floor. The literal ban below
+        is the second half: a value check alone would pass a resolver
+        hard-wired back to 0.45.
+
+        `test_750` owns the assignment-shape half; this file only needs its own
+        drill-gate arithmetic to stay honest."""
+        pad = FC.resolve_drill_floors(
+            make_pcb(board_info=BoardInfo(layers={},
+                                          copper_layers=['F.Cu', 'B.Cu'],
+                                          board_bounds=(0.0, 0.0, 4.0, 4.0)),
+                     source_path=''))[1]
+        self.assertEqual(pad, H2H_PAD,
+                         "the engine's pad drill floor on a project-less "
+                         "board is no longer %s, so this file's mirror -- and "
+                         'the drill-test arithmetic in every ON-THE-BRANCH '
+                         'guard here -- is stale' % H2H_PAD)
+        bad = [i + 1 for i, l in enumerate(self._nudger_src())
+               if l.lstrip().startswith('H2H_PAD =')]
+        self.assertEqual(bad, [],
+                         'H2H_PAD is a literal again at function-relative '
+                         'line(s) %s -- #756 exists because it was' % bad)
 
     def test_the_scalar_mirror_matches_the_shared_kernel(self):
         """The override gates measure with the SHARED seg-to-seg helper, and it
