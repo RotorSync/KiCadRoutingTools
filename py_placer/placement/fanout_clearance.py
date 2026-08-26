@@ -759,17 +759,23 @@ class _Repair:
         # entry gets floor None / mf 0.0: its rect is already inflated to the
         # hole floor, and the copper-to-HOLE rule is net-independent, so the
         # new machinery must never raise it via a neighbouring pad's netclass.
-        # KNOWN GAP, deliberately not closed here: check_drc DOES honour the
-        # hole pad's OWN `local_clearance` on that rule (check_drc.py, the
-        # `max(npth_clr, local_clearance)` in the copper-to-hole pass, #505),
-        # and `lc` is net-independent too -- so this under-blocks by
-        # `lc - max(npth_floor, clearance)` on such a pad. Measured on
-        # kicad_files/ulx3s.kicad_pcb, AUDIO1's two 1.7mm NPTH holes at
-        # lc=0.400: 1.050mm modelled vs 1.250mm required, a 0.200mm
-        # under-block. It is the HOLE rule, not the different-net copper rule
-        # #725 is about, and it interacts with the #617 balance below; filed
-        # separately. (watchy's 8 NPTH overrides are all 0.100, below the 0.20
-        # fab floor, so that board is numerically inert here.)
+        # #730: the rect inflation below DOES now carry the hole pad's OWN
+        # `local_clearance`, which is what makes floor None correct rather than
+        # merely convenient. check_drc grades this rule at
+        # `max(npth_clr, lc)` (check_drc.py:2733, #505) and `lc` on a hole pad
+        # is net-independent exactly like the floor beside it -- so it belongs
+        # in the GEOMETRY, with the fab floor, and not in the per-pair floor
+        # machinery, which resolves netclasses. Read straight off the pad, NOT
+        # through PadClearanceModel, and "is the model active?" is NOT a usable
+        # proxy either. The model refuses to activate for an NPTH-ONLY override
+        # (legality.py:1450-1454 gates has_overrides on _pad_carries_copper) --
+        # but on the one board that matters it is active anyway and still gives
+        # the hole nothing: measured on ulx3s, BAT1's two SMD pads carry
+        # lc 0.700 so `model.active` is True, while AUDIO1's two NPTH holes get
+        # no floor at all, because `pad_floor` is built for copper pads only
+        # and `_fp_floor_by_id` maps only copper-pad tuples -- so the NPTH
+        # tuple still resolves through `_pair_or_flat(fa, None)` to the flat
+        # scalar. The read has to be off the pad.
         # NB: self.foreign_pads (and self.segments) are read nowhere after
         # __init__ -- the pruned per-cap lists are what the sweep uses. They
         # must NOT be deleted as dead: the id-keyed floor maps below depend on
@@ -815,11 +821,33 @@ class _Repair:
                     # the DRILL still removes any copper closer than the
                     # NPTH-to-track floor, so a cap pad slid over it is a real
                     # fab violation regardless of net. Blocks BOTH sides
-                    # (through hole); graded at the NPTH floor by inflating
-                    # the rect; net -1 never matches a cap pad's net (even a
-                    # net-tied mounting hole is not connectable copper, #328).
+                    # (through hole); graded by inflating the rect so that
+                    # rect + the flat `clearance` charged downstream lands on
+                    # check_drc's own requirement; net -1 never matches a cap
+                    # pad's net (even a net-tied mounting hole is not
+                    # connectable copper, #328).
+                    #
+                    # #730: `max(self.npth_floor, lc)` is check_drc's
+                    # `max(npth_clr, local_clearance)` term for term.
+                    # `max(npth_floor, clearance)` -- what this resolved to
+                    # before -- is ALREADY exactly check_drc.py:2714's
+                    # `npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE,
+                    # hole_clearance)`, because npth_floor carries the fab
+                    # floor and the board's declared min_hole_clearance and
+                    # the `clearance` comes back in downstream. So `lc` was
+                    # the only missing term, and this is one term added, not
+                    # a re-derivation. Measured on kicad_files/ulx3s.kicad_pcb,
+                    # AUDIO1's two 1.7mm NPTH holes at lc=0.400: 1.050mm
+                    # modelled vs 1.250mm required at --clearance 0.10, and
+                    # 1.100 vs 1.250 at 0.25. RAISE-ONLY -- `max` with a
+                    # non-negative term -- so a board with no NPTH override,
+                    # which is 21 of the 22 tracked ones, is byte-identical.
+                    # (watchy's 8 NPTH overrides are all 0.100, below the 0.20
+                    # fab floor, so that board stays inert and is this rule's
+                    # negative control rather than a second example.)
                     if (p.drill or 0) > 0:
-                        grow = max(0.0, self.npth_floor - clearance)
+                        lc = getattr(p, 'local_clearance', 0.0) or 0.0
+                        grow = max(0.0, max(self.npth_floor, lc) - clearance)
                         for hx, hy, hd in pad_drill_circles(p):
                             hr = hd / 2.0 + grow
                             self.foreign_pads.append(
