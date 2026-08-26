@@ -1610,7 +1610,7 @@ class PartPads:
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
                  'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
                  '_hole_cache', '_keepout_cache', '_ext_cache', 'pad_floors',
-                 'max_floor', 'clearance')
+                 'max_floor', 'clearance', 'hole_reach')
 
     def __init__(self, fp, clearance: float, model=None,
                  copper_holes: bool = True):
@@ -1735,6 +1735,28 @@ class PartPads:
                 if mf > self.max_floor:
                     self.max_floor = mf
         self.n_pads = len(self.pads_local)
+        # How far this part's hole keep-outs reach BEYOND its own extent
+        # (#761) -- the broad-phase bound, 0.0 with no holes.
+        #
+        # Both early-outs drop a pair on the gap between EXTENT boxes, and
+        # `max_floor` is built from copper pads only: an NPTH pad `continue`s
+        # above, before `pad_floors.append`, so a hole's requirement reaches
+        # neither bound. Measured on ulx3s: AUDIO1.max_floor is 0.0 while its
+        # holes require 0.400, so at `model.base` 0.25 every pair at an extent
+        # gap in [0.25, 0.40) returned ZERO_SHORTFALL before the hole loop ran
+        # -- i.e. the keep-out fix above is INERT without this term.
+        #
+        # Soundness: an extent box contains its hole at `extent_r`, so
+        # `rect_gap(ea, eb) >= dist(hole_centre, foreign_rect) - extent_r`,
+        # while a penetration needs `dist < keepout_r`. Dropping at
+        # `gap >= reach` is therefore safe exactly when
+        # `reach >= keepout_r - extent_r`, which is this.
+        self.hole_reach = 0.0
+        for (_hx, _hy, _kr), (_ex, _ey, _er) in zip(self.holes_local,
+                                                    self.holes_extent):
+            over = (_kr + self.clearance) - _er
+            if over > self.hole_reach:
+                self.hole_reach = over
         self._pad_cache: Dict[float, list] = {}
         self._hole_cache: Dict[float, list] = {}
         self._keepout_cache: Dict[float, list] = {}
@@ -1945,6 +1967,8 @@ class LegalityContext:
         reach = (self.clearance if model is None
                  else max(self.clearance, model.base,
                           pa.max_floor, pb.max_floor))
+        # ...and the hole keep-outs, which no pad floor accounts for (#761).
+        reach = max(reach, pa.hole_reach, pb.hole_reach)
         if rect_gap(ea, eb) >= reach - EPS:
             return ZERO_SHORTFALL
         if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
@@ -2169,7 +2193,11 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     # maximum. Under-reaching here is how the original bug hid: a fiducial
     # keep-clear 1.016mm wide never entered a census bounded at 0.15 + 0.5.
     board_max_floor = max([pp.max_floor for pp in parts.values()] or [0.0])
-    census_reach = max(clearance, board_max_floor,
+    # ...plus the hole keep-outs (#761): same argument, and the same reason
+    # the per-candidate gate needs it -- an NPTH hole contributes to no pad
+    # floor, so a halo bounded by floors alone never reaches one.
+    board_max_hole = max([pp.hole_reach for pp in parts.values()] or [0.0])
+    census_reach = max(clearance, board_max_floor, board_max_hole,
                        model.base if model is not None else 0.0)
 
     def near_refs(ref):
