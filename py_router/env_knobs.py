@@ -69,6 +69,13 @@ def refresh() -> None:
     g['BUS_MULTIPOINT_SPAN'] = _on_default('KICAD_BUS_MULTIPOINT_SPAN')
     g['BARE_BALL_ZONE_EXEMPT'] = _on_default('KICAD_BARE_BALL_ZONE_EXEMPT')
     g['DIRECT_FIRST'] = _on_default('KICAD_DIRECT_FIRST')
+    # SI Phase 2: victim-net routing enforcement (aggressor-proximity
+    # costs). Default ON; KICAD_SI_ENFORCE=0 turns it off. Radius/cost
+    # knobs tune the proximity band (mm) and its peak cost (mm-equivalent).
+    g['SI_ENFORCE'] = _on_default('KICAD_SI_ENFORCE')
+    g['SI_ENFORCE_RADIUS'] = _f('KICAD_SI_ENFORCE_RADIUS', 1.5)
+    g['SI_ENFORCE_COST'] = _f('KICAD_SI_ENFORCE_COST', 0.44)
+    g['SI_ENFORCE_DEBUG'] = _s('KICAD_SI_ENFORCE_DEBUG', '') == '1'
     # Phase B Task 2: plan-informed net ordering (most-congested corridors
     # first). Default OFF; KICAD_PLANNER_ORDERING=1 turns it on. No CLI flag
     # this phase -- the env knob is how the A/B harness toggles the engine

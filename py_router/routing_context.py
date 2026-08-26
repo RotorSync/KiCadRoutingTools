@@ -29,6 +29,25 @@ from net_queries import get_chip_pad_positions
 from pcb_modification import add_route_to_pcb_data
 
 
+# SI Phase 2: victim-net routing enforcement. Stamps aggressor-proximity layer
+# costs for the net being routed when it is classified VICTIM (see
+# si_enforce.py). No-op unless KICAD_SI_ENFORCE is on (default ON).
+def _stamp_si_enforcement(obstacles, pcb_data, config, net_id: int):
+    """Stamp SI aggressor-proximity costs for a victim net (inert otherwise)."""
+    if not env_knobs.SI_ENFORCE:
+        return 0
+    try:
+        from si_enforce import stamp_victim_si_field
+        n = stamp_victim_si_field(obstacles, pcb_data, config, net_id)
+        if n and env_knobs.SI_ENFORCE_DEBUG:
+            print(f"    [SI-ENFORCE] net {net_id}: stamped {n} cells")
+        return n
+    except Exception:
+        # Enforcement is a soft steering cost -- never let a classification or
+        # geometry hiccup break routing.
+        return 0
+
+
 def _add_free_via_positions(obstacles, pcb_data, net_ids: List[int], config):
     """Add through-hole pads as free via positions (zero-cost layer change).
 
@@ -168,6 +187,13 @@ def build_diff_pair_obstacles(
             {**filter_ripped_ghosts(ripped_route_layer_costs, config, routed_net_ids),
              **(_stub_surplus or {})}, config),
         config=config)
+
+    # SI Phase 2: victim-net enforcement (aggressor-proximity costs). Stamped
+    # AFTER merge_track_proximity_costs so the SI field is not wiped by that
+    # merge's own set_layer_proximity_batch write. Only VICTIM nets pay; the
+    # diff-pair path stamps for each half when it is a victim.
+    _stamp_si_enforcement(obstacles, pcb_data, config, p_net_id)
+    _stamp_si_enforcement(obstacles, pcb_data, config, n_net_id)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -325,6 +351,10 @@ def build_single_ended_obstacles(
     # Congestion v2 (#424): demand/capacity field, owner-exempt (no-op
     # unless KICAD_CONGESTION2_COST > 0 and the field was built).
 
+    # SI Phase 2: victim-net enforcement (aggressor-proximity costs). Stamped
+    # AFTER merge_track_proximity_costs so the SI field is not wiped by that
+    # merge's own set_layer_proximity_batch write. Only VICTIM nets pay.
+    _stamp_si_enforcement(obstacles, pcb_data, config, net_id)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -417,6 +447,11 @@ def build_incremental_obstacles(
             add_history_source(_stub_surplus or None, config),
             config, net_id, routed_net_ids) or None,
         config=config)
+
+    # SI Phase 2: victim-net enforcement (aggressor-proximity costs). Stamped
+    # AFTER merge_track_proximity_costs so the SI field is not wiped by that
+    # merge's own set_layer_proximity_batch write. Only VICTIM nets pay.
+    _stamp_si_enforcement(obstacles, pcb_data, config, net_id)
 
     # Add cross-layer track data
     add_cross_layer_tracks(obstacles, pcb_data, config, layer_map,
@@ -566,6 +601,10 @@ def prepare_obstacles_inplace(
             config, net_id, routed_net_ids),
         config=config)
 
+    # SI Phase 2: victim-net enforcement (aggressor-proximity costs). Stamped
+    # AFTER merge_track_proximity_costs so the SI field is not wiped by that
+    # merge's own set_layer_proximity_batch write. Only VICTIM nets pay.
+    _stamp_si_enforcement(working_obstacles, pcb_data, config, net_id)
 
     # Add cross-layer track data
     add_cross_layer_tracks(working_obstacles, pcb_data, config, layer_map,
