@@ -522,7 +522,7 @@ class QuenchState:
             part_pads = legality.build_part_pads(
                 {ref: pcb_data.footprints[ref] for ref in self.parts
                  if ref in pcb_data.footprints}, clearance, pad_model,
-                npth_floor=legality.resolve_npth_floor(pcb_data))
+                npth_floor=legality.resolve_npth_floor(pcb_data, pcb_file))
             self.legality_ctx = legality.LegalityContext(
                 part_pads, self.edge_gate, clearance,
                 pose_of=lambda r: (self.parts[r].x, self.parts[r].y,

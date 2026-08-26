@@ -68,7 +68,8 @@ from kicad_parser import parse_kicad_pcb, pad_drill_circles
 from check_drc import _pad_has_no_copper
 from obstacle_map import resolve_hole_clearance
 from synth import make_pad, make_pcb
-from placement.legality import (EPS, LegalityContext, PartPads,
+from placement.legality import (EPS, PAIR_TEST_CAP, LegalityContext,
+                                PartPads,
                                 _circle_rect_penetration, build_part_pads,
                                 format_required_clause, grade_pad_legality,
                                 resolve_npth_floor)
@@ -98,6 +99,11 @@ E_LCS = (0.00, 0.40, 0.15)
 COLLAPSE = {0.10: 0.300, 0.20: 0.200, 0.25: 0.150, 0.40: 0.000}
 
 H_DRILL = 2.0
+
+# `grade_pad_legality`'s neighbour-grid cell, hand-mirrored from the engine's
+# `cell = 4.0` local. Only the halo arm below depends on it, and it depends on
+# it structurally (is the term's reach wider than one cell?), not numerically.
+CENSUS_CELL = 4.0
 
 
 def _npth(x, y, lc, ref='H1', drill=H_DRILL, num='H1'):
@@ -288,6 +294,97 @@ class TestTheBoardFloorReachesTheKeepOut(unittest.TestCase):
                if (getattr(p, 'drill', 0) or 0) > 0 and _pad_has_no_copper(p)}
         self.assertEqual(lcs, {0.0})
 
+    def test_the_two_HOLE_consumers_pass_it_and_the_others_do_not(self):
+        """A source guard, by LINE, and it exists because behaviour cannot
+        reach it: the one tracked board that declares above the fab floor
+        clears its nearest copper by 3.69mm, so dropping the term from the
+        census changes no ANSWER on any board we have. Measured -- the
+        mutation row `the-census-passes-no-board-floor` SURVIVED every
+        behavioural arm in this file.
+
+        The distinction being pinned is the whole point of the #730 tripwire's
+        "needs its own review": of the six `build_part_pads` call sites, the
+        two that read hole KEEP-OUTS carry the board floor, and the four that
+        read only pad rects, extents or silk do not -- for them it would
+        resolve a board and change nothing."""
+        pairs = (('py_placer/placement/legality.py', 1, 'grade_pad_legality'),
+                 ('py_placer/placement/quench.py', 1, 'quench'))
+        for rel, want, who in pairs:
+            src = io.open(os.path.join(_ROOT, *rel.split('/')),
+                          encoding='utf-8').read()
+            hits = [i + 1 for i, l in enumerate(src.splitlines())
+                    if 'npth_floor=' in l.split('#')[0]]
+            self.assertEqual(len(hits), want,
+                             '%s passes npth_floor at %d site(s), expected '
+                             '%d (%s)' % (rel, len(hits), want, who))
+        for rel in ('py_placer/placement/labels.py',
+                    'py_placer/placement/routability.py',
+                    'py_placer/placement/seeder.py'):
+            src = io.open(os.path.join(_ROOT, *rel.split('/')),
+                          encoding='utf-8').read()
+            hits = [i + 1 for i, l in enumerate(src.splitlines())
+                    if 'npth_floor=' in l.split('#')[0]]
+            self.assertEqual(hits, [],
+                             '%s passes npth_floor at line(s) %r -- it reads '
+                             'extents or silk, not hole keep-outs, so the '
+                             'term resolves a board and changes nothing '
+                             'there' % (rel, hits))
+
+    def test_the_CALLERS_path_wins_over_the_parsed_source_path(self):
+        """The #498 rule every sibling here follows. A board staged into a
+        temp dir and parsed from there carries a `source_path` that is not the
+        board the caller means, and `grade_pad_legality` already threads
+        `pcb_file` to `PadClearanceModel.for_board` for exactly that reason.
+
+        flat_hierarchy is the fixture because it is the one tracked board that
+        declares above the fab floor -- on any other board both answers are
+        0.2000 and the arm would be vacuous."""
+        import shutil
+        import tempfile
+        real = resolve_npth_floor(parse_kicad_pcb(FLAT_HIER))
+        self.assertAlmostEqual(real, 0.25, places=6)
+        d = tempfile.mkdtemp(prefix='t761_')
+        try:
+            staged = os.path.join(d, 'staged.kicad_pcb')
+            shutil.copyfile(FLAT_HIER, staged)      # the board ALONE, #441
+            pcb = parse_kicad_pcb(staged)
+            # ...the staged board on its own cannot answer,
+            self.assertAlmostEqual(resolve_npth_floor(pcb), NPTH_FLOOR,
+                                   places=6)
+            # ...and the caller's path restores it.
+            self.assertAlmostEqual(resolve_npth_floor(pcb, FLAT_HIER), 0.25,
+                                   places=6)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    # MUTATION: resolve-npth-floor-ignores-pcb_file (KILLED).
+
+    def test_a_failed_resolution_is_NOTED_not_swallowed(self):
+        """`grade_pad_legality` returns `clearance_notes` for exactly this --
+        "anything that went WRONG resolving the requirement". A silent
+        fallback drops the modelled floor by up to the declared value and
+        returns a byte-identical report, which is the shape of silence this
+        issue was filed about."""
+        import obstacle_map
+        pcb = parse_kicad_pcb(FLAT_HIER)
+        notes = []
+        self.assertAlmostEqual(resolve_npth_floor(pcb, None, notes), 0.25)
+        self.assertEqual(notes, [])
+        real = obstacle_map.resolve_hole_clearance
+
+        def boom(*_a, **_k):
+            raise IOError('the .kicad_pro is unreadable')
+
+        obstacle_map.resolve_hole_clearance = boom
+        try:
+            self.assertAlmostEqual(resolve_npth_floor(pcb, None, notes),
+                                   NPTH_FLOOR, places=6)
+        finally:
+            obstacle_map.resolve_hole_clearance = real
+        self.assertEqual(len(notes), 1)
+        self.assertIn('unreadable', notes[0])
+        self.assertIn('fab floor', notes[0])
+    # MUTATION: failed-floor-resolution-is-silent (KILLED).
+
     def test_resolve_npth_floor_survives_a_board_it_cannot_read(self):
         """A caller with no board gets the fab floor, not a crash and not 0."""
         self.assertAlmostEqual(resolve_npth_floor(None), NPTH_FLOOR)
@@ -448,12 +545,20 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
         WIDER than one cell. Six millimetres around a mounting hole is not a
         stunt value -- it is a screw-head/washer keep-out, which is what a
         `(clearance ...)` on an NPTH pad is usually for -- but the arm is
-        honest that a corpus-scale override cannot reach this branch."""
+        honest that a corpus-scale override cannot reach this branch.
+
+        The SEPARATION is load-bearing too, and getting it wrong is how the
+        second draft of this arm still survived. The halo is symmetric -- the
+        census walks every ref -- so BOTH parts' un-widened halos have to miss
+        the other's cells. At 2.0mm apart they still shared cell 0 and the arm
+        passed for free. 4.0mm puts the pad's own extent in cell 1 with H1
+        registered in {-1, 0}, which no 0.75mm halo can bridge."""
         clearance = 0.25
         big_lc = 6.0
-        self.assertGreater(big_lc, 4.0, 'the census cell size; below it the '
-                                        'halo term cannot change an answer')
-        pcb, _ctx, parts = _hole_pair(2.0, lc=big_lc, clearance=clearance)
+        self.assertGreater(big_lc, CENSUS_CELL,
+                           'the census cell size; below it the halo term '
+                           'cannot change an answer')
+        pcb, _ctx, parts = _hole_pair(4.0, lc=big_lc, clearance=clearance)
         self.assertAlmostEqual(parts['H1'].hole_reach, big_lc, places=6)
         rep = grade_pad_legality(pcb, clearance, worst_n=4, exact=False)
         self.assertEqual(rep['hole_conflicts'], 1)
@@ -461,6 +566,87 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
                          [['C1', 'H1', round(big_lc, 4), 'NPTH hole']])
     # MUTATION: census-reach-drops-hole_reach (KILLED by this arm, NOT by the
     # one above it -- see its docstring).
+
+    def test_the_PAIR_TEST_CAP_branch_still_measures_the_hole(self):
+        """`pair_shortfall` returns early when `pa.n_pads * pb.n_pads` exceeds
+        the cap, and that branch used to hardcode `hole=0.0` -- so the hole
+        channel could never fire for exactly the dense connectors that carry
+        mounting holes. Corpus-reachable: glasgow_revC's J5 x U30 is 5324.
+
+        Two grids of copper pads whose PRODUCT clears the cap -- 64 x 65,
+        not 64 + 65, which is the arithmetic the first draft of this arm got
+        wrong and failed on."""
+        clearance = 0.25
+        n = 8
+        a_pads = [_npth(0.0, 0.0, AUDIO1_LC)]
+        a_pads += [_cu(-2.0 - 0.1 * i, -2.0 - 0.1 * j, 'H1', net=5,
+                       sx=0.05, sy=0.05, num='p%d_%d' % (i, j))
+                   for i in range(n) for j in range(n)]
+        gap = 0.30
+        cx = H_DRILL / 2.0 + gap + 0.5
+        b_pads = [_cu(cx, 0.0, 'C1', num='b0')]
+        b_pads += [_cu(cx + 2.0 + 0.1 * i, 2.0 + 0.1 * j, 'C1',
+                       sx=0.05, sy=0.05, num='q%d_%d' % (i, j))
+                   for i in range(n) for j in range(n)]
+        fps = {'H1': _fp('H1', 0.0, 0.0, a_pads),
+               'C1': _fp('C1', cx, 0.0, b_pads)}
+        parts = build_part_pads(fps, clearance)
+        self.assertGreater(parts['H1'].n_pads * parts['C1'].n_pads,
+                           PAIR_TEST_CAP,
+                           'the fixture no longer trips the cap; this arm '
+                           'would then test the ordinary path')
+        poses = {r: (f.x, f.y, f.rotation) for r, f in fps.items()}
+        ctx = LegalityContext(parts, None, clearance,
+                              pose_of=lambda r: poses[r],
+                              seed_of=lambda r: poses[r])
+        req = max(clearance, NPTH_FLOOR, AUDIO1_LC)
+        self.assertAlmostEqual(ctx.pair_shortfall('H1', 'C1').hole,
+                               req - gap, places=6)
+    # MUTATION: pair-cap-goes-back-to-a-hardcoded-zero (KILLED).
+
+    def test_the_cap_branch_does_not_bill_the_hole_to_the_PAD_channel(self):
+        """`reach` feeds two things: the early-out, and the PAD shortfall the
+        cap branch charges. Folding `hole_reach` into one number billed a
+        single physical violation to two independent gates -- `pads_ok` tests
+        `cur.pad` and `cur.hole` as separate conjuncts and quench sums
+        `sf.hole` on its own.
+
+        The tell is that the answer depended on the PAD-PAIR PRODUCT, which is
+        a performance switch and must never change a verdict. Found by an
+        adversarial review of this branch, not by me."""
+        clearance = 0.25
+        lc = 1.0
+        gap = 0.30
+        seen = {}
+        for n in (7, 9):              # 49 and 81 copper pads: under, over
+            a_pads = [_npth(0.0, 0.0, lc)]
+            a_pads += [_cu(-3.0 - 0.1 * i, -3.0 - 0.1 * j, 'H1', net=5,
+                           sx=0.05, sy=0.05, num='p%d_%d' % (i, j))
+                       for i in range(n) for j in range(n)]
+            cx = H_DRILL / 2.0 + gap + 0.5
+            b_pads = [_cu(cx, 0.0, 'C1', num='b0')]
+            b_pads += [_cu(cx + 3.0 + 0.1 * i, 3.0 + 0.1 * j, 'C1',
+                           sx=0.05, sy=0.05, num='q%d_%d' % (i, j))
+                       for i in range(n) for j in range(n)]
+            fps = {'H1': _fp('H1', 0.0, 0.0, a_pads),
+                   'C1': _fp('C1', cx, 0.0, b_pads)}
+            parts = build_part_pads(fps, clearance)
+            poses = {r: (f.x, f.y, f.rotation) for r, f in fps.items()}
+            ctx = LegalityContext(parts, None, clearance,
+                                  pose_of=lambda r: poses[r],
+                                  seed_of=lambda r: poses[r])
+            seen[n] = (parts['H1'].n_pads * parts['C1'].n_pads,
+                       ctx.pair_shortfall('H1', 'C1'))
+        # ON THE BRANCH: the two fixtures straddle the cap, else this arm is
+        # comparing a branch with itself.
+        self.assertLess(seen[7][0], PAIR_TEST_CAP)
+        self.assertGreater(seen[9][0], PAIR_TEST_CAP)
+        req = max(clearance, NPTH_FLOOR, lc)
+        for n, (_prod, sf) in sorted(seen.items()):
+            with self.subTest(pads=n):
+                self.assertAlmostEqual(sf.hole, req - gap, places=6)
+                self.assertAlmostEqual(sf.pad, 0.0, places=6)
+    # MUTATION: cap-branch-charges-the-hole-reach-as-PAD (KILLED).
 
     def test_hole_reach_is_zero_for_a_part_with_no_holes(self):
         fp = _fp('C1', 0.0, 0.0, [_cu(0.0, 0.0)])

@@ -1577,7 +1577,8 @@ class PadClearanceModel:
         return eff, src
 
 
-def resolve_npth_floor(pcb_data) -> float:
+def resolve_npth_floor(pcb_data, pcb_file: str = None,
+                       notes: list = None) -> float:
     """The board's copper-to-NPTH-hole FLOOR: the JLC fab floor, raised to the
     board's own declared `min_hole_clearance` when it declares more (#761).
 
@@ -1598,8 +1599,18 @@ def resolve_npth_floor(pcb_data) -> float:
     `local_clearance` 0.0 -- so it is the single witness that this term fires
     at all, and every other board resolves to 0.2000.
 
+    `pcb_file` follows the #498 rule every sibling here follows -- the
+    CALLER's path when it has one, else `PCBData.source_path`. It is not
+    decoration: a board staged into a temp dir and parsed from there carries a
+    `source_path` that is not the board the caller means, and flat_hierarchy
+    staged that way resolves 0.2000 where the real path resolves 0.2500 --
+    which is exactly the 2.3500 -> 2.4000 radius this term exists for.
+
     Returns the plain fab floor when the board cannot be read, which is what a
-    caller with no board gets by default.
+    caller with no board gets by default. `notes` collects WHY, if a list is
+    given: a silent fallback here drops the modelled floor by up to the
+    declared value and reports a byte-identical census, which is the shape of
+    silence this issue was filed about.
     """
     import routing_defaults as defaults
     floor = float(defaults.NPTH_TO_TRACK_CLEARANCE)
@@ -1607,8 +1618,13 @@ def resolve_npth_floor(pcb_data) -> float:
         return floor
     try:
         from obstacle_map import resolve_hole_clearance
-        return max(floor, float(resolve_hole_clearance(pcb_data, None)))
-    except Exception:                                            # noqa: BLE001
+        return max(floor,
+                   float(resolve_hole_clearance(pcb_data, None, pcb_file)))
+    except Exception as e:                                       # noqa: BLE001
+        if notes is not None:
+            notes.append('copper-to-hole floor unresolved (%s: %s); the NPTH '
+                         'keep-out falls back to the %.2fmm fab floor'
+                         % (type(e).__name__, e, floor))
         return floor
 
 
@@ -2043,11 +2059,19 @@ class LegalityContext:
         # by the board-wide maximum -- this test runs per candidate pose
         # (quench.candidate_valid -> pads_ok), so a board-wide bound would slow
         # every pair on the board for the sake of one fiducial.
-        reach = (self.clearance if model is None
-                 else max(self.clearance, model.base,
-                          pa.max_floor, pb.max_floor))
+        pad_reach = (self.clearance if model is None
+                     else max(self.clearance, model.base,
+                              pa.max_floor, pb.max_floor))
         # ...and the hole keep-outs, which no pad floor accounts for (#761).
-        reach = max(reach, pa.hole_reach, pb.hole_reach)
+        # Kept as a SEPARATE name: the cap branch below charges its shortfall
+        # into the PAD channel, and folding the hole requirement into the
+        # number it charges bills one physical violation to two independent
+        # gates (`pads_ok` tests `cur.pad` and `cur.hole` as separate
+        # conjuncts, and quench sums `sf.hole` on its own). Measured on one
+        # hole at lc 1.0 with pads 0.30 off the wall, the only difference
+        # being the pad-pair product: 60x60 -> pad 0.0000, 70x70 -> pad
+        # 0.7000, hole 0.7000 in both.
+        reach = max(pad_reach, pa.hole_reach, pb.hole_reach)
         if rect_gap(ea, eb) >= reach - EPS:
             return ZERO_SHORTFALL
         rects_a = pa.pad_rects(xa, ya, ra)
@@ -2067,7 +2091,7 @@ class LegalityContext:
             # corpus-reachable, not theoretical: J5 is the one part on the 22
             # tracked boards whose product exceeds the cap.
             g = rect_gap(ea, eb)
-            return PairShortfall(max(0.0, reach - g), g < 0.0,
+            return PairShortfall(max(0.0, pad_reach - g), g < 0.0,
                                  _hole_shortfall(pa, xa, ya, ra, rects_b,
                                                  pb, xb, yb, rb, rects_a),
                                  g < 0.0)
@@ -2254,8 +2278,9 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     # extents (legality's pad_intersection channel, routability, seeder's
     # off-board census) deliberately do not: for them the term would resolve a
     # board and change nothing.
-    parts = build_part_pads(fps, clearance, model,
-                            npth_floor=resolve_npth_floor(pcb_data))
+    parts = build_part_pads(
+        fps, clearance, model,
+        npth_floor=resolve_npth_floor(pcb_data, pcb_file, clearance_notes))
     routing_layers = list(getattr(pcb_data.board_info, 'copper_layers', []) or [])
     check_exact = None
     if exact:
@@ -2396,9 +2421,20 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                         hole_req = req
             if hole_pen > EPS:
                 hole_conflicts += 1
-                # Above the board-wide clearance only -- the same bar the pad
-                # channel applies before it files a row, so a plain hole at the
-                # flat scalar stays quiet.
+                # Above the board-wide clearance only, so a plain hole at the
+                # flat scalar stays quiet. NOT literally the pad channel's
+                # bar, which is `pair_source != ''` and therefore sits at
+                # `model.base` -- the two differ when a netclass lifts
+                # `model.base` above `--clearance`, and "the same bar" would
+                # be wrong in exactly that case.
+                #
+                # DISCLOSED, not fixed: the hole channel files into `required`
+                # but not into `worst`, so a hole-ONLY conflict is printed by
+                # `format_required_clause` and is invisible to
+                # `floorplan.suspect_pairs`, which is built from `worst`.
+                # Widening `worst` changes what `place_seed --repair` chooses
+                # to move -- a placement-behaviour change needing its own
+                # before/after, not a rider on an arithmetic fix.
                 if hole_req > clearance + 1e-9:
                     required.append([key[0], key[1], round(hole_req, 4),
                                      'NPTH hole'])

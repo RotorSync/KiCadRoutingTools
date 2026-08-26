@@ -1520,12 +1520,22 @@ _HOLE_CLR_ORIGIN = set()      # paths whose floor came from fab_floor_origin,
                               # live rule below what the board declared
 
 
-def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
+def resolve_hole_clearance(pcb_data: PCBData, config,
+                           pcb_file: str = None) -> float:
     """The copper-to-HOLE floor this board declares, in mm (0.0 = none).
 
     Resolved ENGINE-SIDE off ``PCBData.source_path`` (the #498 mechanism built
     for exactly this), so both fronts inherit it with no wiring. An explicit
     ``config.hole_clearance`` wins and stops the read.
+
+    ``pcb_file`` overrides the parsed ``source_path`` when a caller holds the
+    authoritative path -- the #498 rule the rest of the toolchain follows,
+    "the CALLER's path when it has one, else ``PCBData.source_path``". Added
+    for #761: a board staged into a temp dir and parsed from there carries a
+    ``source_path`` that is not the board the caller means, and
+    ``grade_pad_legality``/``QuenchState`` already thread ``pcb_file`` to
+    ``PadClearanceModel.for_board`` for exactly that reason. Default ``None``
+    keeps every existing caller bit-identical.
 
     TWO sources, and the larger wins: ``design_settings.rules`` (what the
     project declares NOW) and ``kicad_routing_tools.fab_floor_origin`` (what it
@@ -1566,8 +1576,15 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
       place; a #130 pad-via graze left unrelocated) rather than routing around
       the hole.
     * ``placement/legality.PartPads`` builds its NPTH keep-out radii from a bare
-      ``fp``/``clearance`` pair with no board pointer in hand, so it cannot call
-      this helper without a threaded parameter.
+      ``fp``/``clearance`` pair with no board pointer in hand. **#761 threaded
+      the parameter rather than the board**: ``legality.resolve_npth_floor``
+      calls this helper ONCE in the caller and passes the resolved float down,
+      so ``PartPads`` still holds no board pointer while the two call sites
+      that read hole keep-outs (``grade_pad_legality``, ``QuenchState``) do
+      carry the declared floor. The four that read only pad rects, extents or
+      silk deliberately do not. This bullet is kept, corrected rather than
+      deleted, because "it cannot reach here" was true for two issues and a
+      reader who remembers it needs to see that it stopped being true.
 
     The rule the first three encode: raise this floor on passes that CHOOSE
     where new copper goes or that MOVE copper by a measured shortfall, not on
@@ -1588,7 +1605,7 @@ def resolve_hole_clearance(pcb_data: PCBData, config) -> float:
     explicit = getattr(config, 'hole_clearance', 0.0) or 0.0
     if explicit > 0:
         return float(explicit)
-    path = getattr(pcb_data, 'source_path', "") or ""
+    path = pcb_file or getattr(pcb_data, 'source_path', "") or ""
     if not path:
         return 0.0
     if path not in _HOLE_CLR_CACHE:
