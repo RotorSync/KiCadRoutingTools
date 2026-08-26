@@ -44,6 +44,9 @@ def classify_diff_pair_failure(result: Optional[dict]) -> str:
       pn-crossing                  P/N tracks must cross; untangle failed
       connector-graze              emitted geometry grazes committed foreign copper (#165/#246)
       no-escape-path               endpoint escape blocked (probe/setback: 0 search iterations)
+      needs-fanout                 endpoint escape blocked for the PAIR only -- a single
+                                   track still launches there, so the terminal needs a
+                                   coupled fanout, not more room (#764)
       pose-router-failure          PoseRouter centerline search exhausted (#346)
       no-route                     failed with no iterations and no blocked cells
     Call BEFORE the caller pops blocked_cells_* off the result.
@@ -57,6 +60,11 @@ def classify_diff_pair_failure(result: Optional[dict]) -> str:
         return 'pn-crossing'
     if result.get('connector_graze'):
         return 'connector-graze'
+    if result.get('needs_fanout'):
+        # #764: the coupled sweep failed where a single-ended re-probe succeeded.
+        # Distinct from no-escape-path: more clearance/setback cannot fix it, an
+        # escape built by the fanout step can.
+        return 'needs-fanout'
     if result.get('probe_blocked'):
         return 'no-escape-path'
     fwd = result.get('iterations_forward', 0)
