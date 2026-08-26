@@ -645,10 +645,15 @@ def manage_vias(
     enough to make the pair legal anyway. Whether this bites needs measuring
     on a real fine-pitch BGA before anyone claims it does.
 
-    `via_in_pad_conflict` also prices its drill floor at the flat
-    `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the board's own
-    `min_hole_to_hole` -- the D9/D11 substitute-a-constant class, unclosed
-    here (qfn_fanout resolves it board-first, wrapped at the fab floor).
+    `via_in_pad_conflict`'s drill floor was the OTHER gap here -- priced at
+    the flat `routing_defaults.HOLE_TO_HOLE_CLEARANCE` rather than the
+    board's own `min_hole_to_hole`, the D9/D11 substitute-a-constant class.
+    **Closed by #756**, in the shape `qfn_fanout` and `underpad.py` already
+    use: board-first through `list_nets.board_floor`, wrapped raise-only at
+    the fab floor. Both of its arms take that one number; it deliberately does
+    NOT adopt the 0.45 `pad_hole_to_hole` the via-nudge charges for the same
+    via-drill-to-pad-drill pair (see the comment at the resolution site).
+    The self-blindness above is untouched and still open.
     """
     def find_nearby_via(x: float, y: float, net_id: int, max_dist: float):
         """Find an existing via on the same net within max_dist of position."""
@@ -674,6 +679,43 @@ def manage_vias(
     # are static and manage_vias runs before any of ITS vias exist.
     from routing_defaults import HOLE_TO_HOLE_CLEARANCE
     from kicad_parser import pad_drill_capsule
+    # #756: DRILL FLOOR, board-first and RAISE-only. `via_in_pad_conflict`
+    # below spaced every drill it places at the flat HOLE_TO_HOLE_CLEARANCE and
+    # read the board nowhere -- the gap this function's own docstring named as
+    # "the D9/D11 substitute-a-constant class, unclosed here". So a board
+    # declaring min_hole_to_hole 0.3 got its via-in-pad drills spaced at 0.2,
+    # while check_drc graded them at 0.3 (`_pin_up`, check_drc.py:3686) and
+    # flagged the pairs this pass had just placed.
+    #
+    # Shape copied verbatim from the sibling that already does it,
+    # `underpad.py`'s `_h2h_decl`/`_h2h_fab`/`max` block, so a reviewer diffs
+    # the two and sees one rule. RAISE-ONLY IN THE CODE, not only in this
+    # comment: `board_floor` is board-AUTHORITATIVE and will happily hand back
+    # a declared 0.10, so the fab floor is wrapped in explicitly.
+    #
+    # NARROW ON PURPOSE. Both arms keep the 0.20 `hole_to_hole` fab term; this
+    # does NOT adopt the 0.45 `pad_hole_to_hole` that
+    # placement/fanout_clearance's via-nudge charges for the very same
+    # via-drill-to-pad-drill pair. The two passes disagree by 0.25mm about that
+    # pair and #756 reconciles neither: doing so would move keep-outs on every
+    # fine-pitch BGA via-in-pad escape and needs its own before/after. Named
+    # here rather than silently unified.
+    #
+    # Layer count off `board_info`, matching the `copper` this function already
+    # derives for `fab_floor_ladder` below -- one board, one count.
+    from list_nets import board_floor as _board_floor
+    _cu_n = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 4
+    _h2h_decl, _h2h_src = _board_floor(
+        getattr(pcb_data, 'source_path', "") or "", 'hole_to_hole',
+        None, HOLE_TO_HOLE_CLEARANCE)
+    _h2h_fab = fab_floor_min(_cu_n).get('hole_to_hole', HOLE_TO_HOLE_CLEARANCE)
+    _h2h = max(_h2h_decl, _h2h_fab)
+    if _h2h_src == 'board constraint' and _h2h_decl > HOLE_TO_HOLE_CLEARANCE:
+        print(f"  Hole-to-hole {_h2h:g}mm (from the board's own "
+              f"min_hole_to_hole)")
+    elif _h2h_src == 'board constraint' and _h2h_decl < _h2h_fab:
+        print(f"  Board min_hole_to_hole {_h2h_decl:g}mm is below the "
+              f"{_h2h_fab:g}mm fab hole-to-hole floor; using {_h2h:g}mm.")
     drill_capsules = []
     for _pads in pcb_data.pads_by_net.values():
         for _p in _pads:
@@ -693,7 +735,7 @@ def manage_vias(
         for ov in pcb_data.vias:
             if math.hypot(ov.x - x, ov.y - y) < \
                     vdr + (getattr(ov, 'drill', 0) or 0) / 2.0 \
-                    + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+                    + _h2h - 1e-6:
                 return "drill hole-to-hole vs an existing via"
         for (c1x, c1y), (c2x, c2y), prad in drill_capsules:
             ddx, ddy = c2x - c1x, c2y - c1y
@@ -703,7 +745,7 @@ def manage_vias(
                 d = math.hypot(x - (c1x + t * ddx), y - (c1y + t * ddy))
             else:
                 d = math.hypot(x - c1x, y - c1y)
-            if d < vdr + prad + HOLE_TO_HOLE_CLEARANCE - 1e-6:
+            if d < vdr + prad + _h2h - 1e-6:
                 return "drill hole-to-hole vs a pad drill"
         vr = v_size / 2.0
         for s in pcb_data.segments:
