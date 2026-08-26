@@ -152,6 +152,25 @@ ROWS = [
      '        for ov, ovdr in board_via_drills:',
      '        for ov in pcb_data.vias:\n            ovdr = _via_drill_radius(ov)',
      'KILLED'),
+    # THE DANGEROUS version of the tidy-up: fold the coordinates into the
+    # same tuple, since they are right there. Silent, and wrong for every via
+    # relocated on an earlier cap -- measured during review, the second via
+    # lands at (5.1061, 6.1061) instead of (5.0500, 6.0000). A 400-seed
+    # old-vs-new fuzz did NOT catch it (only 8 seeds move two vias), which is
+    # why the guard for it is structural.
+    ('positions-cached-alongside-the-radius',
+     [('    board_via_drills = [(ov, _via_drill_radius(ov)) for ov in pcb_data.vias]',
+       '    board_via_drills = [(ov, _via_drill_radius(ov), ov.x, ov.y) for ov in pcb_data.vias]'),
+      ("""        for ov, ovdr in board_via_drills:
+            if ov is v:
+                continue
+            d = math.hypot(nx - ov.x, ny - ov.y)""",
+       """        for ov, ovdr, oX, oY in board_via_drills:
+            if ov is v:
+                continue
+            d = math.hypot(nx - oX, ny - oY)""")],
+     None,
+     'KILLED'),
     # --- the writer ------------------------------------------------------
     # the gate prices an unreadable drill; the payload must still carry what
     # the board declared.
@@ -183,13 +202,20 @@ def run(only=None):
     results = []
     try:
         for name, old, new, expect in rows:
-            n = orig.count(old)
-            if n != 1:
+            # A row may carry several edits: the dangerous version of a
+            # mutation is sometimes only expressible as a coordinated pair
+            # (see positions-cached-alongside-the-radius), and applying half
+            # of it produces a crash rather than the silent defect.
+            edits = old if isinstance(old, list) else [(old, new)]
+            counts = [orig.count(o) for o, _n in edits]
+            if counts != [1] * len(edits):
                 results.append((name, 'BROKEN', expect,
-                                'anchor matched %d times' % n, []))
+                                'anchors matched %s times' % counts, []))
                 continue
-            io.open(ENGINE, 'w', encoding='utf-8', newline='').write(
-                orig.replace(old, new, 1))
+            mutated = orig
+            for o, nw in edits:
+                mutated = mutated.replace(o, nw, 1)
+            io.open(ENGINE, 'w', encoding='utf-8', newline='').write(mutated)
             p = subprocess.run([sys.executable, '-X', 'utf8', ENGINE_TEST],
                                capture_output=True, text=True, timeout=1800,
                                cwd=_ROOT)

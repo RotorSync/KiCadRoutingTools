@@ -339,7 +339,7 @@ class TestARelocatedViaHonoursTheHoleFloor(unittest.TestCase):
     def test_the_gate_prices_the_BARREL_not_the_DRILL(self):
         """What separates #737's gate from the drill test beside it."""
         v, _pcb, moves, _segs, _out = _rig(XH_REFUSED_BY_BOTH)
-        self.assertGreater(VR, (v.drill or 0.3) / 2.0 + 0.05,
+        self.assertGreater(VR, FC._via_drill_radius(v) + 0.05,
                            'barrel and drill radius are too close for this '
                            'rig to tell the two conventions apart')
         # A drill-priced gate would need only 0.15 + 0.50 + 0.20 = 0.85 of

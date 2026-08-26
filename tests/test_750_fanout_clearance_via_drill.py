@@ -92,26 +92,33 @@ minimum on the corpus is 0.15). Stated as 602/22, not the issue's 604/27 --
 that figure is the repo-wide `*.kicad_pcb` set, five of which live under
 tests/fixtures/.
 
-MUTATION BATTERY, 15 rows against the engine: 13 killed, 2 SURVIVED and both
+MUTATION BATTERY, 16 rows against the engine: 14 killed, 2 SURVIVED and both
 expected, 0 broken. The counts make the `# MUTATION:` notes checkable rather
 than decorative, so they are recorded here and the battery itself ships as
 `tests/mutate_750.py`:
 
     returns-the-diameter-not-the-radius     19 assertions  every arithmetic arm
     constant-raised-to-0.5                   8             bracket, upper half
+    h2h-via-gate-deleted                     8             + perturbs test_732
     constant-lowered-to-0.2                  7             bracket, lower half
-    h2h-via-gate-deleted                     7             + perturbs test_732
     guard-reverted-to-or                     6             THE DEFECT
     guard-is-none-or-equals-zero             6             still admits negatives
     capsule-gate-reads-the-COPPER-radius     5             vdr -> vr
-    offender-drill-resolved-with-the-movers  3             vdr + vdr
+    offender-drill-resolved-with-the-movers  4             vdr + vdr
     h2h-via-floor-swapped-for-the-pad-one    3             the typo class
     literal-restored-at-the-capsule-gate     3             the source-guard evasion
-    precompute-inlined-per-candidate         2             SOURCE guards only
+    precompute-inlined-per-candidate         3             SOURCE guards only
     getattr-dropped                          1             as an ERROR
+    positions-cached-alongside-the-radius    1             SOURCE guard only
     writer-emits-the-RESOLVED-drill          1
     guard-lt-zero-instead-of-le-zero         0  SURVIVED, expected: `not d`
     guard-is-none-instead-of-not-d           0  SURVIVED, expected: already covers it
+
+Two rows are killed by a SOURCE guard and by nothing else, and that is a
+finding rather than a gap: both are semantically inert (a per-candidate
+re-resolve) or need a two-cap geometry a randomized fuzz does not reach (the
+cached-position one -- 400 seeds, 0 catches, because only 8 of them move two
+vias at all). Where a structural guard is the only guard, the arm says so.
 
 FOUR OF THIS FILE'S `# MUTATION:` NOTES WERE WRONG BEFORE THE BATTERY RAN,
 and are corrected in place rather than quietly deleted: two called an arm "a
@@ -653,6 +660,39 @@ class TestOneDrillRule(unittest.TestCase):
         self.assertLess(pre[0], use[0],
                         'the precompute no longer precedes the gate that '
                         'reads it, so it is not a precompute')
+
+    def test_the_gate_reads_the_offenders_position_LIVE(self):
+        """NOT COVERED BEHAVIOURALLY, and disclosed rather than skipped.
+
+        The precompute caches the drill RADIUS and nothing else, and that is
+        the whole of what makes it safe -- "nothing mutates pcb_data.vias" is
+        true and is NOT the invariant. The nudger relocates vias IN PLACE
+        (`v.x, v.y = nx, ny`) and processes caps one after another, so a
+        via's coordinates DO change between iterations. Folding them into the
+        same tuple is the obvious tidy-up and is a real defect: measured on a
+        two-cap rig during review, the second via lands at (5.1061, 6.1061)
+        instead of (5.0500, 6.0000).
+
+        A 400-seed randomized old-vs-new fuzz did NOT catch that mutant --
+        only 8 seeds moved two vias at all -- so a behavioural arm here would
+        be one geometry pretending to be a general guard. The structural form
+        says exactly what it checks."""
+        src = self._src()
+        gate = [i for i, l in enumerate(src) if 'ovdr' in l]
+        self.assertEqual(len(gate), 2, 'the precomputed radius is read in %d '
+                                       'places, expected 2' % len(gate))
+        self.assertIn('for ov, ovdr in board_via_drills', src[gate[0]])
+        # A 2-tuple, so there is nowhere for a position to be cached.
+        self.assertIn('[(ov, _via_drill_radius(ov)) for ov in pcb_data.vias]',
+                      ' '.join(src),
+                      'the precompute now carries more than (via, radius); if '
+                      'that is a POSITION, the gate below is reading a stale '
+                      'one for every via relocated on an earlier cap')
+        # ... and the distance is still taken from the live attributes.
+        dist = [l for l in src if 'math.hypot(nx - ov.x, ny - ov.y)' in l]
+        self.assertEqual(len(dist), 1,
+                         'the via-to-via gate no longer measures to ov.x/ov.y '
+                         'as they are NOW')
 
     def test_this_files_mirrored_floors_are_still_the_engines(self):
         """H2H_VIA/H2H_PAD are function-local literals and cannot be
