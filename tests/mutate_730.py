@@ -128,9 +128,9 @@ ROWS = [
     # lc=0.00 CONTROL arms while the headline refusal arms still pass -- which
     # is why those controls are not optional.
     ('via-override-uses-the-BOARD-floor', 'fc',
-     '            d = _seg_seg_dist(x1, y1, x2, y2, hx1, hy1, hx2, hy2) - hr',
-     '            d = _seg_seg_dist(x1, y1, x2, y2, hx1, hy1, hx2, hy2) - hr\n'
-     '            hlc = max(hlc, getattr(st, \'npth_floor\', 0.0))',
+     '                                     hx1, hy1, hx2, hy2) - hr',
+     '                                     hx1, hy1, hx2, hy2) - hr'
+     '\n            hlc = max(hlc, getattr(st, \'npth_floor\', 0.0))',
      (T730,), 'KILLED'),
     # The classic #617 mutation on the BASE gate, and the row the lc=0.00
     # CONTROL arms exist for. `via-override-uses-the-BOARD-floor` does NOT
@@ -181,10 +181,36 @@ ROWS = [
      '    npth_step = max(npth_clr, resolve_hole_clearance(pcb_data, None))',
      "    npth_step = max(npth_clr, getattr(st, 'npth_floor', 0.0))",
      (T730, T737), 'KILLED'),
-    # ---- the distance kernel -------------------------------------------
-    ('seg-seg-crossing-test-relaxed', 'fc',
-     '    if o1 * o2 < 0 and o3 * o4 < 0:',
-     '    if o1 * o2 <= 0 and o3 * o4 <= 0:',
+    # ---- the guard that stopped holding #617's mutation ------------------
+    # A review laundered the board read into the floor -- `npth_clr` reassigned
+    # from `npth_step` on the next line -- and every check in test_737's
+    # rewritten guard still passed, because the read itself was still pinned to
+    # the `npth_step` assignment. The old blanket ban made this unspellable.
+    # Both files now pin the floor's assignment COUNT as well.
+    ('board-read-laundered-into-the-floor', 'fc',
+     '    npth_step = max(npth_clr, resolve_hole_clearance(pcb_data, None))',
+     '    npth_step = max(npth_clr, resolve_hole_clearance(pcb_data, None))\n'
+     '    npth_clr = npth_step',
+     (T730, T737, T617), 'KILLED'),
+    # ---- the SLOT / capsule geometry ------------------------------------
+    # All three of these survived the whole fanout test family until #730's
+    # review built slot fixtures for them. They are identical to the shipped
+    # code for a ROUND hole, which every other rig in the file uses -- so no
+    # amount of adding round-hole arms would ever have caught one.
+    ('override-hole-treated-as-a-POINT', 'fc',
+     '            override_holes.append((_h1[0], _h1[1], _h2[0], _h2[1], _hr,',
+     '            override_holes.append((_h1[0], _h1[1], _h1[0], _h1[1], _hr,',
+     (T730,), 'KILLED'),
+    ('site-A-rect-centred-on-the-PAD-not-the-circle', 'fc',
+     '                                (hx - hr, hy - hr, hx + hr, hy + hr, -1, None))',
+     '                                (p.global_x - hr, p.global_y - hr,'
+     '\n                                 p.global_x + hr, p.global_y + hr,'
+     ' -1, None))',
+     (T730,), 'KILLED'),
+    ('site-E-long-axis-drill', 'leg',
+     '                            (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))',
+     '                            (hx - fp.x, hy - fp.y,'
+     '\n                             (p.drill or 0.0) / 2.0 + npth_grow))',
      (T730,), 'KILLED'),
     # ---- site E: PartPads ----------------------------------------------
     ('site-E-reverted-to-the-hoist', 'leg',

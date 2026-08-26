@@ -587,6 +587,19 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
                          'assignment -- #617 refused it in every other '
                          'position, at function-relative line %d'
                          % (board[0] + 1))
+        # ...and it must not be LAUNDERED into the floor. Pinning the read to
+        # `npth_step` is not enough on its own: `npth_clr = npth_step` on the
+        # next line reinstates #617's mutation while every check above still
+        # passes, and a review found exactly that. So pin the floor's
+        # assignment count too -- one, and the shape guard in test_730 says
+        # what that one must be.
+        flat = [i + 1 for i, l in enumerate(src)
+                if l.lstrip().startswith('npth_clr =')]
+        self.assertEqual(len(flat), 1,
+                         'npth_clr is assigned %d times (at function-relative '
+                         'line(s) %s) -- a second assignment is how a board-'
+                         'derived value reaches the floor #617 kept flat'
+                         % (len(flat), flat))
         # ...and no GATE may add it. A threshold that leaks into a gate line is
         # a floor wearing a threshold's name.
         for i in calls + ogates:
@@ -613,11 +626,14 @@ class TestTheFloorIsTheVIARuleNotTheTRACKFloor(unittest.TestCase):
                       "the engine's H2H_PAD is no longer %s, so this file's "
                       'mirror -- and the drill-test arithmetic in every '
                       'ON-THE-BRANCH guard here -- is stale' % H2H_PAD)
-    # MUTATION: re-spell either gate's floor, drop either 1e-4, or add a third
-    # gate -- the count, the `bad` list or the `eps` list changes. This arm is
-    # the ONLY thing that kills the 1e-4 mutation; `<` -> `<=` is killed by
-    # nothing at all, and is left declared rather than papered over, because
-    # any fixture that could catch it would sit on the threshold.
+    # MUTATION: re-spell either gate's floor, drop any of the four 1e-4s, add
+    # a fifth hole gate, move the board read out of `npth_step`, or assign
+    # `npth_clr` twice -- one of the counts or lists above changes. (The
+    # trailer used to name a `bad` list; there has never been one in this
+    # method. Corrected while #730 rewrote the guard around it.) This arm is
+    # still the ONLY thing that kills the 1e-4 mutation; `<` -> `<=` is killed
+    # by nothing at all, and is left declared rather than papered over,
+    # because any fixture that could catch it would sit on the threshold.
 
 
 class TestTheComparisonIsSTRICT(unittest.TestCase):

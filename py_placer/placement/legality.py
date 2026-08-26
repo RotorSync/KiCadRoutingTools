@@ -1597,11 +1597,19 @@ class PartPads:
     `pad_rects`' 6-tuple is deliberately NOT widened to carry the floor: it is a
     public shape (render_placement slices `r[:4]`, two test modules unpack it
     positionally) and the rect index already addresses the pad.
+
+    NPTH holes are carried TWICE (#730), index-aligned: `holes_local` at the
+    copper KEEP-OUT radius that `hole_circles()` serves, and `holes_extent` at
+    the radius `extent_local()` needs. They differ only by the hole pad's own
+    `local_clearance`, and only when a caller asks for it -- but the two
+    questions are different in kind ("how close may copper come" versus "where
+    is this part"), and answering the second with the first lets an author's
+    keep-clear declaration push a part off the board outline.
     """
 
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
-                 'holes_local', 'n_pads', '_pad_cache', '_hole_cache',
-                 '_ext_cache', 'pad_floors', 'max_floor')
+                 'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
+                 '_hole_cache', '_ext_cache', 'pad_floors', 'max_floor')
 
     def __init__(self, fp, clearance: float, model=None,
                  copper_holes: bool = True):
@@ -1617,6 +1625,7 @@ class PartPads:
         self.seed_rot = (fp.rotation or 0.0) % 360
         self.pads_local = []    # (off_x, off_y, half_x, half_y, net_id, pside)
         self.holes_local = []   # (off_x, off_y, radius) -- NPTH keepouts, inflated
+        self.holes_extent = []  # ...the same holes at their EXTENT radius (#730)
         self.pad_floors = []    # PadFloor per copper pad, index-aligned (#697)
         self.max_floor = 0.0    # upper bound on this part's pad requirements
         for p in fp.pads:
@@ -1668,9 +1677,24 @@ class PartPads:
                            if copper_holes else 0.0)
                     npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,
                                              _lc) - clearance)
+                    # ...and the SAME holes without the override, for extents.
+                    # `holes_local` is a copper KEEP-OUT and `extent_local` is
+                    # a question about where the part physically IS -- an
+                    # author's copper keep-clear must not make a part read as
+                    # hanging off the board outline. Measured on
+                    # splitflap_driver at --clearance 0.25, injecting lc on
+                    # H6/H7's NPTH pads only: without this split, lc 0.90 takes
+                    # `oob_pad_count` from 0 to 2 and lc 0.95 puts both refs in
+                    # the seeder's ZERO-margin off-board census, which
+                    # CLAUDE.md calls the top-priority placement defect. This
+                    # keeps every extent byte-identical to pre-#730.
+                    ext_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE
+                                   - clearance)
                     for hx, hy, hd in pad_drill_circles(p):
                         self.holes_local.append(
                             (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))
+                        self.holes_extent.append(
+                            (hx - fp.x, hy - fp.y, hd / 2.0 + ext_grow))
                 continue
             copper = [l for l in p.layers if str(l).endswith('.Cu')]
             through = (p.drill or 0) > 0
@@ -1742,7 +1766,14 @@ class PartPads:
             for ox, oy, HX, HY, _n, _s in self._rotated(rot):
                 xs0.append(ox - HX); ys0.append(oy - HY)
                 xs1.append(ox + HX); ys1.append(oy + HY)
-            for cx, cy, r in self.hole_circles(0.0, 0.0, rot):
+            # #730: the EXTENT radii, not the keep-out ones -- see the note
+            # beside holes_extent. `_rotated`-style rotation done inline
+            # because holes rotate about the part origin exactly as
+            # hole_circles rotates them.
+            rad = math.radians(-key)
+            hc, hs = math.cos(rad), math.sin(rad)
+            for ox, oy, r in self.holes_extent:
+                cx, cy = ox * hc - oy * hs, ox * hs + oy * hc
                 xs0.append(cx - r); ys0.append(cy - r)
                 xs1.append(cx + r); ys1.append(cy + r)
             if not xs0:

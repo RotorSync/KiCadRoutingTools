@@ -58,7 +58,7 @@ boards `run_utils.corpus_boards()` returns (37 copper-less drilled pads), only
 ulx3s carries a binding override, and its nearest foreign copper misses the new
 requirement by 0.010mm.
 
-THE BATTERY: `tests/mutate_730.py`, 25 rows -- 22 killed, 3 survived (all three
+THE BATTERY: `tests/mutate_730.py`, 28 rows -- 25 killed, 3 survived (all three
 expected and recorded with their reason), 0 broken. It ships rather than a
 number in this docstring because two reviewers of the #746 branch tried to
 re-derive its kill counts from row NAMES and both got the wrong answer. It
@@ -91,11 +91,13 @@ rule is now complete:
     whose ring does not span its drill (#441), and any plated pad with lc > 0.
     `_Repair` models plated pads as copper rects with no drill keep-out.
 
-Nothing here shells out or drives a CLI; it runs in-process. `run_all`
-classifies by grepping the SOURCE for `run_utils` and the name of the standard
-sub-process module, and this file names both in prose -- which is exactly how
-test_725 was once bucketed as integration and silently skipped under `--fast`.
-Hence the explicit opt-out below.
+This drives no CLI and routes nothing, but it does not run purely in-process
+either: `run_utils.corpus_boards()` shells out ONCE, for `git ls-files`, which
+is milliseconds. That is the whole reason the opt-out below is needed and also
+the whole reason it is legitimate -- `run_all` classifies by grepping the
+SOURCE for `run_utils`, so adopting that helper silently drops a file out of
+`--fast`, which is how test_725 was once bucketed as integration and skipped
+there. Drop the marker if an arm ever drives a real chain.
 """
 from __future__ import annotations
 
@@ -149,12 +151,15 @@ OLD_KEEPOUT = {0.10: AUDIO1_HR + 0.20, 0.25: AUDIO1_HR + 0.25}
 # whole change: 1.260 from the centre against a 1.250 requirement.
 AUDIO1_NEAREST_COPPER = 0.4100                                       # R60.2
 
-# ---- the two hand-mirrored engine constants ------------------------------
-# Function-local literals inside nudge_vias_for_unresolved: they cannot be
-# imported, so every threshold computed here is a hand mirror, and the source
-# guard below fails if the engine's move.
+# ---- the ONE hand-mirrored engine constant -------------------------------
+# `H2H_PAD` is a function-local literal inside nudge_vias_for_unresolved: it
+# cannot be imported, so every threshold computed from it here is a hand
+# mirror, and the source guard below fails if the engine's moves.
+# `NPTH_FLOOR` is NOT mirrored -- it is imported, right here -- and saying so
+# matters, because a reader who believes it is mirrored will look for a guard
+# that should not exist.
 H2H_PAD = 0.45
-NPTH_FLOOR = defaults.NPTH_TO_TRACK_CLEARANCE                        # 0.20
+NPTH_FLOOR = defaults.NPTH_TO_TRACK_CLEARANCE                        # imported
 
 # ---- the synthetic via rigs (site B/C), test_737's geometry ---------------
 CLEAR = 0.10
@@ -186,6 +191,9 @@ C_STUB_W = 1.0
 C_HW = C_STUB_W / 2.0                                                # 0.50
 C_MAX_SHIFT = 0.15
 C_LANDING = (3.05, 3.0)
+# the along-axis candidates C_MAX_SHIFT actually reaches. 3.05 is the one
+# valid_via_pos accepts, so it is the candidate the connector gate decides.
+ALL_CANDIDATES_C = ((3.05, 3.0), (3.10, 3.0), (3.15, 3.0))
 # The cap footprint sits on B.Cu so its rects cannot gate the F.Cu connector
 # (connector_clear skips a rect whose cap layer differs), while the SAME rects
 # still box the via -- valid_via_pos has no layer gate. That separation is what
@@ -259,6 +267,20 @@ def _npth(x, y, lc, drill=H_DRILL, ref='H1', net=0):
                  layers=['F.Mask', 'B.Mask'], drill=drill,
                  pad_type='np_thru_hole')
     p.local_clearance = lc
+    return p
+
+
+def _slot(x, y, lc, *, short=0.5, long_=2.5, net=0, ref='H1'):
+    """A real `(drill oval short long)` NPTH pad -- a MILLED SLOT.
+
+    `pad_drill_capsule` reads `drill_w`/`drill_h`, not size/shape: a pad with
+    only `shape='oval'` set yields a zero-length capsule, and an arm built on
+    one would pass while testing nothing.
+    """
+    p = _npth(x, y, lc, drill=long_, ref=ref, net=net)
+    p.drill_w, p.drill_h = short, long_
+    p.size_x, p.size_y = short, long_
+    p.shape = 'oval'
     return p
 
 
@@ -468,6 +490,14 @@ class TestTheKeepOutRectHonoursTheHolesOwnOverride(unittest.TestCase):
         self.assertEqual(len(halves), len(circles),
                          'the slot did not become one keep-out per circle')
         self.assertEqual(sorted(set(halves)), [want])
+        # ...and the CENTRES, which the radii alone throw away. Without this a
+        # keep-out centred on the PAD rather than on each circle survives the
+        # whole fanout test family -- measured by a review, which is how it got
+        # here.
+        got = sorted((round((x0 + x1) / 2.0, 4), round((y0 + y1) / 2.0, 4))
+                     for x0, y0, x1, y1, net, _s in st.foreign_pads if net == -1)
+        self.assertEqual(got, sorted((round(cx, 4), round(cy, 4))
+                                     for cx, cy, _d in circles))
         self.assertNotAlmostEqual(want, slot.drill / 2.0 + grow, places=4,
                                   msg='the long-axis spelling would give the '
                                       'same answer here, so this arm cannot '
@@ -527,8 +557,13 @@ class TestARelocatedViaHonoursTheHolesOwnOverride(unittest.TestCase):
         gap = XH_REFUSED - LANDING[0] - HR - VR
         self.assertTrue(CLEAR + 0.04 < gap < AUDIO1_LC - 0.04,
                         'gap %.4f is not strictly inside (clearance, lc)' % gap)
-        # (iii) EVERY candidate is inside the override, so `moves == []` means
-        #       "all refused" and not "the budget ran out";
+        # (iii) every candidate THE WALLS ADMIT is inside the override, so
+        #       `moves == []` is not "the budget ran out". Note what this does
+        #       NOT say: the engine's spiral tries 176 candidates here, and
+        #       `(3.05, 3.0)` is one the override gate would ACCEPT -- the
+        #       walls refuse it first. The refusal is `walls AND override`, and
+        #       the thing that makes it attributable to the override is the
+        #       paired lc=0.00 control below, not this loop;
         for cx, _cy in ALL_CANDIDATES:
             self.assertLess(XH_REFUSED - cx - HR - VR, AUDIO1_LC + 1e-9)
         # (iv) and the landing is legal for the DRILL gate, so a refusal here
@@ -577,6 +612,69 @@ class TestARelocatedViaHonoursTheHolesOwnOverride(unittest.TestCase):
     # FOUR are clear-of-the-override controls like this one. A file with only
     # refusal arms would not see it at all.
 
+    def test_a_SLOT_override_hole_is_measured_along_its_whole_axis(self):
+        """A milled slot is a CAPSULE, and the gate must measure to its axis.
+
+        Every other override hole in this file is round, so `pad_drill_capsule`
+        hands back a zero-length capsule and the segment-to-segment measure
+        degenerates to point-to-point -- meaning the capsule half of it is
+        never exercised. A review found three mutations surviving on exactly
+        that (collapse the capsule to one end, measure the connector from an
+        endpoint only, centre site A's rects on the pad instead of the
+        circles), so the slot is built here rather than assumed.
+
+        The via sits off the MIDDLE of the slot, which is the one arrangement
+        an endpoint-only measure gets wrong: 1.2500 to the axis, but 1.6008 to
+        either end.
+        """
+        xh = 4.70
+        v = make_via(VIA0[0], VIA0[1], net_id=3, size=V_SIZE, drill=V_DRILL)
+        stub = make_seg(2.0, 3.0, VIA0[0], VIA0[1], width=0.2, layer='F.Cu',
+                        net_id=3)
+        hole = _slot(xh, 3.0, AUDIO1_LC)
+        from kicad_parser import pad_drill_capsule
+        (a, b, hr) = pad_drill_capsule(hole)
+        # ON THE BRANCH: a real capsule, the via is off its MIDDLE, and the
+        # endpoint measure would clear the requirement while the axis one does
+        # not -- without that separation the arm cannot see the mutation.
+        self.assertGreater(math.hypot(b[0] - a[0], b[1] - a[1]), 1.0,
+                           'not a slot; this arm is vacuous')
+        axis_d = abs(xh - LANDING[0])
+        end_d = min(math.hypot(LANDING[0] - e[0], LANDING[1] - e[1])
+                    for e in (a, b))
+        need = hr + VR + AUDIO1_LC
+        self.assertTrue(axis_d < need < end_d,
+                        'axis %.4f / need %.4f / nearest end %.4f do not '
+                        'separate' % (axis_d, need, end_d))
+        # ...and the two gates that are NOT under test must both pass here.
+        self.assertGreater(axis_d - hr, CLEAR + VR)                  # base
+        self.assertGreater(axis_d, V_DRILL / 2.0 + hr + H2H_PAD)     # drill
+
+        pcb = make_pcb(board_info=_bi(), vias=[v], segments=[stub],
+                       footprints={'C1': SimpleNamespace(layer='F.Cu',
+                                                         pads=[])},
+                       pads_by_net={0: [hole]}, zones=[])
+        moves, segs, out = _nudge(_FakeSt(WALLS), pcb, CLEAR,
+                                  max_shift=MAX_SHIFT)
+        self.assertIn('no clear spot', out)
+        self.assertEqual(moves, [])
+        # the same slot with no override moves, so the refusal is #730's and
+        # not the capsule merely being large.
+        hole2 = _slot(xh, 3.0, 0.0)
+        v2 = make_via(VIA0[0], VIA0[1], net_id=3, size=V_SIZE, drill=V_DRILL)
+        pcb2 = make_pcb(board_info=_bi(), vias=[v2],
+                        segments=[make_seg(2.0, 3.0, VIA0[0], VIA0[1],
+                                           width=0.2, layer='F.Cu', net_id=3)],
+                        footprints={'C1': SimpleNamespace(layer='F.Cu',
+                                                          pads=[])},
+                        pads_by_net={0: [hole2]}, zones=[])
+        moves2, _s2, _o2 = _nudge(_FakeSt(WALLS), pcb2, CLEAR,
+                                  max_shift=MAX_SHIFT)
+        self.assertEqual(len(moves2), 1)
+    # MUTATION: collapse the override capsule to either endpoint, or measure
+    # the gate from a via/connector ENDPOINT rather than along the axis -> this
+    # arm moves. It is the only capsule-shaped override hole in the file.
+
     def test_a_hole_on_the_vias_OWN_net_is_exempt(self):
         """A track legitimately reaches its own mounting-hole pad, and
         check_drc's via arm makes the same exemption."""
@@ -621,6 +719,9 @@ class TestTheOverrideIsASTEPNotAMax(unittest.TestCase):
     def test_an_lc_JUST_ABOVE_npth_clr_charges_it_in_full(self):
         npth_clr = max(CLEAR, NPTH_FLOOR)
         self.assertGreater(LC_HIGH, npth_clr + 1e-9)
+        # ...for every candidate the walls admit; see the note in
+        # TestARelocatedViaHonoursTheHolesOwnOverride about what that does and
+        # does not establish.
         for cx, _cy in ALL_CANDIDATES:
             self.assertLess(XH_STEP - cx - HR - VR, LC_HIGH + 1e-9)
         self.assertEqual(self._moves(LC_HIGH), 0)
@@ -685,8 +786,15 @@ class TestTheConnectorHonoursTheHolesOwnOverride(unittest.TestCase):
         npth_clr = max(CLEAR, NPTH_FLOOR)
         self.assertTrue(HR + C_HW + npth_clr + 0.05 <= seg_dist
                         <= HR + C_HW + AUDIO1_LC - 0.05)
-        # (iv) and every candidate is inside.
-        for cx, _cy in ALL_CANDIDATES[:1] + ((3.10, 3.0), (3.15, 3.0)):
+        # (iv) and every candidate the budget REACHES is inside. C_MAX_SHIFT
+        #      is 0.15, so the along-axis candidates are 3.05 / 3.10 / 3.15 --
+        #      3.05 being the one `valid_via_pos` accepts, which makes it the
+        #      candidate this gate actually decides. (An earlier version of
+        #      this loop listed 3.45, three times the budget away, and omitted
+        #      3.05 entirely; the assertion held either way, which is why a
+        #      review had to find it rather than a failure.)
+        for cx, _cy in ALL_CANDIDATES_C:
+            self.assertLessEqual(cx - C_LANDING[0], C_MAX_SHIFT + 1e-9)
             self.assertLess(XH_C_REFUSED - cx, HR + C_HW + AUDIO1_LC + 1e-9)
         self.assertIn('no clear spot', out)
         self.assertEqual(moves, [])
@@ -709,11 +817,19 @@ class TestTheConnectorHonoursTheHolesOwnOverride(unittest.TestCase):
         self.assertEqual(len(moves), 1)
         self.assertEqual(len(segs), 1)
 
-    def test_the_connector_arm_is_a_MAX_not_a_STEP(self):
-        """An `lc` BELOW the floor this gate already charges must change
-        nothing -- `max(npth_clr, lc)` collapses to `npth_clr`. This is the
-        arm that keeps sites B and C from being written as one expression: B
-        returns `clearance` in this case, C returns `npth_clr`."""
+    def test_a_SUB_FLOOR_override_charges_the_connector_nothing(self):
+        """An `lc` below `npth_step` never enters `override_holes` at all, so
+        the connector's requirement stays exactly what it was.
+
+        NOT a MAX-versus-STEP discriminator, which is what this arm's name and
+        docstring claimed until a review measured it: at this geometry the wall
+        gap clears BOTH candidate charges, so the two spellings agree and the
+        arm cannot separate them. What separates them is
+        `test_the_connector_floor_is_npth_clr_and_not_clearance` below, which
+        sits between the two floors. What THIS arm holds is the filter's lower
+        edge -- that a sub-floor declaration is not quietly promoted -- which is
+        the same property `override-charge-given-the-VIA-step` survives on, and
+        worth a behavioural arm for exactly that reason."""
         npth_clr = max(CLEAR, NPTH_FLOOR)
         self.assertLess(LC_LOW, npth_clr)
         self.assertEqual(len(_run_conn(XH_C_REFUSED, LC_LOW)[1]), 1)
@@ -797,10 +913,13 @@ class TestTheConnectorGateStaysAtTheFlatFabFloor(unittest.TestCase):
         # ...and the far site still DOES read the board, or the two have been
         # unified from the other end -- which loses the cap-side raise #617
         # shipped.
+        # `assertTrue(... in ...)`, not `assertIn`: `_Repair.__init__` is 577
+        # lines, and assertIn prints the haystack. test_732 measured a 393KB
+        # failure message doing exactly this.
         rsrc = inspect.getsource(_Repair.__init__)
-        self.assertIn('resolve_hole_clearance', rsrc,
-                      '_Repair.npth_floor stopped reading the board; #617 '
-                      'changed exactly that site on purpose')
+        self.assertTrue('resolve_hole_clearance' in rsrc,
+                        '_Repair.npth_floor stopped reading the board; #617 '
+                        'changed exactly that site on purpose')
     # MUTATION: nudger-npth_clr-made-BOARD-AWARE -> measured 3 kills across 2
     # files: this arm plus test_617's two checks.
     #
@@ -831,6 +950,38 @@ class TestThePartPadsHoleKeepOutIsPerHole(unittest.TestCase):
     # site-E-loses-the-fab-floor (3), site-E-threshold-at-clearance (3).
     # site-E-max-respelled-as-a-conditional SURVIVES, expected -- an exact
     # re-spelling of `max`, recorded so its survival is not read as a hole.
+
+    def test_a_SLOT_hole_grows_from_the_SHORT_axis(self):
+        """Site A has had this fixture since #730 shipped; site E had not, and
+        a review measured `hd/2` -> `p.drill/2` surviving the whole placement
+        family there. `p.drill` on a slot is the LONG axis -- 2.5 where the
+        keep-out radius is 0.25 -- so the two spellings differ by an order of
+        magnitude on a slot and not at all on a round hole."""
+        from kicad_parser import pad_drill_circles
+        slot = _slot(10.0, 10.0, AUDIO1_LC)
+        fp = SimpleNamespace(reference='H1', x=10.0, y=10.0, rotation=0.0,
+                             layer='F.Cu', pads=[slot])
+        circles = list(pad_drill_circles(slot))
+        # ON THE BRANCH: a real slot, and the two spellings really do differ.
+        self.assertGreater(len(circles), 1, 'not a slot; this arm is vacuous')
+        self.assertNotAlmostEqual(circles[0][2], slot.drill, places=6)
+        pp = PartPads(fp, CLEAR)
+        grow = max(0.0, max(NPTH_FLOOR, AUDIO1_LC) - CLEAR)
+        want = round(circles[0][2] / 2.0 + grow, 4)
+        self.assertEqual(sorted({round(r, 4) for _x, _y, r in pp.holes_local}),
+                         [want])
+        self.assertEqual(len(pp.holes_local), len(circles))
+        self.assertNotAlmostEqual(want, slot.drill / 2.0 + grow, places=4,
+                                  msg='the long-axis spelling would give the '
+                                      'same answer here')
+        # ...and the EXTENT radii track the same circles, minus the override.
+        ext = max(0.0, NPTH_FLOOR - CLEAR)
+        self.assertEqual(
+            sorted({round(r, 4) for _x, _y, r in pp.holes_extent}),
+            [round(circles[0][2] / 2.0 + ext, 4)])
+    # MUTATION: site-E-long-axis-drill -> 1.55 instead of 0.55. Measured: this
+    # arm alone; it survived test_730, test_placement_pad_legality, test_697
+    # and test_beautify_labels before it existed.
 
     def test_the_SILK_consumer_is_opted_out(self):
         """`local_clearance` is a COPPER rule -- KiCad has no silk-to-hole rule
@@ -868,7 +1019,12 @@ class TestThePartPadsHoleKeepOutIsPerHole(unittest.TestCase):
         # scan would read that as the read itself.
         code = ' '.join(l.split('#')[0] for l in
                         inspect.getsource(PartPads.__init__).splitlines())
-        self.assertNotIn('resolve_hole_clearance', code)
+        # assertTrue, not assertNotIn -- see the note in the sibling arm about
+        # printing the haystack.
+        self.assertTrue('resolve_hole_clearance' not in code,
+                        'PartPads reads the board now; that changes what the '
+                        'six build_part_pads call sites mean and needs its '
+                        'own review')
     # MUTATION: none in the battery -- a DISCLOSURE arm, not a fix assertion.
     # It fails if someone threads a board pointer in here without revisiting
     # what that means for the six build_part_pads call sites.
@@ -925,12 +1081,17 @@ class TestOneHoleRule(unittest.TestCase):
                       'mirror is stale' % H2H_PAD)
 
     def test_the_scalar_mirror_matches_the_shared_kernel(self):
-        """`_seg_seg_dist` copies `_seg_capsule_axis_dist` term for term rather
-        than approximating it, because the four hole gates measure the same
-        holes and must agree about touching cases. The kernel's crossing test
-        is a STRICT `o1*o2 < 0`; `_segs_cross` counts an orientation of 0 as a
-        crossing and would answer 0.0 where the kernel does not."""
+        """The override gates measure with the SHARED seg-to-seg helper, and it
+        must agree with `_seg_capsule_axis_dist` -- the kernel the two sibling
+        hole gates measure with -- because all four grade the same holes.
+
+        The kernel's crossing test is a STRICT `o1*o2 < 0`. This module's own
+        `_segs_cross` counts an orientation of 0 as a crossing and would answer
+        0.0 where the kernel does not, which is why the gates do not use it;
+        the `endpoint ON the other line` case below is exactly that
+        disagreement, and it is the reason this arm exists."""
         import numpy as np
+        from check_drc import _seg_seg_dist_coords
         from single_ended_routing import _seg_capsule_axis_dist
         cases = [
             (0.0, 0.0, 1.0, 0.0, 0.5, -1.0, 0.5, 1.0),      # proper crossing
@@ -948,10 +1109,14 @@ class TestOneHoleRule(unittest.TestCase):
                     np.asarray([c[5]], dtype=float),
                     np.asarray([c[6]], dtype=float),
                     np.asarray([c[7]], dtype=float))[0])
-                self.assertAlmostEqual(FC._seg_seg_dist(*c), want, places=9)
-    # MUTATION: seg-seg-crossing-test-relaxed (`< 0` -> `<= 0`) -> measured 6
-    # arms. Two are this test's own subTests; the other four are geometry arms
-    # that would silently start measuring 0.0 for a touching case.
+                self.assertAlmostEqual(_seg_seg_dist_coords(*c), want,
+                                       places=9)
+    # MUTATION: none in the battery any more -- the row that killed this
+    # (`seg-seg-crossing-test-relaxed`) mutated a LOCAL copy of the kernel that
+    # #730 no longer carries, since the gates now call the shared helper. The
+    # arm is kept as a CHANGE DETECTOR on that helper: it is used by
+    # placement/legality.py at three sites besides these gates, so relaxing its
+    # crossing test would be felt well beyond #730.
 
 
 class TestInertOnTheTrackedCorpus(unittest.TestCase):
@@ -966,7 +1131,17 @@ class TestInertOnTheTrackedCorpus(unittest.TestCase):
         cls.boards = run_utils.corpus_boards()
 
     def _scan(self, clearance):
-        """(total NPTH pads, {board: [binding pads]}) at this clearance."""
+        """(total NPTH pads, {board: [binding pads]}) at this clearance.
+
+        The floor is sites A/B/C's -- it carries the board's declared
+        min_hole_clearance. Site E's is STRICTLY LOWER, because `PartPads`
+        cannot see the board at all (asserted two classes up), so a hole with
+        `npth_clr < lc <= declared` binds at site E while this scan calls it
+        non-binding. Inert on the corpus today: the one board declaring above
+        the fab floor is flat_hierarchy, and all 6 of its NPTH pads are at
+        lc 0.0. Stated because "selected the way the ENGINE selects" is true of
+        A/B/C and only approximately true of E.
+        """
         total, binding = 0, {}
         for b in self.boards:
             try:

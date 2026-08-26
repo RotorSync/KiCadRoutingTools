@@ -321,43 +321,6 @@ def _seg_to_rect_dist(x1, y1, x2, y2, rect):
     return best
 
 
-def _seg_seg_dist(x1, y1, x2, y2, ax, ay, bx, by) -> float:
-    """Distance between two segments -- a scalar mirror of
-    `single_ended_routing._seg_capsule_axis_dist` (#730).
-
-    Deliberately NOT `_seg_rect_dist`'s `_segs_cross`-based shape, and the
-    difference is the reason this exists rather than reusing what is already
-    here. The kernel this mirrors decides a crossing with a STRICT
-    `o1*o2 < 0`, so a segment whose endpoint lies exactly ON the other's line
-    is NOT a crossing and falls through to the endpoint minimum; `_segs_cross`
-    counts an orientation of 0 as a crossing and would return 0.0 for the same
-    geometry. The #730 override gate must agree with its two scalar siblings
-    about touching cases -- they all measure the same holes -- so it copies the
-    kernel term for term instead of approximating it. Pure Python because the
-    override list is empty on 20 of the 22 tracked boards and never long.
-    """
-    def pt_to_seg(px, py, qx1, qy1, qx2, qy2):
-        dx = qx2 - qx1
-        dy = qy2 - qy1
-        L2 = dx * dx + dy * dy
-        t = 0.0 if L2 <= 0 else min(1.0, max(
-            0.0, ((px - qx1) * dx + (py - qy1) * dy) / L2))
-        return math.hypot(px - (qx1 + t * dx), py - (qy1 + t * dy))
-
-    sdx, sdy = x2 - x1, y2 - y1
-    hdx, hdy = bx - ax, by - ay
-    o1 = sdx * (ay - y1) - sdy * (ax - x1)
-    o2 = sdx * (by - y1) - sdy * (bx - x1)
-    o3 = hdx * (y1 - ay) - hdy * (x1 - ax)
-    o4 = hdx * (y2 - ay) - hdy * (x2 - ax)
-    if o1 * o2 < 0 and o3 * o4 < 0:
-        return 0.0
-    return min(pt_to_seg(ax, ay, x1, y1, x2, y2),
-               pt_to_seg(bx, by, x1, y1, x2, y2),
-               pt_to_seg(x1, y1, ax, ay, bx, by),
-               pt_to_seg(x2, y2, ax, ay, bx, by))
-
-
 class _Cap:
     """A movable cap: pad offsets + courtyard bbox, in a seed-relative frame.
 
@@ -2742,10 +2705,22 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # budget but validated candidates against copper only -- a via or its new
     # connector could be pushed off the board / into a cutout, and connectors
     # had no NPTH-hole test at all.
+    # `_seg_seg_dist_coords` (#730) is the segment-to-segment measure the two
+    # override gates use, and it is the SHARED helper -- geometry_utils',
+    # which check_drc re-exports and placement/legality.py already calls at
+    # three sites -- rather than a fifth copy. Emphatically NOT this module's
+    # own `_segs_cross` shape: that snaps an orientation of 0 to "crossing", so
+    # a segment whose endpoint lies exactly ON the other's line measures 0.0,
+    # where `_seg_capsule_axis_dist` -- the kernel the two SIBLING hole gates
+    # measure with -- uses a strict `o1*o2 < 0` and falls through to the
+    # endpoint minimum. All four hole gates must agree about touching cases.
+    # Measured equal to that kernel over ~800k fuzz cases: max |delta| 2.8e-14
+    # at board-scale magnitudes, 2.3e-10 at |coord| ~ 1e6 mm, both many orders
+    # below the gates' own 1e-4.
     from check_drc import (board_edge_geometry, _point_on_board,
                            _point_to_rings_distance, _segment_to_rings_distance,
                            point_to_pad_distance, _pad_has_no_copper,
-                           segment_to_rect_distance)
+                           segment_to_rect_distance, _seg_seg_dist_coords)
     from kicad_parser import pad_drill_capsule
     from routing_utils import into_pad_frame_point
     from single_ended_routing import _seg_foreign_hole_dist
@@ -2816,6 +2791,14 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # #730 narrowed, not closed. Filed rather than papered over with a third
     # copper-to-hole resolver in this pass.
     #
+    # The OTHER direction is reachable too, and only one way: `check_drc
+    # --hole-clearance X` given explicitly above the board's own rule makes the
+    # checker's npth_clr exceed this threshold, so a pad with `lc` in
+    # `(npth_step, X]` is charged `lc` here and `clearance` there -- an
+    # over-block. It needs a grader invoked with a floor the board does not
+    # declare, which is a deliberate act rather than a chain artefact, but it
+    # belongs in the disclosure beside its mirror image.
+    #
     # Read through `pcb_data`, never off `st`: this function is public and its
     # harnesses pass duck types carrying `caps` and `vias` and nothing else, so
     # a `getattr(st, 'npth_floor', ...)` would silently take the default -- and
@@ -2864,8 +2847,15 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     # two holes is 9.283mm and 15.055mm against a 0.6mm spiral, so the filter
     # empties the list there and both gates cost one truth test.
     if override_holes:
-        _widest = max([v.size / 2.0 for v in pcb_data.vias]
-                      + [sg.width / 2.0 for sg in pcb_data.segments] + [0.0])
+        # `getattr`, like every other read of a via in this function: the
+        # nudger is public and its harnesses pass duck-typed via-likes. A bare
+        # `v.size` here would raise ONLY on a board that carries an override
+        # hole -- invisible on 20 of 22 tracked boards and on every existing
+        # harness, which is the worst possible place for a hard read.
+        _widest = max([(getattr(v, 'size', 0.0) or 0.0) / 2.0
+                       for v in pcb_data.vias]
+                      + [(getattr(sg, 'width', 0.0) or 0.0) / 2.0
+                         for sg in pcb_data.segments] + [0.0])
         override_holes = [
             h for h in override_holes
             if any(_point_to_seg_dist(v.x, v.y, h[0], h[1], h[2], h[3])
@@ -2879,15 +2869,18 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         Reads like its two scalar siblings -- a distance the caller compares
         against its own half-extent -- so all four hole gates in this function
         are one expression shape. Same own-net exemption they make, and the
-        same measure: `_point_to_seg_dist` between the two axes, which is what
-        `_seg_capsule_axis_dist` reduces to for the endpoint cases, minus the
-        capsule radius. A round drill is a zero-length capsule, so the point
-        case falls out rather than being special-cased."""
+        same measure: a full SEGMENT-to-segment distance (crossing branch
+        included) to the hole's capsule axis, minus the capsule radius. Not an
+        endpoint test -- a connector whose MIDDLE grazes a hole must be caught,
+        and its endpoints can both be clear while it does. A round drill is a
+        zero-length capsule and the via gate passes a zero-length segment, so
+        the point cases fall out rather than being special-cased."""
         best = 1e9
         for hx1, hy1, hx2, hy2, hr, hnet, hlc in override_holes:
             if hnet == net_id:
                 continue
-            d = _seg_seg_dist(x1, y1, x2, y2, hx1, hy1, hx2, hy2) - hr
+            d = _seg_seg_dist_coords(x1, y1, x2, y2,
+                                     hx1, hy1, hx2, hy2) - hr
             if d - hlc < best:
                 best = d - hlc
         return best
