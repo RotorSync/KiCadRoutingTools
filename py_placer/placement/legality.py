@@ -1649,9 +1649,12 @@ class PartPads:
                 # it there would push ulx3s's labels 0.20mm further from
                 # AUDIO1 for a reason that does not exist. Naming the question
                 # in the signature rather than inferring it from `model`:
-                # measured, only one of the six `build_part_pads` call sites
-                # passes a model, so a model gate would leave most copper
-                # consumers unfixed while looking principled.
+                # measured, only two of the six `build_part_pads` call sites
+                # pass one (grade_pad_legality and quench), so a model gate
+                # would leave legality's own pad-overlap path, routability and
+                # seeder unfixed while looking principled -- and it would key
+                # a COPPER-vs-SILK question on an argument that answers a
+                # different one.
                 #
                 # STILL MISSING, and structurally so: the BOARD's declared
                 # min_hole_clearance, which check_drc's `npth_clr` carries.

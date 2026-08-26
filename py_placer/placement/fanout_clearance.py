@@ -841,10 +841,17 @@ class _Repair:
         # but on the one board that matters it is active anyway and still gives
         # the hole nothing: measured on ulx3s, BAT1's two SMD pads carry
         # lc 0.700 so `model.active` is True, while AUDIO1's two NPTH holes get
-        # no floor at all, because `pad_floor` is built for copper pads only
-        # and `_fp_floor_by_id` maps only copper-pad tuples -- so the NPTH
-        # tuple still resolves through `_pair_or_flat(fa, None)` to the flat
-        # scalar. The read has to be off the pad.
+        # no floor at all.
+        #
+        # And the REASON is not the one it looks like, which is worth stating
+        # because the plausible version is wrong. `pad_floor` is NOT gated on
+        # copper: called on that NPTH pad it hands back
+        # `PadFloor(ncl=0.0, lc=0.4, layers=None)` -- measured. What drops the
+        # override is the filing below: an NPTH entry gets floor `None`, and
+        # `_fp_floor_by_id` maps only tuples that carry one, so the tuple
+        # resolves through `_pair_or_flat(fa, None)` to the flat scalar and
+        # `pad_floor` is never consulted for it at all. The read has to be off
+        # the pad.
         # NB: self.foreign_pads (and self.segments) are read nowhere after
         # __init__ -- the pruned per-cap lists are what the sweep uses. They
         # must NOT be deleted as dead: the id-keyed floor maps below depend on
@@ -3145,12 +3152,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         # the checker wants 0.100, this charges 0.100). Only an override ABOVE
         # `npth_clr` outranks it, and that is what `override_holes` carries.
         #
-        # Which is why the obvious `max(clearance, lc)` here is wrong in BOTH
-        # directions: at clearance 0.10 / lc 0.15 it over-blocks by 0.05 and
-        # invents a refusal kicad-cli never reports -- the crkbd phantom class
-        # the block above names. Splitting the step across two gates rather
-        # than folding it into one expression is what keeps this fix
-        # RAISE-ONLY and byte-identical on every board declaring no override.
+        # Which is why the obvious `max(clearance, lc)` here is wrong -- in ONE
+        # direction, and it is the direction that costs a repair. Against the
+        # step it can only ever charge MORE or the same: for `lc > npth_clr`
+        # the two agree, and for `lc <= npth_clr` the checker charges
+        # `clearance` while the max charges `lc`. At clearance 0.10 / lc 0.15
+        # that is an over-block of 0.05 and a refusal kicad-cli never reports
+        # -- the same invented-refusal class the crkbd phantoms belong to,
+        # though there the trigger was the fab floor and not an override.
+        # Splitting the step across two gates rather than folding it into one
+        # expression is what keeps this fix RAISE-ONLY and byte-identical on
+        # every board declaring no override.
         if _seg_foreign_hole_dist(pcb_data, v.net_id, nx, ny, nx, ny) < \
                 clearance + vr - 1e-4:
             return False
