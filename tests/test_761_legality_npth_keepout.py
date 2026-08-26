@@ -309,6 +309,23 @@ class TestParityWithTheChecker(unittest.TestCase):
                 if want_flag:
                     self.assertAlmostEqual(sf.hole, req - gap, places=6)
 
+    def test_it_flips_the_same_way_with_the_ARGUMENTS_SWAPPED(self):
+        """`pair_shortfall` runs the hole loop TWICE -- once per direction --
+        and a fixture that only ever puts the hole on one side leaves the
+        other loop untested. Measured: reverting exactly one of the two loops
+        SURVIVED the battery until this arm existed."""
+        req = max(0.25, NPTH_FLOOR, AUDIO1_LC)
+        for gap, want_flag in ((req - 0.01, True), (req + 0.01, False)):
+            _pcb, ctx, _parts = _hole_pair(gap)
+            with self.subTest(gap=round(gap, 4)):
+                # ...and asserted equal to each other, not just to the flag:
+                # a loop that ran but measured the wrong pair would still
+                # produce a True here.
+                self.assertEqual(ctx.pair_shortfall('C1', 'H1').hole,
+                                 ctx.pair_shortfall('H1', 'C1').hole)
+                self.assertEqual(
+                    ctx.pair_shortfall('C1', 'H1').hole > EPS, want_flag)
+
     def test_there_IS_no_pad_vs_hole_arm_in_check_drc_to_compare_against(self):
         """A disclosure, and the reason this file cannot close the loop by
         grading the corpus.
@@ -418,7 +435,32 @@ class TestTheBroadPhaseReachesTheHole(unittest.TestCase):
         pcb, _ctx, _parts = _hole_pair(0.30, clearance=clearance)
         rep = grade_pad_legality(pcb, clearance, worst_n=4, exact=False)
         self.assertEqual(rep['hole_conflicts'], 1)
-    # MUTATION: census-reach-drops-hole-reach (KILLED).
+
+    def test_the_census_HALO_needs_the_term_once_the_reach_clears_a_cell(self):
+        """The census neighbour search is a 4.0mm cell hash expanded by
+        `census_reach + 0.5`, so the term only changes an ANSWER once the
+        reach can carry a conflict across a cell boundary -- below that the
+        quantisation covers it and dropping the term is inert.
+
+        Measured: with a 0.400 requirement the row
+        `census-reach-drops-hole_reach` SURVIVED the battery, because the two
+        parts share a cell whatever the halo is. So this arm uses a keep-clear
+        WIDER than one cell. Six millimetres around a mounting hole is not a
+        stunt value -- it is a screw-head/washer keep-out, which is what a
+        `(clearance ...)` on an NPTH pad is usually for -- but the arm is
+        honest that a corpus-scale override cannot reach this branch."""
+        clearance = 0.25
+        big_lc = 6.0
+        self.assertGreater(big_lc, 4.0, 'the census cell size; below it the '
+                                        'halo term cannot change an answer')
+        pcb, _ctx, parts = _hole_pair(2.0, lc=big_lc, clearance=clearance)
+        self.assertAlmostEqual(parts['H1'].hole_reach, big_lc, places=6)
+        rep = grade_pad_legality(pcb, clearance, worst_n=4, exact=False)
+        self.assertEqual(rep['hole_conflicts'], 1)
+        self.assertEqual(rep['required'],
+                         [['C1', 'H1', round(big_lc, 4), 'NPTH hole']])
+    # MUTATION: census-reach-drops-hole_reach (KILLED by this arm, NOT by the
+    # one above it -- see its docstring).
 
     def test_hole_reach_is_zero_for_a_part_with_no_holes(self):
         fp = _fp('C1', 0.0, 0.0, [_cu(0.0, 0.0)])
