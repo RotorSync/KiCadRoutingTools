@@ -293,7 +293,15 @@ def beautify_labels(pcb_data, pcb_file: Optional[str],
     if edge_margin is None:
         edge_margin = 0.55
 
-    part_pads = build_part_pads(footprints, config.silk_pad_clearance)
+    # copper_holes=False (#730): these circles keep label INK off a drill,
+    # and an NPTH pad's `(clearance ...)` is a COPPER rule -- KiCad has no
+    # silk-to-hole rule at all. Honouring it here would push a reference
+    # designator further from a mounting hole for a reason that does not
+    # apply to silkscreen (measured on ulx3s: 0.20mm, at the shipped
+    # silk_pad_clearance of 0.15). The copper consumers in legality.py take
+    # the default.
+    part_pads = build_part_pads(footprints, config.silk_pad_clearance,
+                                copper_holes=False)
     pad_rects = {'F': [], 'B': []}   # (x0, y0, x1, y1)
     hole_circles = []                # (cx, cy, r) -- drills go through: both sides
     for ref, pp in part_pads.items():

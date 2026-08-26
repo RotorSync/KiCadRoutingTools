@@ -926,7 +926,9 @@ re-seating 85/92 while leaving its zone targets unmoved):
 - **`legality.PartPads` / `LegalityContext` / `grade_pad_legality`** — the
   pad+drill layer. Gate currency: rotation-inflated AABB pad rects (the
   `_Cap.pad_rects` pattern; conservative — can falsely reject, never falsely
-  accept), NPTH drills inflated to `NPTH_TO_TRACK_CLEARANCE`, per-PAIR
+  accept), NPTH drills inflated per hole to `max(NPTH_TO_TRACK_CLEARANCE,
+  the hole pad's own local_clearance)` (#730; `copper_holes=False` opts a
+  SILK caller out, since that override is a copper rule), per-PAIR
   baselines from SEED poses ("never worse than the board you were handed"; a
   NEW different-net pad intersection is never admitted). Exact `check_drc`
   geometry runs once per CLI for reports, so summaries carry no AABB phantoms.

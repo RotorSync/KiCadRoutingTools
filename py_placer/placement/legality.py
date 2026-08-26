@@ -1603,7 +1603,8 @@ class PartPads:
                  'holes_local', 'n_pads', '_pad_cache', '_hole_cache',
                  '_ext_cache', 'pad_floors', 'max_floor')
 
-    def __init__(self, fp, clearance: float, model=None):
+    def __init__(self, fp, clearance: float, model=None,
+                 copper_holes: bool = True):
         # Local imports: check_drc pulls the whole DRC stack (see the
         # BoardOutlineGate note); kicad_parser is cheap but keeps the module's
         # import surface unchanged for existing consumers.
@@ -1618,7 +1619,6 @@ class PartPads:
         self.holes_local = []   # (off_x, off_y, radius) -- NPTH keepouts, inflated
         self.pad_floors = []    # PadFloor per copper pad, index-aligned (#697)
         self.max_floor = 0.0    # upper bound on this part's pad requirements
-        npth_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE - clearance)
         for p in fp.pads:
             if not _pad_carries_copper(p):
                 # Copper-less drilled pad (NPTH mounting hole): the DRILL still
@@ -1626,7 +1626,45 @@ class PartPads:
                 # matches fanout_clearance's foreign-pad keepouts. A
                 # paste/mask-only aperture has neither copper nor a hole and
                 # simply drops out.
+                #
+                # #730: ...or closer than the pad's OWN `(clearance ...)`
+                # override, when that is larger. That is what KiCad enforces
+                # and what check_drc grades (`max(npth_clr, lc)`,
+                # check_drc.py:2733). PER-PAD, so it is computed per pad and no
+                # longer hoisted above the loop -- a footprint may carry
+                # several holes with different overrides, and a hoisted value
+                # would give them all the first one's answer. Raise-only:
+                # 20 of the 22 tracked boards carry no NPTH override at all,
+                # and watchy's 8 are 0.100, under the 0.20 fab floor, so it is
+                # the negative control rather than a second example. The board
+                # that moves is ulx3s -- AUDIO1's two 1.7mm holes at lc 0.400,
+                # radius 0.950 -> 1.150 at --clearance 0.1.
+                #
+                # `copper_holes` is False for a SILK caller and that is not a
+                # tuning knob. `hole_circles()` answers two different
+                # questions: legality's copper consumers want the override,
+                # and labels.py uses the same circles to keep a reference
+                # designator's INK off a drill. `local_clearance` is a copper
+                # rule -- KiCad has no silk-to-hole rule at all -- so applying
+                # it there would push ulx3s's labels 0.20mm further from
+                # AUDIO1 for a reason that does not exist. Naming the question
+                # in the signature rather than inferring it from `model`:
+                # measured, only one of the six `build_part_pads` call sites
+                # passes a model, so a model gate would leave most copper
+                # consumers unfixed while looking principled.
+                #
+                # STILL MISSING, and structurally so: the BOARD's declared
+                # min_hole_clearance, which check_drc's `npth_clr` carries.
+                # This class takes `(fp, clearance)` with no board pointer --
+                # obstacle_map.resolve_hole_clearance's docstring already
+                # records that it cannot reach here. On a board declaring above
+                # 0.20 this still under-blocks by
+                # `declared - max(0.20, clearance, lc)`. Filed, not closed.
                 if _pad_has_no_copper(p) and (p.drill or 0) > 0:
+                    _lc = ((getattr(p, 'local_clearance', 0.0) or 0.0)
+                           if copper_holes else 0.0)
+                    npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,
+                                             _lc) - clearance)
                     for hx, hy, hd in pad_drill_circles(p):
                         self.holes_local.append(
                             (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))
@@ -1719,7 +1757,8 @@ class PartPads:
 
 
 def build_part_pads(footprints: Dict[str, object],
-                    clearance: float, model=None) -> Dict[str, 'PartPads']:
+                    clearance: float, model=None,
+                    copper_holes: bool = True) -> Dict[str, 'PartPads']:
     """PartPads for every footprint that has any pad (copper or NPTH).
 
     `model` is an optional `PadClearanceModel` (#697); without it the parts
@@ -1730,7 +1769,7 @@ def build_part_pads(footprints: Dict[str, object],
     for ref, fp in footprints.items():
         if not getattr(fp, 'pads', None):
             continue
-        pp = PartPads(fp, clearance, model)
+        pp = PartPads(fp, clearance, model, copper_holes)
         if pp.n_pads or pp.holes_local:
             out[ref] = pp
     return out

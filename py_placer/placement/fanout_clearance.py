@@ -666,6 +666,38 @@ class _Repair:
         # placement engine has no GridRouteConfig anywhere in this call chain
         # (repair_fanout_clearance takes scalars); the board read is driven by
         # pcb_data.source_path, so the declared floor arrives regardless.
+        #
+        # #730: THIS PASS CARRIES TWO NPTH FLOORS AND THAT IS DELIBERATE.
+        # `nudge_vias_for_unresolved` resolves its own,
+        # `npth_clr = max(clearance, NPTH_TO_TRACK_CLEARANCE)`, which omits the
+        # board read this one performs. A reader finding them apart will want
+        # to unify them; #617 already decided not to, and the decision is
+        # measured. Its harness (`_via_mover_stays_flat` in
+        # tests/test_617_placement_fanout_hole_clearance.py) stages a board
+        # declaring 0.25, and the mover's only validated connector landing sits
+        # 0.2200mm off the hole wall -- so ANY floor above 0.2200 refuses it.
+        # Re-measured on this tree while closing #730: flat -> "1 move(s),
+        # 1 connector(s); copper-to-hole gap 0.2200mm"; board-aware -> "no
+        # clear spot", 0 and 0, and the #130 pad-via graze the pass exists to
+        # remove simply persists.
+        #
+        # The asymmetry has a shape, not just a history. THIS site is a COST
+        # MODEL -- the whole cap search descends it, so raising it makes the
+        # pass SEE a shortfall and MOVE the cap out of the band. That site is
+        # an ALL-OR-NOTHING GATE on a 0.6mm search, where raising it does not
+        # find a better spot, it returns "no clear spot". Same rule, two
+        # positions, and only one of them can afford the strictness. The file
+        # already carries this shape once, for the via-vs-connector floor
+        # inside that function; this is the second instance and it is now
+        # written down at BOTH ends rather than only at the far one.
+        #
+        # One correction to how the divergence was first reported (#730's
+        # thread): the two do NOT differ in both directions.
+        # `max(clearance, NPTH_TO_TRACK_CLEARANCE)` can never exceed
+        # `max(clearance, NPTH_TO_TRACK_CLEARANCE, declared)`, which is what
+        # this floor resolves to at its use site once the graded `clearance`
+        # is added back. The nudger is the lower of the two, or equal, and
+        # never the higher.
         from obstacle_map import resolve_hole_clearance
         self.npth_floor = max(defaults.NPTH_TO_TRACK_CLEARANCE,
                               resolve_hole_clearance(pcb_data, None))
