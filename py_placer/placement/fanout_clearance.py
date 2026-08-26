@@ -74,6 +74,32 @@ _OFF_LAYER = -1.0e9
 # not stub endpoint offset) because the naive version shows nothing.
 _UNREADABLE_VIA_SIZE = 0.5  # mm
 
+# The DRILL to assume for a via whose hole the board does not carry -- a literal
+# `(drill 0)` token, or a padstack whose pcbnew GetDrill() came back 0. This is
+# the value valid_via_pos hard-coded at three sites before #750 named it, so
+# nothing moves.
+#
+# Module-private for CAP_EDGE_CLEARANCE's reason below, NOT the one above it:
+# _UNREADABLE_VIA_SIZE argues privacy from what the GRADERS must not adopt,
+# which does not transfer -- KiCad rejects `(drill 0)` at the fab floor rather
+# than reporting a barrel connected that is not. The argument that does
+# transfer is CAP_EDGE_CLEARANCE's: a PLACEMENT number that happens to equal a
+# fab default and must not be wired to it.
+#
+# And it does equal several. 0.3 is routing_defaults.VIA_DRILL, BGA_VIA_DRILL,
+# and bga_fanout.constants.DEFAULT_VIA_SIZE -- that last one a SIZE, which is
+# the trap. Those are the hole this toolchain DRILLS when it creates a via;
+# this is a pricing assumption about a barrel this pass cannot MEASURE. They
+# agree today by accident of value, and wiring them would let a change to a fab
+# default silently move a hole-to-hole keep-out.
+#
+# What the pair prices, since the two constants are read on different paths:
+# through a real _Repair an unreadable size resolves to --default-via-size, so
+# at the CLI's 0.3 the assumed via is 0.3/0.3 -- a ZERO annular ring; on the
+# duck-typed path it is _UNREADABLE_VIA_SIZE/this, 0.5/0.3, a 0.1 ring, which
+# is exactly routing_defaults' standard via. #750 records both readings.
+_UNREADABLE_VIA_DRILL = 0.3  # mm
+
 # The cap-placement margin from Edge.Cuts when the operator names none and the
 # board declares none. A PLACEMENT margin (keep a decap off the rim so it can be
 # assembled and reworked), not a DRC floor -- which is why it is 0.55 and not one
@@ -169,6 +195,35 @@ def _via_radius(via, default_size=_UNREADABLE_VIA_SIZE) -> float:
     if not size or size <= 0:
         size = default_size
     return size / 2.0
+
+
+def _via_drill_radius(via, default_drill=_UNREADABLE_VIA_DRILL) -> float:
+    """The DRILL radius of a via, in mm -- the ONE implementation of the rule.
+
+    #750: this was spelled `(v.drill or 0.3) / 2.0` at three sites inside
+    valid_via_pos, while the copper radius on the SAME two lines already went
+    through _via_radius. Same shape as that function, deliberately, including
+    the two things that are easy to read as accidents:
+
+    `getattr`, because the nudger is public and its harnesses pass duck-typed
+    via-likes. This DOES widen what the pass tolerates -- the old expression
+    raised AttributeError on a via-like carrying no `drill` at all, and this
+    prices it at the fallback. Deliberate, and the only such object is a test
+    stand-in; no parse path produces one.
+
+    `not d or d <= 0` and NOT `or`, so a negative drill cannot take a different
+    branch in the two. That is not hypothetical here: `or` keeps a negative
+    value, so the drill term goes NEGATIVE and weakens the gate it is summed
+    into. With both drills negative the whole hole-to-hole threshold turns
+    negative and the gate can never fire at all -- measured, the pass then
+    parks two 0.5mm barrels 0.05mm apart. Both parse paths admit it: the via
+    regex drill class carries a `-` and the float() that follows checks no
+    sign.
+    """
+    d = getattr(via, 'drill', None)
+    if not d or d <= 0:
+        d = default_drill
+    return d / 2.0
 
 # These four moved to placement/legality.py, the shared home with quench.py
 # (which carried byte-identical copies of the first two). Aliased rather than
@@ -2682,10 +2737,15 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
         #370 and #617 harnesses pass carries no resolver -- and only for a via
         whose size is falsy. Every via those fixtures build carries a real 0.5,
         so it is numerically unreachable there; the #732 test file pins that.
-        defaults.UNREADABLE_VIA_SIZE rather than a bare literal so the number
-        has ONE name across this module and the two checkers. Spelled with the
-        same `and ... > 0` guard as _Repair.via_radius, not `or`, so a negative
-        size cannot take a different branch in the two."""
+        _UNREADABLE_VIA_SIZE rather than a bare literal so the number has ONE
+        name in this module. (#750 corrects two claims this docstring used to
+        make: it named `defaults.UNREADABLE_VIA_SIZE`, which exists nowhere in
+        the repo -- the constant is module-private here and reaches this call
+        as _via_radius's default argument -- and it described the guard as
+        `and ... > 0`, where _via_radius spells it `not size or size <= 0`.
+        Same semantics, and worth stating correctly because the SPELLING is the
+        rule: not `or`, so a negative size cannot take a different branch in
+        the two. #750 applies that same rule to the drill.)"""
         if _via_rad is not None:
             return _via_rad(v)
         return _via_radius(v)
@@ -2731,8 +2791,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             cap_ = pad_drill_capsule(p) if (p.drill and p.drill > 0) else None
             board_pads.append((p, pad_fl(p), not _pad_has_no_copper(p), cap_))
 
+    # #750: every OTHER via's drill radius, resolved ONCE, for the same reason
+    # the pads above are flattened here -- the hole-to-hole gate below runs
+    # inside the 16-angle x 12-radius sweep, so resolving per candidate would
+    # cost one call per via per CANDIDATE (383 of them on routed_output).
+    # Safe to hoist: the sweep does not mutate pcb_data.vias. The nudger
+    # rebuilds st.vias when it commits a move, which is a different list.
+    board_via_drills = [(ov, _via_drill_radius(ov)) for ov in pcb_data.vias]
+
     def valid_via_pos(v, nx, ny):
         vr = via_rad(v)
+        vdr = _via_drill_radius(v)      # hoisted once, like vr (#750)
         vfl = via_fl(v.net_id)
         # never off the board / into a cutout / inside the edge margin (#370 B3)
         if not edge_ok_point(nx, ny, vr):
@@ -2845,16 +2914,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                 # deliberately NOT #725-resolved -- see npth_clr above)
                 (c1x, c1y), (c2x, c2y), prad = cap_
                 if _point_to_seg_dist(nx, ny, c1x, c1y, c2x, c2y) < \
-                        (v.drill or 0.3) / 2.0 + prad + H2H_PAD:
+                        vdr + prad + H2H_PAD:
                     return False
-        for ov in pcb_data.vias:
+        for ov, ovdr in board_via_drills:
             if ov is v:
                 continue
             d = math.hypot(nx - ov.x, ny - ov.y)
             if ov.net_id != v.net_id and d < vr + via_rad(ov) + \
                     req(vfl, via_fl(ov.net_id)):
                 return False
-            if d < (v.drill or 0.3) / 2.0 + (ov.drill or 0.3) / 2.0 + H2H_VIA:
+            # net-INDEPENDENT: two holes collide whatever they carry
+            if d < vdr + ovdr + H2H_VIA:
                 return False
         for s in pcb_data.segments:
             if s.net_id == v.net_id:
