@@ -1003,31 +1003,59 @@ class TestThePartPadsHoleKeepOutIsPerHole(unittest.TestCase):
     # one test (one per clearance subTest, plus the factory check).
 
     def test_no_board_read_is_attempted_here_and_that_is_DISCLOSED(self):
-        """A disclosure, not a fix. legality's keep-out is
+        """REWRITTEN by #761, not relaxed.
+
+        #730 shipped this as a disclosure: legality's keep-out was
         `max(clearance, 0.20, lc)` where check_drc's track arm is
-        `max(clearance, 0.20, hole_clearance, lc)`, so on a board declaring
-        above 0.20 this still under-blocks. `PartPads` is structurally unable
-        to see it -- no board pointer -- and that is asserted so the gap
-        cannot be quietly forgotten."""
+        `max(clearance, 0.20, hole_clearance, lc)`, `PartPads` could not see
+        the board, and the arm said so out loud -- ending "that changes what
+        the six build_part_pads call sites mean and needs its own review".
+
+        #761 DID that review (2 of the 6 read hole keep-outs; the other 4 read
+        pad rects and extents only) and supplied the term the way
+        `fanout_clearance` already does: resolved ONCE, outside, and passed in
+        as a float. So the property this arm defends is unchanged -- the class
+        still reads no board -- while the value it lacked now arrives.
+
+        Relaxing it instead would have been the easy move and the wrong one: a
+        board POINTER in here re-opens exactly the six-call-site question, so
+        the ban stays, positionally, and the new parameter is asserted to be a
+        scalar rather than merely present."""
         params = list(inspect.signature(PartPads.__init__).parameters)
-        self.assertEqual(params[:5],
-                         ['self', 'fp', 'clearance', 'model', 'copper_holes'])
+        self.assertEqual(params[:6],
+                         ['self', 'fp', 'clearance', 'model', 'copper_holes',
+                          'npth_floor'])
         for banned in ('pcb_data', 'pcb_file', 'board', 'source_path'):
             self.assertNotIn(banned, params)
-        # CODE only: this very fix's comment NAMES resolve_hole_clearance
-        # when explaining why the read is impossible here, and a raw-source
-        # scan would read that as the read itself.
+        # A SCALAR, not a board wearing a scalar's name: the default must be
+        # usable arithmetic-free (None -> the fab floor) and a float must be
+        # accepted positionally.
+        fp = _e_footprint()
+        self.assertEqual(
+            [round(r, 4) for _x, _y, r in PartPads(fp, 0.10).holes_local],
+            [round(r, 4) for _x, _y, r in
+             PartPads(fp, 0.10, None, True, None).holes_local])
+        raised = [round(r, 4) for _x, _y, r in
+                  PartPads(fp, 0.10, None, True, 0.25).holes_local]
+        self.assertNotEqual(
+            raised,
+            [round(r, 4) for _x, _y, r in PartPads(fp, 0.10).holes_local],
+            'npth_floor is inert -- the parameter exists but reaches nothing')
+        # CODE only: this fix's comments NAME resolve_hole_clearance when
+        # explaining where the read now happens, and a raw-source scan would
+        # read that as the read itself.
         code = ' '.join(l.split('#')[0] for l in
                         inspect.getsource(PartPads.__init__).splitlines())
         # assertTrue, not assertNotIn -- see the note in the sibling arm about
         # printing the haystack.
-        self.assertTrue('resolve_hole_clearance' not in code,
-                        'PartPads reads the board now; that changes what the '
-                        'six build_part_pads call sites mean and needs its '
-                        'own review')
-    # MUTATION: none in the battery -- a DISCLOSURE arm, not a fix assertion.
-    # It fails if someone threads a board pointer in here without revisiting
-    # what that means for the six build_part_pads call sites.
+        for banned in ('resolve_hole_clearance', 'obstacle_map',
+                       'resolve_npth_floor'):
+            self.assertTrue(banned not in code,
+                            'PartPads reads the board now (%s); that changes '
+                            'what the six build_part_pads call sites mean and '
+                            'needs its own review' % banned)
+    # MUTATION: 761-partpads-reads-the-board (KILLED). Still a DISCLOSURE arm
+    # for the board POINTER; the scalar half is a real fix assertion.
 
 
 class TestOneHoleRule(unittest.TestCase):

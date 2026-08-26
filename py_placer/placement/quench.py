@@ -516,9 +516,13 @@ class QuenchState:
             pad_model = legality.PadClearanceModel.for_board(
                 pcb_data, clearance, pcb_file)
             pad_model = pad_model if pad_model.active else None
+            # #761: the board's own copper-to-NPTH-hole floor, resolved
+            # once. This context serves `pair_shortfall`, which reads hole
+            # keep-outs, so it is one of the two call sites that need it.
             part_pads = legality.build_part_pads(
                 {ref: pcb_data.footprints[ref] for ref in self.parts
-                 if ref in pcb_data.footprints}, clearance, pad_model)
+                 if ref in pcb_data.footprints}, clearance, pad_model,
+                npth_floor=legality.resolve_npth_floor(pcb_data))
             self.legality_ctx = legality.LegalityContext(
                 part_pads, self.edge_gate, clearance,
                 pose_of=lambda r: (self.parts[r].x, self.parts[r].y,

@@ -1577,6 +1577,41 @@ class PadClearanceModel:
         return eff, src
 
 
+def resolve_npth_floor(pcb_data) -> float:
+    """The board's copper-to-NPTH-hole FLOOR: the JLC fab floor, raised to the
+    board's own declared `min_hole_clearance` when it declares more (#761).
+
+    The one resolver, and it lives OUTSIDE `PartPads` on purpose. That class
+    takes a footprint and scalars and reads no board -- a contract
+    `tests/test_730_...py` pins, because six call sites build parts and a
+    board read inside would change what each of them means. So the board is
+    read here, once, by the caller that has one, and the resolved float is
+    passed down. That is exactly the shape `fanout_clearance` already uses
+    (`self.npth_floor`, fanout_clearance.py:664-666).
+
+    `check_drc`'s requirement is
+    `max(clearance, NPTH_TO_TRACK_CLEARANCE, hole_clearance, lc)`
+    (check_drc.py:2714, :2733); this supplies the middle two terms.
+
+    Measured over the 22 tracked boards: `flat_hierarchy` is the ONLY one
+    declaring above the fab floor (0.2500), and all 6 of its NPTH pads carry
+    `local_clearance` 0.0 -- so it is the single witness that this term fires
+    at all, and every other board resolves to 0.2000.
+
+    Returns the plain fab floor when the board cannot be read, which is what a
+    caller with no board gets by default.
+    """
+    import routing_defaults as defaults
+    floor = float(defaults.NPTH_TO_TRACK_CLEARANCE)
+    if pcb_data is None:
+        return floor
+    try:
+        from obstacle_map import resolve_hole_clearance
+        return max(floor, float(resolve_hole_clearance(pcb_data, None)))
+    except Exception:                                            # noqa: BLE001
+        return floor
+
+
 class PartPads:
     """Pose-owning pad/hole model for one footprint.
 
@@ -1613,7 +1648,7 @@ class PartPads:
                  'max_floor', 'clearance', 'hole_reach')
 
     def __init__(self, fp, clearance: float, model=None,
-                 copper_holes: bool = True):
+                 copper_holes: bool = True, npth_floor: float = None):
         # Local imports: check_drc pulls the whole DRC stack (see the
         # BoardOutlineGate note); kicad_parser is cheap but keeps the module's
         # import surface unchanged for existing consumers.
@@ -1635,6 +1670,9 @@ class PartPads:
         self.holes_extent = []  # ...the same holes at their EXTENT radius (#730)
         self.pad_floors = []    # PadFloor per copper pad, index-aligned (#697)
         self.max_floor = 0.0    # upper bound on this part's pad requirements
+        _npth_floor = (defaults.NPTH_TO_TRACK_CLEARANCE if npth_floor is None
+                       else max(defaults.NPTH_TO_TRACK_CLEARANCE,
+                                float(npth_floor)))
         for p in fp.pads:
             if not _pad_carries_copper(p):
                 # Copper-less drilled pad (NPTH mounting hole): the DRILL still
@@ -1687,18 +1725,17 @@ class PartPads:
                 # a COPPER-vs-SILK question on an argument that answers a
                 # different one.
                 #
-                # STILL MISSING, and structurally so: the BOARD's declared
-                # min_hole_clearance, which check_drc's `npth_clr` carries.
-                # This class takes `(fp, clearance)` with no board pointer --
-                # obstacle_map.resolve_hole_clearance's docstring already
-                # records that it cannot reach here. On a board declaring above
-                # 0.20 this still under-blocks by
-                # `declared - max(0.20, clearance, lc)`. Filed, not closed.
+                # The BOARD's declared min_hole_clearance, which
+                # check_drc's `npth_clr` carries, arrives as the resolved
+                # scalar `npth_floor` (#761) -- NOT as a board pointer. This
+                # class still reads no board; `resolve_npth_floor` does, once,
+                # in the caller that has one. It defaults to the fab floor, so
+                # a caller that passes nothing keeps exactly its previous
+                # answer.
                 if _pad_has_no_copper(p) and (p.drill or 0) > 0:
                     _lc = ((getattr(p, 'local_clearance', 0.0) or 0.0)
                            if copper_holes else 0.0)
-                    npth_grow = max(0.0, max(defaults.NPTH_TO_TRACK_CLEARANCE,
-                                             _lc) - clearance)
+                    npth_grow = max(0.0, max(_npth_floor, _lc) - clearance)
                     # ...and the SAME holes without the override, for extents.
                     # `holes_local` is a copper KEEP-OUT and `extent_local` is
                     # a question about where the part physically IS -- an
@@ -1710,6 +1747,12 @@ class PartPads:
                     # the seeder's ZERO-margin off-board census, which
                     # CLAUDE.md calls the top-priority placement defect. This
                     # keeps every extent byte-identical to pre-#730.
+                    # The FLAT floor, deliberately (#761): a board's
+                    # declared copper-to-hole rule is a copper rule, exactly
+                    # like `local_clearance` above, and `extent_local` asks
+                    # where the part physically IS. Keeping it out here keeps
+                    # every extent byte-identical on every board, which is what
+                    # stops a declaration from pushing a part off the outline.
                     ext_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE
                                    - clearance)
                     for hx, hy, hd in pad_drill_circles(p):
@@ -1870,7 +1913,8 @@ class PartPads:
 
 def build_part_pads(footprints: Dict[str, object],
                     clearance: float, model=None,
-                    copper_holes: bool = True) -> Dict[str, 'PartPads']:
+                    copper_holes: bool = True,
+                    npth_floor: float = None) -> Dict[str, 'PartPads']:
     """PartPads for every footprint that has any pad (copper or NPTH).
 
     `model` is an optional `PadClearanceModel` (#697); without it the parts
@@ -1881,7 +1925,7 @@ def build_part_pads(footprints: Dict[str, object],
     for ref, fp in footprints.items():
         if not getattr(fp, 'pads', None):
             continue
-        pp = PartPads(fp, clearance, model, copper_holes)
+        pp = PartPads(fp, clearance, model, copper_holes, npth_floor)
         if pp.n_pads or pp.holes_local:
             out[ref] = pp
     return out
@@ -2161,7 +2205,13 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     clearance_notes = list(model.notes)
     if not model.active:
         model = None
-    parts = build_part_pads(fps, clearance, model)
+    # The census reads hole keep-outs, so it carries the board's own
+    # copper-to-hole floor. The three call sites that read only pad rects and
+    # extents (legality's pad_intersection channel, routability, seeder's
+    # off-board census) deliberately do not: for them the term would resolve a
+    # board and change nothing.
+    parts = build_part_pads(fps, clearance, model,
+                            npth_floor=resolve_npth_floor(pcb_data))
     routing_layers = list(getattr(pcb_data.board_info, 'copper_layers', []) or [])
     check_exact = None
     if exact:
