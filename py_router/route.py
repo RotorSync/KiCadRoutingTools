@@ -484,7 +484,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Default OFF; no CLI flag this phase. Engine-level so the GUI
                 # shares it. Does NOT change any search region -- only the
                 # order in which nets are attempted.
-                planner_ordering: bool = False) -> Tuple[int, int, float]:
+                planner_ordering: bool = False,
+                # Incremental routing (--incremental-from): path to a PRIOR
+                # routed output of (essentially) this board, with its sibling
+                # .kicad_pro. When set, batch_route computes the DIRTY net set
+                # (netlist/pad changes plus preserved copper that now grazes a
+                # changed obstacle, via the exact clearance kernels), preserves
+                # every clean net's copper, rips only the dirty nets and routes
+                # them against the preserved copper. KiCad-locked and
+                # #521-protected nets are never ripped. A NULL-EDIT (unchanged
+                # input) preserves everything and routes nothing. The CLI main
+                # passes it; the GUI's incremental_from dialog control feeds it
+                # through the same engine path so both fronts share the logic.
+                incremental_from: Optional[str] = None) -> Tuple[int, int, float]:
     """
     Route single-ended nets using the Rust router.
 
@@ -561,7 +573,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                # #572: links describe ONE board state; only the finalize
                # custody handoff may set them on a sub-run, never blanket
                # forwarding.
-               'oracle_links'):
+               'oracle_links',
+               # Incremental routing: the dirty-set computation and copper
+               # preservation happen ONCE in the outer run; a reconcile
+               # sub-run must not re-run them against the same previous
+               # output (it would re-strip and re-preserve on a board that
+               # already has the preserved copper).
+               'incremental_from'):
         _reconcile_kwargs.pop(_k, None)
     # #572 lap-authority channel: cleared at ENTRY so an early return can
     # never leave a previous invocation's hints for the caller to harvest.
@@ -775,6 +793,75 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _orig_via_by_net: Dict[int, list] = {}
     for _v in pcb_data.vias:
         _orig_via_by_net.setdefault(_v.net_id, []).append(_v)
+
+    # --incremental-from: re-route only the nets a small design edit touched.
+    # Compute the DIRTY net set against the previous routed output, preserve
+    # every clean net's copper, rip only the dirty nets and route them against
+    # the preserved copper. This lives in the SHARED engine (not route.py's
+    # main) so the GUI's incremental_from control reaches it through the same
+    # path -- both fronts call batch_route. A NULL-EDIT (unchanged input)
+    # preserves everything and routes nothing.
+    #
+    # Placement: AFTER the orig snapshot above (so a stripped dirty net's
+    # original copper still reaches the #220/#284 stale-copper removal lists
+    # and the GUI's segments_to_remove/vias_to_remove), and BEFORE net
+    # resolution (so net_names is narrowed to the dirty set before
+    # resolve_net_ids / filter_already_routed see it).
+    if incremental_from:
+        from incremental_routing import compute_dirty_nets
+        from protected_nets import protection_map
+        _prev_pcb = parse_kicad_pcb(incremental_from)
+        _protected = protection_map(_prev_pcb, incremental_from) or {}
+        _dirty, _changed_pads = compute_dirty_nets(
+            pcb_data, _prev_pcb, clearance,
+            routing_layers=list(getattr(pcb_data.board_info, 'copper_layers', None)
+                                or []),
+            protected=_protected)
+        print(f"Incremental vs {incremental_from}: {len(_dirty)} dirty net(s) "
+              f"({len(_changed_pads)} changed pad(s)); "
+              f"protected-excluded: {len([n for n in _dirty if n in _protected])}")
+        if not _dirty:
+            # NULL-EDIT: nothing changed -> preserve the previous routed copper
+            # verbatim. Under return_results (the GUI) there is nothing to route
+            # and no copper to change; report an empty result set.
+            print("Incremental: no dirty nets (NULL-EDIT) -- preserving the "
+                  "previous routed copper verbatim.")
+            if return_results:
+                return 0, 0, 0.0, _empty_results_data()
+            import shutil
+            from copy_board import SIBLING_EXTS
+            shutil.copy2(incremental_from, output_file)
+            _sb, _db = (os.path.splitext(incremental_from)[0],
+                        os.path.splitext(output_file)[0])
+            for _ext in (SIBLING_EXTS if output_file.endswith('.kicad_pcb') else ()):
+                if os.path.isfile(_sb + _ext) and os.path.abspath(_sb) != os.path.abspath(_db):
+                    try:
+                        shutil.copy2(_sb + _ext, _db + _ext)
+                    except OSError:
+                        pass
+            print(f"Wrote {output_file} (unchanged copy of {incremental_from})")
+            return 0, 0, 0.0
+        # Route exactly the dirty set. If the caller ALSO gave an explicit net
+        # scope, intersect so they can restrict further.
+        if net_names and net_names != ['*']:
+            _dirty = [n for n in _dirty if n in set(net_names)]
+        net_names = _dirty
+        # Strip the dirty nets' existing copper IN-MEMORY (like --force-reroute),
+        # so they re-enter the route set and replan from scratch against the
+        # preserved clean copper. The originals were snapshotted into
+        # _orig_seg_by_net/_orig_via_by_net above, so on success the #220/#284
+        # stale strip drops them from the written file / removal lists.
+        _incr_nids = {nid for nid, net in pcb_data.nets.items()
+                      if net.name in set(net_names)}
+        if _incr_nids:
+            pcb_data.segments = [s for s in pcb_data.segments
+                                 if s.net_id not in _incr_nids]
+            pcb_data.vias = [v for v in pcb_data.vias
+                             if v.net_id not in _incr_nids]
+        keep_input_copper = True
+        rip_existing_nets = list(net_names)
+        print(f"Incremental routing {len(net_names)} dirty net(s) against "
+              f"preserved copper: {net_names[:5]}{'...' if len(net_names) > 5 else ''}")
 
     # Layers must be specified - we can't auto-detect which are ground planes
     if layers is None:
@@ -6104,63 +6191,16 @@ For differential pair routing, use route_diff.py:
                   f"(mm: {_classes}); cross-class max(A,B) respected.")
 
     # --incremental-from: re-route only the nets a small design edit touched.
-    # Compute the DIRTY net set and assemble a working board (current
-    # footprints/nets + previous copper for clean nets), then route the dirty
-    # nets against the preserved copper via the shared engine. A NULL-EDIT
-    # (unchanged input) preserves everything and routes nothing.
-    _route_input = args.input_file
-    _incr_rip = args.rip_existing_nets
-    _incr_keep_input = args.keep_input_copper
-    if args.incremental_from:
-        from incremental_routing import prepare_incremental
-        _work_path = os.path.splitext(args.output_file)[0] + '.incremental.kicad_pcb'
-        _incr = prepare_incremental(
-            args.input_file, args.incremental_from, _work_path,
-            clearance=args.clearance)
-        _dirty = _incr['dirty_names']
-        print(f"Incremental vs {args.incremental_from}: {len(_dirty)} dirty net(s) "
-              f"({_incr['clean_segments']} preserved segment(s), "
-              f"{_incr['clean_vias']} preserved via(s), "
-              f"{_incr['changed_pads']} changed pad(s)); "
-              f"protected-excluded: {len(_incr['protected_excluded'])}")
-        if _incr['empty']:
-            # NULL-EDIT: nothing changed -> preserve the previous output verbatim.
-            import shutil
-            from copy_board import SIBLING_EXTS
-            print("Incremental: no dirty nets (NULL-EDIT) -- preserving the "
-                  "previous routed output verbatim.")
-            shutil.copy2(args.incremental_from, args.output_file)
-            _sb, _db = (os.path.splitext(args.incremental_from)[0],
-                        os.path.splitext(args.output_file)[0])
-            for _ext in (SIBLING_EXTS if args.output_file.endswith('.kicad_pcb') else ()):
-                if os.path.isfile(_sb + _ext) and os.path.abspath(_sb) != os.path.abspath(_db):
-                    try:
-                        shutil.copy2(_sb + _ext, _db + _ext)
-                    except OSError:
-                        pass
-            print(f"Wrote {args.output_file} (unchanged copy of {args.incremental_from})")
-            sys.exit(0)
-        # Route exactly the dirty set. If the operator ALSO gave an explicit
-        # --nets scope, intersect so they can restrict further.
-        if all_patterns and all_patterns != ['*']:
-            _dirty = [n for n in _dirty if n in set(net_names)]
-        net_names = _dirty
-        _route_input = _work_path
-        _incr_rip = _dirty
-        _incr_keep_input = True
-        print(f"Incremental routing {len(net_names)} dirty net(s) against "
-              f"preserved copper: {net_names[:5]}{'...' if len(net_names) > 5 else ''}")
-
-    # --preview: the engine already supports this -- return_results=True with
-    # an empty output_file routes fully, mutates only the in-memory PCBData
-    # and writes nothing. This just exposes it on the CLI (#459 follow-on).
-    _preview_out = batch_route(_route_input,
+    # The DIRTY-net computation and copper preservation live in batch_route
+    # itself (shared with the GUI), so this main just forwards the flag.
+    # A NULL-EDIT (unchanged input) preserves everything and routes nothing.
+    _preview_out = batch_route(args.input_file,
                 "" if args.preview else args.output_file, net_names,
                 return_results=args.preview,
                 direction_order=args.direction,
                 ordering_strategy=args.ordering,
                 disable_bga_zones=args.no_bga_zones,
-                rip_existing_nets=_incr_rip,
+                rip_existing_nets=args.rip_existing_nets,
                 force_reroute=args.force_reroute,
                 # RAW patterns (pre-expansion): the #521 protection override
                 # must see what the operator TYPED, not the expanded names.
@@ -6179,7 +6219,8 @@ For differential pair routing, use route_diff.py:
                 json_out=args.json_out,
                 clearance=args.clearance,
                 net_clearances=_net_clearances_map,
-                keep_input_copper=_incr_keep_input,
+                keep_input_copper=args.keep_input_copper,
+                incremental_from=args.incremental_from,
                 smoothing=args.smoothing,
                 via_size=args.via_size,
                 via_drill=args.via_drill,

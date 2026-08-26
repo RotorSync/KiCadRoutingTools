@@ -1343,6 +1343,22 @@ class RoutingDialog(wx.Dialog):
             "only this run's new copper is cleaned")
         options_inner.Add(self.keep_input_copper, 0, wx.ALL, 3)
 
+        # Incremental routing (--incremental-from): re-route only the nets a
+        # small design edit touched, preserving the previous routed output's
+        # copper for every clean net. A file-path field named EXACTLY after the
+        # engine param so ai_plan's plan executor sets it by name (CLAUDE.md:
+        # name the control after the snake_case param). Empty = full re-route.
+        incr_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        incr_sizer.Add(wx.StaticText(options_scroll, label="Incremental From:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.incremental_from = wx.TextCtrl(options_scroll, value="")
+        self.incremental_from.SetToolTip(
+            "Incremental routing: path to a PRIOR routed output of (essentially) this "
+            "board (with its sibling .kicad_pro). Only the nets a small design edit "
+            "touched are re-routed; every clean net's copper is preserved. KiCad-locked "
+            "and protected nets are never ripped. Leave empty for a full re-route.")
+        incr_sizer.Add(self.incremental_from, 1, wx.EXPAND)
+        options_inner.Add(incr_sizer, 0, wx.EXPAND | wx.ALL, 3)
+
         # #536 octolinear smoothing, ON by default (the brief OFF default was
         # refuted by a 147-board A/B: ON 129 incomplete nets vs OFF 149). Named
         # `smoothing` to match the engine param, so the plan executor sets it by name.
@@ -2605,6 +2621,11 @@ class RoutingDialog(wx.Dialog):
         self.mps_reverse_rounds.SetValue(False)
         self.mps_layer_swap.SetValue(False)
         self.keep_input_copper.SetValue(False)
+        # Incremental routing: default OFF (empty = full re-route), matching
+        # the CLI's --incremental-from default None. The plan executor resets
+        # through this, so a step that set incremental_from does not leak it
+        # into the next step.
+        self.incremental_from.SetValue("")
         self.smoothing.SetValue(True)
         self.mps_segment_intersection.SetValue(False)
         self.bus_enabled.SetValue(False)
@@ -2943,6 +2964,9 @@ class RoutingDialog(wx.Dialog):
             'keep_input_copper': self.keep_input_copper.GetValue(),
             'smoothing': self.smoothing.GetValue(),
             'force_reroute': self.force_reroute.GetValue(),
+            # Incremental routing: path to a prior routed output; empty = full
+            # re-route (the CLI's --incremental-from default None).
+            'incremental_from': self.incremental_from.GetValue().strip() or None,
             'mps_segment_intersection': self.mps_segment_intersection.GetValue(),
             # Bus routing options
             'bus_enabled': self.bus_enabled.GetValue(),
@@ -3415,6 +3439,9 @@ class RoutingDialog(wx.Dialog):
                     mps_layer_swap=config.get('mps_layer_swap', False),
                     keep_input_copper=config.get('keep_input_copper', False),
                     smoothing=config.get('smoothing', True),
+                    # Incremental routing: path to a prior routed output; None
+                    # (empty control) = full re-route, matching the CLI default.
+                    incremental_from=config.get('incremental_from'),
                     mps_segment_intersection=config.get('mps_segment_intersection', False),
                     bus_enabled=config.get('bus_enabled', False),
                     bus_detection_radius=config.get('bus_detection_radius', 5.0),

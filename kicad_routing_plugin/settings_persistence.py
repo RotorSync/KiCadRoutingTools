@@ -104,6 +104,7 @@ def get_dialog_settings(dialog):
         'keep_input_copper': dialog.keep_input_copper.GetValue(),
         'smoothing': dialog.smoothing.GetValue(),
         'force_reroute': dialog.force_reroute.GetValue(),
+        'incremental_from': dialog.incremental_from.GetValue(),
         'mps_segment_intersection': dialog.mps_segment_intersection.GetValue(),
         'no_crossing_layer_check': dialog.no_crossing_layer_check.GetValue(),
         'can_swap_to_top': dialog.can_swap_to_top.GetValue(),
@@ -445,6 +446,8 @@ def restore_dialog_settings(dialog, settings):
         dialog.smoothing.SetValue(settings['smoothing'])
     if 'force_reroute' in settings:
         dialog.force_reroute.SetValue(settings['force_reroute'])
+    if 'incremental_from' in settings:
+        dialog.incremental_from.SetValue(settings['incremental_from'])
     if 'mps_segment_intersection' in settings:
         dialog.mps_segment_intersection.SetValue(settings['mps_segment_intersection'])
     if 'no_crossing_layer_check' in settings:

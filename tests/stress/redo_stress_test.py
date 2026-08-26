@@ -335,7 +335,15 @@ def board_io(argv):
     the input in argv. Boards are keyed by BASENAME so the dependency analysis is
     invariant under --remap / --workdir path rewriting (issue #231). Returns
     ([], None) when the command names no board (e.g. `--help`)."""
+    # --incremental-from names a PRIOR routed output the command only READS as
+    # a reference (the dirty-net baseline), not a chain input/output: it must
+    # not participate in the file-dependency DAG, or the LAST .kicad_pcb token
+    # convention below would treat it as the output and break the chain.
     toks = [a for a in argv if a.endswith(".kicad_pcb")]
+    if "--incremental-from" in argv:
+        _i = argv.index("--incremental-from")
+        if _i + 1 < len(argv) and argv[_i + 1].endswith(".kicad_pcb"):
+            toks = [t for t in toks if t != argv[_i + 1]]
     if not toks:
         return [], None
     return [os.path.basename(t) for t in toks[:-1]], os.path.basename(toks[-1])

@@ -56,6 +56,10 @@ SCALAR_FLAGS = {
     # why the FIXTURE now carries both (and always runs). When adding a CLI
     # flag, add it to the converter's FLAG_PARAMS and to this table.
     '--fab-tier': 'fab_tier', '--fab-overrides': 'fab_overrides_path',
+    # Incremental routing: the previous routed output path (a string value).
+    # The GUI control is a file-path field named incremental_from; the plan
+    # executor applies it as the batch_route input override.
+    '--incremental-from': 'incremental_from',
 }
 BOOL_FLAGS = {
     '--no-bga-zones': 'no_bga_zone', '--no-bga-zone': 'no_bga_zone',
