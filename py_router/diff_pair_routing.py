@@ -3349,7 +3349,17 @@ def _route_direct_coupled_middle(pcb_data, diff_pair, config, obstacles, layer_n
                      else f"{layer_names[a_layer]}->{layer_names[b_layer]}")
         _pol_note = "" if best['p_sign'] == p_sign else " [polarity flipped: cleaner/shorter legs]"
         _result = {'new_segments': best['all_segs'], 'new_vias': best['all_vias'],
-                   'iterations': best['iters'], 'path_length': len(simplified)}
+                   'iterations': best['iters'], 'path_length': len(simplified),
+                   # #766: this route is a coupled MIDDLE plus point-to-point
+                   # (single-ended) terminal legs -- the terminals are NOT
+                   # coupled. Without this marker the pair reported
+                   # outcome 'coupled', which is defined as "both members
+                   # routed coupled", and nothing downstream could tell it
+                   # apart from a pair that really is coupled end to end. The
+                   # terminals are exactly where P/N geometry breaks, so it is
+                   # the half worth disclosing. Pure disclosure: no routing
+                   # code branches on it.
+                   'hybrid_escape': True}
         _msg = (f"  DIRECT HYBRID: coupled middle on {_mid_desc} + "
                 f"{len(leg_segs)} leg seg(s) ({best['iters']} iters){_pol_note}")
         # #269: reject a coupled middle that self-grazes (its own P/N pinch below

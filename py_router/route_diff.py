@@ -1438,6 +1438,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
               f"disconnected member pads at this step "
               f"({', '.join(_member_incomplete)}) — JSON_SUMMARY."
               f"member_incomplete_pairs")
+    # #766: pairs routed by the hybrid escape are fully routed and keep their
+    # credit, but their TERMINAL legs are point-to-point single-ended copper --
+    # not a coupled pair end to end. Name them, because 'coupled' in the JSON
+    # says the opposite and the terminals are where P/N skew is born.
+    _hyb = sorted(r['pair'] for r in pair_reports if r.get('escape') == 'hybrid')
+    if _hyb:
+        print(f"  {YELLOW}Hybrid escape: {len(_hyb)} pair(s) routed as a coupled middle "
+              f"+ point-to-point terminal legs (terminals NOT coupled): "
+              f"{', '.join(_hyb)} — JSON_SUMMARY.pair_reports[].coupled_terminals{RESET}")
     if ripup_success_pairs:
         print(f"  Rip-up success: {len(ripup_success_pairs)} (routes that ripped blockers)")
     if rerouted_pairs:

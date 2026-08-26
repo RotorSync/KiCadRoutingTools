@@ -239,6 +239,20 @@ def build_pair_reports(state, diff_pair_ids_to_route, member_audit,
             'member_audit_mismatch': bool(mismatch or no_coupled_trunk),
             'no_coupled_trunk': no_coupled_trunk,
         }
+        # #766: a HYBRID ESCAPE is a coupled middle plus point-to-point
+        # (single-ended) terminal legs. Its members connect and its copper is
+        # DRC-clean, so it is genuinely routed and keeps its credit -- but
+        # 'coupled' means "both members routed coupled", and this pair's
+        # TERMINALS are not. Disclose it rather than silently reclassify:
+        # demoting to 'partial' would drop the pair out of routed_diff_pairs
+        # and imply downstream work that does not exist (a partial pair's
+        # terminals are peeled to a follow-up pass; a hybrid's are already
+        # routed). The terminals are where P/N geometry breaks, which is
+        # where intra-pair skew comes from -- so a caller holding a skew
+        # budget needs to see this, and `successful` never showed it.
+        if any(rr.get('hybrid_escape') for rr in (_rr_p, _rr_n) if rr):
+            rep['coupled_terminals'] = False
+            rep['escape'] = 'hybrid'
         if diag.get('blocking_nets'):
             rep['blocking_nets'] = diag['blocking_nets']
         if diag.get('casualty'):

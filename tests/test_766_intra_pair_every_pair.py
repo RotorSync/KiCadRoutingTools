@@ -160,6 +160,43 @@ def run():
           seeded.get('/OTHER_P', {}).get('routed_this_run') is False,
           str(seeded.get('/OTHER_P', {}).get('routed_this_run')))
 
+    # --- a hybrid escape must not silently claim coupled terminals ---------
+    # The hybrid route IS fully routed (pads connect, DRC clean) so it keeps
+    # its credit -- but 'coupled' means "both members routed coupled" and a
+    # hybrid's TERMINAL legs are point-to-point single-ended copper. Disclose,
+    # do not reclassify: demoting to 'partial' would drop it out of
+    # routed_diff_pairs and imply follow-up work that does not exist.
+    from diff_pair_custody import build_pair_reports
+
+    class _St:
+        def __init__(self, rr):
+            self.routed_results = rr
+            self.diff_pair_single_ended_nets = {}
+            self.pair_diagnostics = {}
+
+    hyb_res = {'new_segments': list(p_segs) + list(n_segs), 'new_vias': [],
+               'iterations': 9, 'path_length': 3, 'hybrid_escape': True}
+    true_res = {'new_segments': list(p_segs) + list(n_segs), 'new_vias': [],
+                'iterations': 9, 'path_length': 3, 'is_diff_pair': True,
+                'p_net_id': P_ID, 'n_net_id': N_ID}
+    audit = {'/PAIR': {'p': True, 'n': True}}
+
+    hy_rep = build_pair_reports(_St({P_ID: hyb_res, N_ID: hyb_res}),
+                                [('/PAIR', pair)], audit)[0]
+    check("hybrid escape is disclosed in its pair report",
+          hy_rep.get('escape') == 'hybrid'
+          and hy_rep.get('coupled_terminals') is False,
+          str({k: hy_rep.get(k) for k in ('outcome', 'escape', 'coupled_terminals')}))
+    check("hybrid escape KEEPS its routed credit (outcome unchanged)",
+          hy_rep.get('outcome') == 'coupled', str(hy_rep.get('outcome')))
+
+    tr_rep = build_pair_reports(_St({P_ID: true_res, N_ID: true_res}),
+                                [('/PAIR', pair)], audit)[0]
+    check("negative control: a genuinely coupled pair carries no hybrid marker",
+          'escape' not in tr_rep and 'coupled_terminals' not in tr_rep
+          and tr_rep.get('outcome') == 'coupled',
+          str({k: tr_rep.get(k) for k in ('outcome', 'escape', 'coupled_terminals')}))
+
     print()
     if fails:
         print(f"FAILED ({len(fails)}): " + ", ".join(fails))
