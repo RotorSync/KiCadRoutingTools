@@ -64,6 +64,13 @@ def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
 
     def _track_pair_clr(a_net, b_net, layer):
         # #549: a track-scoped DRU rule raises the SEG-SEG requirement only.
+        #
+        # NOT `kicad_dru.track_pair_clearance`, and do not unify them (#735).
+        # That one is PAIR-EXACT and needs both nets' class memberships; this
+        # one reads `config.track_clearances`, the ROUTER's per-obstacle-net
+        # OVER-approximation, because that is the map the copper being
+        # restored was routed against. Substituting the exact resolver here
+        # would price a restore BELOW what the router stamped for it.
         v = _pair_clr(a_net, b_net, layer)
         if hasattr(config, 'track_obstacle_clearance'):
             v = max(config.track_obstacle_clearance(a_net, v),

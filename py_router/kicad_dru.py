@@ -20,6 +20,25 @@ expression engine would silently manufacture wrong clearances):
   - later rules override earlier ones per layer (KiCad evaluates last-to-
     first, first match wins)
   - ``(severity ignore)`` rules are skipped
+
+THE SECOND CHANNEL, and it is not the same shape. TRACK-SCOPED rules
+(``A.Type=='track' && B.Type=='track'`` plus one net-class term) cannot be a
+layer map at all -- they are a predicate on a PAIR of nets -- so they parse out
+of the same single pass as a ``TrackRule`` list and are **raise-only** over an
+already-resolved pair value, never a replacement. Two resolvers consume them,
+and the difference matters when reading a number back:
+
+  * ``track_pair_clearance`` is PAIR-EXACT and is what a grader or a
+    geometry gate that knows both nets must use (check_drc's seg-seg site,
+    the fanout-clearance connector gate).
+  * ``effective_track_clearances`` OVER-APPROXIMATES per obstacle net,
+    because the router's obstacle map is shared across the routed set and
+    has no room for a per-pair value. Router output therefore always grades
+    clean, never the reverse.
+
+A track rule binds tracks and nothing else: no pad, no via, no zone. That is
+KiCad's own ``Type=='track'`` and it is why the pad channels above are
+untouched by this half of the module.
 """
 
 import os
@@ -292,6 +311,73 @@ def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[
     except OSError as e:
         return [], [f"could not read {dru}: {e}"]
     return parse_dru_track_clearances(text)
+
+
+def track_pair_clearance(track_rules: List[TrackRule], a_cls, b_cls,
+                         resolved: float) -> Tuple[float, Optional[TrackRule]]:
+    """THE pair-exact track-rule resolver: (effective mm, the rule that RAISED
+    it or None).
+
+    ``resolved`` is the caller's already-resolved pair value -- class pairwise
+    max with the #498 layer replacement applied -- and this is **raise-only**
+    over it, so a rule at or below it is inert and the fab floor can never be
+    dragged down. ``a_cls`` / ``b_cls`` are the two nets' class-membership sets
+    from ``list_nets.net_class_memberships``.
+
+    One site, deliberately. ``check_drc`` graded the seg-seg pair through a
+    closure of this body and ``fanout_clearance``'s connector gate had no
+    equivalent at all (#735), which is how the cap-repair pass could draw
+    copper closer than the grader accepts. Both now call this.
+
+    The rule identity comes back because check_drc's violation record uses it
+    to tell a structural, rule-governed pair from a physical graze; a caller
+    that only needs the number takes ``[0]``.
+    """
+    eff, rule = resolved, None
+    if not track_rules:
+        return eff, rule
+    for r in track_rules:
+        a_in, b_in = r.cls in a_cls, r.cls in b_cls
+        binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
+        if binds and r.clearance_mm > eff:
+            eff = r.clearance_mm
+            rule = r
+    return eff, rule
+
+
+def board_track_rules(pcb_data, board_path: str = None):
+    """([TrackRule], {net_id: frozenset of class names}) for a PCBData.
+
+    The QUIET, pcb_data-shaped reader -- the track-channel twin of
+    ``board_layer_clearance_map``, for engines that resolve pairs outside a
+    GridRouteConfig (the placement passes). Path discovery is the #498 rule:
+    the caller's ``board_path`` when it has one, else ``PCBData.source_path``.
+
+    ``([], {})`` for every miss -- no path, no sibling .kicad_dru, no rule, or
+    an unreadable project -- and it never raises: a board that declares nothing
+    must cost its caller nothing, and a failed read must not become a crash in
+    a pass that was working before the rules file appeared.
+    """
+    path = board_path or getattr(pcb_data, 'source_path', "") or ""
+    if not path:
+        return [], {}
+    try:
+        rules, _notes = read_board_track_clearances(path)
+    except Exception:                                       # noqa: BLE001
+        return [], {}
+    if not rules:
+        return [], {}
+    try:
+        from list_nets import net_class_memberships
+        nets = {nid: n.name for nid, n in (pcb_data.nets or {}).items()
+                if getattr(n, 'name', None)}
+        raw = net_class_memberships(path, nets)
+    except Exception:                                       # noqa: BLE001
+        # The rules parsed but nobody can be said to be IN a class, so no pair
+        # can bind. Drop the rules with them rather than keep a channel that
+        # would silently grade every pair as a non-member.
+        return [], {}
+    return rules, {nid: frozenset(cls) for nid, cls in raw.items()}
 
 
 def effective_track_clearances(track_rules: List[TrackRule],
