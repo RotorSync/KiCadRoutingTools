@@ -121,7 +121,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
-                # #549: {net_id: mm} track-to-track clearance map; None ->
+                # {net_id: mm} track-to-track clearance map (#735); None ->
                 # auto-read the sibling .kicad_dru track rules.
                 track_clearances: Optional[Dict[int, float]] = None,
                 bga_exclusion_zones: Optional[List[Tuple[float, float, float, float]]] = None,
@@ -759,7 +759,7 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
-    # #549: track-scoped .kicad_dru rules (raise-only on seg-vs-seg stamps).
+    # Track-scoped .kicad_dru rules (#735; raise-only on seg-vs-seg stamps).
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=[nid for _, nid in net_ids])
 

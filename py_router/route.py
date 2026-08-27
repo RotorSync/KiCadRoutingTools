@@ -500,7 +500,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
-                # #549: {net_id: mm} track-to-track clearance (effective
+                # {net_id: mm} track-to-track clearance (#735; effective
                 # per-obstacle map). None (both fronts) -> auto-read the
                 # sibling .kicad_dru track rules; explicit dict (tests) wins.
                 track_clearances: Optional[Dict[int, float]] = None,
@@ -1840,7 +1840,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
-    # #549: track-scoped .kicad_dru rules, same engine-side pattern (raise-only
+    # Track-scoped .kicad_dru rules (#735), same engine-side pattern (raise-only
     # on seg-vs-seg stamps; effective map over THIS call's routed set).
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=base_map_exclusions)

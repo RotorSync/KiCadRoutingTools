@@ -39,6 +39,30 @@ and the difference matters when reading a number back:
 A track rule binds tracks and nothing else: no pad, no via, no zone. That is
 KiCad's own ``Type=='track'`` and it is why the pad channels above are
 untouched by this half of the module.
+
+HISTORICAL NOTE -- the `#549` label, and why this module no longer carries it.
+
+Commits dated 2026-08-02 label four unrelated topics `#549 A-1`, `#549 A-2`,
+`#549 B-1`, `#549 B-2`; comments added `#549 C3` and `#549 D`. That label was a
+session work plan, NOT GitHub #549 -- which was CLOSED on 2026-08-01 by PR #555
+("Floorplan intent graded") and is about the placement skill. Its sub-letters
+collide with each other too: `A-1` marks both this parser and the
+strict-fragment view, `A-2` marks both this channel going live and the planner
+riding that view, `B-1` marks both the corridor seeds and the oracle summary
+check. The map, for `git log`:
+
+  fa685741  #549 A-1  -> .kicad_dru TRACK channel, parse (inert)    -> #735
+  8856c0e4  #549 A-2  -> .kicad_dru TRACK channel, live             -> #735
+  972131a4  #549      -> TRACK channel, octolinear smoothing        -> #735
+  56dea0cf  #549 A-1  -> strict-fragment view (check_connected)
+  a29d3f88  #549 A-2  -> planner rides the strict view              -> #578
+  b0dfaeb2  #549 B-1  -> corridor seeds (inert)      REMOVED f93bd946 (#575)
+  ab650b93  #549 B-2  -> --corridor-nets live        REMOVED f93bd946 (#575)
+  b9a527fd  #549 B-1  -> end-of-run oracle summary check
+
+The floorplan-intent, routability and skill families KEEP `#549`: those really
+are GitHub #549 (adc17a39, 0095aee9, dfdfe7c8, 7bef8b90, 4af27f51, all in
+PR #555). Retagging them would have removed the one accurate pointer.
 """
 
 import os
@@ -49,14 +73,14 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 _VAL = re.compile(r"^(-?[0-9.]+)\s*(mm|mil|in|um|nm)?$")
 _UNIT_MM = {"mm": 1.0, "mil": 0.0254, "in": 25.4, "um": 0.001, "nm": 1e-6, None: 1.0}
 _ONLAYER = re.compile(r"[AB]\s*\.\s*onLayer\s*\(\s*['\"]([^'\"]+)['\"]\s*\)")
-# #549 track-scoped clearance subset: A.Type=='track' && B.Type=='track' plus
+# The TRACK-scoped clearance subset (#735): A.Type=='track' && B.Type=='track' plus
 # exactly one X.NetClass=='C' term (optionally the mirror Y.NetClass!='C').
 _TRACK_TYPE = re.compile(r"([AB])\s*\.\s*Type\s*==\s*['\"]track['\"]", re.IGNORECASE)
 _NC_TERM = re.compile(r"([AB])\s*\.\s*NetClass\s*([!=]=)\s*['\"]([^'\"]+)['\"]")
 
 
 class TrackRule(NamedTuple):
-    """A #549 track-to-track clearance rule scoped to one net class.
+    """A track-to-track clearance rule scoped to one net class (#735).
 
     ``other_only`` is True for the ``A.NetClass=='C' && B.NetClass!='C'``
     shape: the requirement binds only member-vs-NON-member pairs, so a
@@ -196,7 +220,7 @@ def _parse_dru(text: str, copper_layers: List[str]
     ({layer: clearance_mm}, [TrackRule], notes).
 
     Later rules override earlier ones per layer. A rule whose condition is the
-    #549 track-pair subset becomes a TrackRule (and never a layer entry); any
+    honored track-pair subset becomes a TrackRule (and never a layer entry); any
     other out-of-subset scope is skipped with a note.
     """
     result: Dict[str, float] = {}
@@ -236,7 +260,7 @@ def _parse_dru(text: str, copper_layers: List[str]
             notes.append(f"rule '{name}': track-to-track clearance "
                          f"{clearance_mm}mm for class '{cls}'"
                          f"{' vs other classes only' if other_only else ''}"
-                         f" -- handled by the track channel (#549)")
+                         f" -- handled by the track channel")
             continue
         layers = _rule_layers(node, copper_layers, notes)
         if layers is None:
@@ -261,7 +285,7 @@ def parse_dru_layer_clearances(text: str, copper_layers: List[str]
 
 
 def parse_dru_track_clearances(text: str) -> Tuple[List[TrackRule], List[str]]:
-    """Parse .kicad_dru text -> ([TrackRule], notes) for the #549 track
+    """Parse .kicad_dru text -> ([TrackRule], notes) for the track
     channel. Copper layers are irrelevant to track rules; a synthetic list
     keeps the shared single-pass parser happy."""
     copper = ["F.Cu", "B.Cu"] + [f"In{i}.Cu" for i in range(1, 31)]
@@ -297,7 +321,7 @@ def read_board_layer_clearances(board_path: str, copper_layers: List[str],
 
 
 def read_board_track_clearances(board_path: str) -> Tuple[List[TrackRule], List[str]]:
-    """Auto-read the sibling ``<board>.kicad_dru`` #549 track rules.
+    """Auto-read the sibling ``<board>.kicad_dru`` track rules (#735).
 
     Returns ([], []) when there is no dru file. Unlike the layer map there is
     deliberately NO fab pinning: the track channel is raise-only over the
@@ -435,7 +459,7 @@ _TRACK_ANNOUNCED = set()  # (board path, rules) already printed this process
 
 def install_track_clearances(config, track_clearances, input_file,
                              pcb_data=None, routed_net_ids=None):
-    """Resolve and install the #549 track-to-track clearance map on ``config``,
+    """Resolve and install the track-to-track clearance map on ``config``,
     engine-side so BOTH fronts inherit it (like install_layer_clearances: no
     flag, no GUI control -- the .kicad_dru is the single source of truth). An
     explicit {net_id: mm} dict (tests) wins and stops the auto-read; None ->
@@ -468,7 +492,7 @@ def install_track_clearances(config, track_clearances, input_file,
         _TRACK_ANNOUNCED.add(_key)
         for r in rules:
             print(f"Track-to-track clearance rule from the board's .kicad_dru "
-                  f"(#549, raise-only on seg-seg pairs): '{r.name}' class "
+                  f"(raise-only on seg-seg pairs): '{r.name}' class "
                   f"'{r.cls}' {r.clearance_mm:g}mm"
                   f"{' (vs other classes only)' if r.other_only else ''}"
                   f" -- {len(eff)} net(s) priced")

@@ -1972,7 +1972,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print("Per-layer clearance rules (.kicad_dru, #498): "
                   + ", ".join(f"{l}:{v:g}" for l, v in sorted(_lcl.items())))
 
-    # #549: track-scoped clearance rules from the same .kicad_dru. Grader-side
+    # Track-scoped clearance rules from the same .kicad_dru (#735). Grader-side
     # they are PAIR-EXACT (a rule binds a specific (a, b) pair, other_only
     # exempts member siblings), which is <= the router's per-obstacle-net
     # over-approximation -- so router output always grades clean. Applied at
@@ -1991,13 +1991,13 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if not quiet and _track_rules:
         for _n in _track_notes:
             print(f"  .kicad_dru: {_n}")
-        print("Track-to-track clearance rules (.kicad_dru, #549): "
+        print("Track-to-track clearance rules (.kicad_dru): "
               + ", ".join(f"'{r.cls}':{r.clearance_mm:g}"
                           f"{'(other-only)' if r.other_only else ''}"
                           for r in _track_rules))
 
     def _track_pair_cl(net_a: int, net_b: int, layer: str):
-        """Effective seg-seg clearance for the pair, plus the #549 TrackRule
+        """Effective seg-seg clearance for the pair, plus the TrackRule
         that RAISED it (None when no track rule binds above the base value).
         The rule identity is what lets the violation record distinguish a
         structural, floor-governed rule pair from a physical graze.
@@ -2188,7 +2188,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
-                # #549 classification: the pair is RULE-governed (not a
+                # Track-rule classification: the pair is RULE-governed (not a
                 # physical graze) when a track rule raised the clearance AND
                 # the copper gap (eff - overlap) still clears the base pair
                 # value -- i.e. the violation exists only because of the rule.
@@ -3367,7 +3367,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  {v['net1']} <-> {v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         if v.get('track_rule'):
-                            print(f"    Track rule: '{v['track_rule']}' (#549; floor-governed pair)")
+                            print(f"    Track rule: '{v['track_rule']}' (floor-governed pair)")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
                     elif vtype == 'via-segment':

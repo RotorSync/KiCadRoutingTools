@@ -378,7 +378,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     per foreign net. base_clearance should be the moving net's own floor
     (max(global, own class)). Inert when net_clearances is None.
 
-    #549: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
+    #735: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
     folds the SAME way, raise-only on top of the class value -- this channel is
     seg-vs-seg ONLY, which is exactly what this helper measures, so a caller
     passing it here must NOT pass it to the pad/via helpers (KiCad's
@@ -410,7 +410,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
-        # #549: the track-rule value raises the same per-foreign requirement.
+        # The track-rule value raises the same per-foreign requirement (#735).
         fnid = nid[near]
         _nc = net_clearances or {}
         _tc = track_clearances or {}

@@ -1008,7 +1008,7 @@ end to end; the final entry's stop condition quoted against its score).
    it, and do not grind iterations against it.**
 
    **When the unsatisfiable clause is a dru rule the router hard-enforces**
-   (#549 track channel or a layer rule), stop-4 scopes to the REGION, not the
+   (the .kicad_dru track channel or a layer rule), stop-4 scopes to the REGION, not the
    run: (1) route the pass WITH the rule first and measure the failure —
    decide on the measurement, not in advance; (2) then stage a sibling dru
    for that pass with ONLY the unsatisfiable rule lifted — never a bare

@@ -63,7 +63,7 @@ def _copper_conflicts(pcb_data: PCBData, config: GridRouteConfig,
         return v
 
     def _track_pair_clr(a_net, b_net, layer):
-        # #549: a track-scoped DRU rule raises the SEG-SEG requirement only.
+        # A track-scoped DRU rule raises the SEG-SEG requirement only (#735).
         #
         # NOT `kicad_dru.track_pair_clearance`, and do not unify them (#735).
         # That one is PAIR-EXACT and needs both nets' class memberships; this
