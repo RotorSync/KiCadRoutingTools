@@ -1246,10 +1246,10 @@ class _Repair:
         # the first fill for a pair does happen inside cost() -- measured on a
         # 0.5-class board: 572 of 62,565 pair_with_source calls, against
         # 251,477 cost() calls. Each memo is (source_list, rows) and is
-        # rebuilt when the source list identity changes -- which makes
-        # repair_fanout_clearance's wholesale `st.cap_vias = {...}` reassignment
-        # self-heal, and makes a test that injects into cap_foreign_pads grade
-        # flat rather than mis-index.
+        # rebuilt when the source list identity changes -- which is what
+        # lets refresh_cap_vias hand every cap a NEW list per key without
+        # clearing a memo (#775), and makes a test that injects into
+        # cap_foreign_pads grade flat rather than mis-index.
         self._cap_pad_eff: Dict[str, Tuple[list, list]] = {}
         self._cap_seg_eff: Dict[str, Tuple[list, list]] = {}
         self._cap_via_eff: Dict[str, Tuple[list, list]] = {}
@@ -2092,10 +2092,11 @@ class _Repair:
         the reason needs stating carefully, because the obvious version of it
         is not what happens on the real path. _via_effs revalidates its memo
         on the identity of the list it is HANDED, which on the real path is
-        the per-cap pruned self.cap_vias[ref], not this one -- and the caller
-        refreshes that on the next line regardless. The rebind matters for a
-        holder that points cap_vias AT this list, which is the idiom every
-        test in this family uses and the state any second call would find. A
+        the per-cap pruned view, not this one -- and refresh_cap_vias
+        rebuilds that on the next line regardless. The rebind matters for a
+        holder that points cap_vias AT this list, which since #775 is a TEST
+        idiom only -- the engine never points it here -- and the state any
+        second call would find. A
         review measured the difference: mutating this in place leaves the
         end-to-end result byte-identical, and only the mechanism arms in
         tests/test_747_fanout_clearance_via_registrar.py go red. Kept
@@ -2129,8 +2130,9 @@ class _Repair:
         The returned count is what tells the two apart -- it counts TUPLES
         replaced, not moves handed in.
 
-        Leaves self.cap_vias alone. The caller refreshes the per-cap view on
-        the line below, exactly as it did while this rebuild was inline.
+        Leaves the per-cap view alone -- refresh_cap_vias owns it, and the
+        caller calls that on the line below. A registrar that also
+        refreshed would be a second place deciding what a cap can see.
 
         Not idempotent, and does not need to be: one caller, one call.
         """
@@ -2154,6 +2156,77 @@ class _Repair:
                 else:
                     rebuilt.append(t)
             self.vias = rebuilt
+        return n
+
+    def refresh_cap_vias(self) -> int:
+        """Re-prune the per-cap via view after the registrar moved barrels;
+        return how many caps were reassigned (#775).
+
+        The one caller is repair_fanout_clearance, on the line below the via
+        registrar and under the same `if via_moves:` guard, exactly where an
+        inline dict comprehension over the whole-board list used to sit. Same
+        idiom as the two registrars beside it: the nudger reports, and a real
+        _Repair applies the report.
+
+        RE-PRUNES rather than de-prunes, which is the whole of #775. The old
+        line pointed every cap at the whole-board list, and that is
+        NUMERICALLY IDENTICAL rather than approximately so: the prune is
+        exact, so a via it drops fails its keep-out test outright and
+        contributes no addend at all -- not a small one -- and the kept vias
+        stay in their original order, so even the float summation order is
+        unchanged. Measured on kicad_files/orangecrab_ext_pll.kicad_pcb at
+        --clearance 0.1, in both in-repo configurations that relocate
+        barrels: graze_penalty, the via shortfalls and required_rows all
+        compare EQUAL, not merely close, with 10 caps carrying a
+        non-zero penalty as the positive control.
+
+        What the de-prune cost is the eff matrix _via_effs then rebuilds per
+        cap, over n_pads x n_ALL_vias instead of n_pads x n_in_reach, plus
+        the same widening of via_penalty's and the shortfall loops' own
+        inner passes. On that board (65 caps, 2 pads each, 136 vias) the
+        matrix is 1,914 cells pruned against 17,680 de-pruned at the
+        SHIPPED max_displacement_cap of 3.0, and 144 against 17,680 at
+        0.0 -- and the re-grade plus the disclosure that read them took
+        17.7ms against 49.5ms, and 2.8ms against 35.9ms (best of 7).
+        The smaller reach makes the ratio LARGER, so the shipped default
+        is the conservative figure and the forcing config is the
+        flattering one.
+
+        EVERY cap in self.caps is reassigned, and this is where the track
+        registrar's freedom to SKIP does not carry over. That one may leave a
+        cap it has no seed pose for exactly as the caller built it, because
+        every tuple already in that cap's list still describes real copper at
+        the same coordinates. Here it does not: the registrar SUBSTITUTED the
+        tuples it moved, so a cap left alone keeps the PRE-move tuple -- a
+        phantom via at the landing and a hole where the barrel really is,
+        which is the exact failure the registrar's own docstring names about
+        matching on position alone. A cap with no seed pose therefore falls
+        back to a COPY of the whole list rather than being skipped:
+        over-blocking is the only direction that can never ship a violation,
+        and a copy rather than the list itself so that "every value in this
+        view is a list this method made" holds for every cap, with no
+        exception a caller has to know about.
+
+        Does NOT touch _cap_via_eff. That memo revalidates on the identity of
+        the list it is HANDED and every list here is new, so the rows rebuild
+        on their own. Clearing it as well would be a second mechanism doing
+        one job, and the one that goes stale first.
+
+        Exactly idempotent in VALUE and not in COST: a second call builds
+        another set of equal lists and discards every memo again. One caller,
+        one call.
+        """
+        n = 0
+        for ref, cap in self.caps.items():
+            # `.get` rather than a bare index, matching what the track
+            # registrar and the eff builders already do: st.caps is
+            # assignable from a test on a REAL _Repair (test_725 and test_732
+            # both do it), and a cap this object never pruned for has no seed
+            # pose to measure a reach from.
+            geom = self._cap_geom.get(ref)
+            self.cap_vias[ref] = (list(self.vias) if geom is None
+                                  else self._prune_vias(cap, geom, self.vias))
+            n += 1
         return n
 
     def _pad_effs(self, ref, cap):
@@ -3204,8 +3277,13 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # the report here. Must precede the refresh below, which reads
             # the view this repairs.
             st.relocate_vias(via_moves)
-            # refresh the per-cap pruned via lists before re-grading
-            st.cap_vias = {r: st.vias for r in st.caps}
+            # #775: ...and re-prune the per-cap via view against the
+            # list the line above just repaired, before anything
+            # re-grades it. This was a wholesale reassignment onto the
+            # whole-board list, which is exact and pays an eff-matrix
+            # rebuild of n_pads x n_ALL_vias per cap. Must FOLLOW the
+            # relocation, which is what it reads.
+            st.refresh_cap_vias()
             # base_seg / base_pad / base_via are deliberately NOT re-seeded --
             # exactly as base_via is left alone by the line above, though via
             # positions changed there too. They are read only by cost() /
