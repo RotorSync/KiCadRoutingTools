@@ -44,11 +44,45 @@ this change in and the guard mutated to `if True:`, test_736 passed. It is now
 armed on the identity of the list `__init__` built, captured at the seed frame
 through the supported `on_move` hook.
 
-THE MUTATION BATTERY is `tests/mutate_775.py`; its measured table is recorded
-in that file's header, FROM THE RUN.
+THE MUTATION BATTERY, AS RUN (`tests/mutate_775.py`): **15 rows, 13 killed,
+2 survived -- both expected -- 0 broken.**
 
-Runtime ~60s: two real-board passes on orangecrab, the synthetic rig, and one
-corpus sweep that constructs (but never runs) a _Repair per board.
+  1  revert the refresh to a de-prune ..... 7 arms
+  2  delete the refresh call ............. 14 arms (775 + 736 + 746)
+  3  refresh only the first cap ........... 5 arms
+  4  prune from the MOVED pose ............ 2 arms
+  5  drop the via_slack term .............. 1 arm  (725, the #725 invariant)
+  6  drop the keep-out term ............... 1 arm  <- see below
+  7  drop the span term ................... 2 arms
+  8  flat clearance instead of the keep-out  1 arm  <- see below
+  9  extend the existing list in place .... 8 arms
+  10 fallback skips the geomless cap ...... 2 arms
+  11 fallback aliases the whole list ...... 1 arm
+  12 guard made unconditional ............. 1 arm  (736, the re-armed guard)
+  13 init prunes from an empty source ..... 13 arms
+  14 INERT: a trailing comment names the de-pruned write ... SURVIVED
+  15 INERT: the refresh iterates in sorted order ........... SURVIVED
+
+ROWS 6 AND 8 SURVIVED THE FIRST RUN, and that is why
+`TestEveryTermOfTheBoundIsLoadBearing` exists. Both NARROW the reachable
+disk, so they are visible only to a via sitting in the band the keep-out term
+covers -- and no fixture in this family had one, on any board. The bound could
+have been narrowed by half a millimetre with every arm in every file green.
+The span and via_slack rows were killed on that same first run, so it was
+specifically the keep-out term that was unfalsifiable. Recording them as
+expected survivors would have been the wrong call: the repo's rule protects a
+mutation nothing CAN catch, not one nothing HAPPENS to catch, and this one
+needed a via in the band the rig can place. Re-run after the arm: both KILLED.
+
+THE #747 BATTERY was re-run because this branch changed its target. Its
+`relocate-after-the-per-cap-refresh` row is re-anchored to the new spelling
+(the note recording that its expectation was corrected by ITS first run stays
+verbatim) and gains this file as a fourth grader: **22 rows, 20 killed, 2
+survived -- both expected -- 0 broken**, with that row now killed by 12 arms.
+
+Runtime ~15s (measured 12.0s): THREE real-board passes on orangecrab, the
+synthetic rigs, and one corpus sweep that constructs (but never runs) a
+_Repair per board.
 """
 from __future__ import annotations
 
@@ -79,7 +113,8 @@ from placement import fanout_clearance as FC
 from placement.fanout_clearance import _Repair, repair_fanout_clearance
 from synth import make_via
 from test_736_fanout_clearance_regrade_view import (  # noqa: E402
-    CAP_XY, CLEAR, VIA_CLEAR, V_DRILL, V_SIZE, _board, _run, _stub)
+    CAP_XY, CLEAR, DECL_CLASS, DECL_LC, VIA_CLEAR, V_DRILL, V_SIZE,
+    _board, _run, _stub)
 
 BOARD = os.path.join(_ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
 
@@ -189,6 +224,8 @@ class TestThePredicateIsONESpelling(unittest.TestCase):
         """`nudge_vias_for_unresolved` is duck-typed on `st` -- nine test
         files drive it with a stand-in, one of which carries no via list at
         all -- so every read there goes through getattr with a flat fallback.
+        (Eleven files call it; the count is approximate, and it is not what
+        this arm asserts.)
         A RESOLVER has an honest flat fallback; a MUTATION does not, because
         "silently do nothing" is precisely the staleness this fixes."""
         calls = self._sites(self.mod, 'refresh_cap_vias()')
@@ -497,7 +534,20 @@ class TestTheGradeIsUNCHANGEDByThePrune(unittest.TestCase):
                          '%s: graze_penalty MOVED when the view was de-pruned '
                          '-- the prune is not exact' % label)
         self.assertEqual(sf, sf2, '%s: the via shortfalls moved' % label)
+        # NOT paired with a positive control, and that is now DELIBERATE
+        # rather than an oversight: on this board required_rows returns []
+        # on BOTH sides, because every cap's max_floor is 0.0 so best()
+        # emits nothing. So this line is a CHANGE DETECTOR here, not a
+        # measurement, and the arm that actually measures the disclosure
+        # is test_the_DISCLOSURE_is_identical_on_a_declaring_board below.
+        # An adversarial review of this branch caught the class docstring
+        # presenting it as tested when it was [] == [].
         self.assertEqual(rows, rows2, '%s: the disclosure moved' % label)
+        self.assertEqual(rows, [],
+                         '%s: required_rows is no longer empty on this\n'
+                         'board -- the note above is stale, and this arm\n'
+                         'is now a real measurement rather than a change\n'
+                         'detector' % label)
 
     def test_the_grade_is_identical_at_the_SHIPPED_displacement_cap(self):
         self._check(BOXED, 'BOXED')
@@ -506,19 +556,72 @@ class TestTheGradeIsUNCHANGEDByThePrune(unittest.TestCase):
         self._check(FORCING, 'FORCING')
     # MUTATION: drop the keep-out, the span or the via_slack term.
 
+    def test_the_DISCLOSURE_is_identical_on_a_declaring_board(self):
+        """The third channel, MEASURED rather than argued.
+
+        required_rows is invariant under the prune for a reason of its
+        own: it filters on the nets actually charged and prices each by a
+        PER-NET floor, so adding or removing vias of an already-charged
+        net cannot move the reported mm. The real board cannot show that
+        -- every one of its caps has max_floor 0.0, so the report is empty
+        on both sides and the comparison is between two empty lists.
+
+        This uses #736's DECLARING rig instead: a netclass plus a pad
+        override gives C1 a floor of 0.5, which puts a REAL `via` row in
+        the report -- and a far via keeps the pruned view strictly
+        smaller, so both halves of the claim are exercised at once.
+        """
+        with _stub(DECL_CLASS) as path:
+            pcb, _v = _board(VIA_CLEAR, 'F.Cu', second_cap=True,
+                             lc=DECL_LC)
+            pcb.vias.append(make_via(FAR_VIA_X, CAP_XY[1],
+                                     net_id=FAR_NET, size=V_SIZE,
+                                     drill=V_DRILL))
+            st = _repair(pcb, path)
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows = st.required_rows()
+            self.assertTrue(
+                any(str(r[1]).startswith('via') for r in rows),
+                'the declaring rig stopped emitting a via row, so this arm '
+                'no longer measures the disclosure: %r' % (rows,))
+            self.assertTrue(
+                any(len(st.cap_vias[r]) < len(st.vias) for r in st.caps),
+                'the pruned view IS the whole board, so nothing is being '
+                'compared')
+            st.cap_vias = {r: st.vias for r in st.caps}
+            st._cap_via_eff.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                rows2 = st.required_rows()
+            self.assertEqual(rows, rows2,
+                             'the disclosure MOVED when the via view was '
+                             'de-pruned -- the prune is not exact')
+    # MUTATION: drop any term of the predicate; de-prune the refresh.
+
 
 class TestTheExactnessMarginStaysPositive(unittest.TestCase):
     """The via bound is an ORDER OF MAGNITUDE thinner than the track one, and
     #775 makes it load-bearing in a second place, so the number is asserted
     rather than merely written down.
 
-    Residual slack is `span - grid_overshoot - R_max`, where R_max is the
-    largest seed-centre-to-pad-corner distance over the four reachable
-    rotations and the overshoot is real and pre-existing
-    (`_candidate_positions` snaps AFTER its radius test, so a final pose can
-    sit up to `grid_step*sqrt(2)/2` past max_displacement_cap). The track
-    pruner records +1.009mm for the same quantity, because its bound carries
-    `2*span + clearance` where this one carries `span` alone.
+    Residual slack is `span - grid_overshoot - R_max`, where the overshoot
+    is real and pre-existing (`_candidate_positions` snaps AFTER its radius
+    test, so a final pose can sit up to `grid_step*sqrt(2)/2` past
+    max_displacement_cap). The track pruner records +1.009mm for the same
+    quantity, because its bound carries `2*span + clearance` where this one
+    carries `span` alone.
+
+    R_MAX IS MEASURED FROM THE PRUNE'S OWN ANCHOR, and over the poses that
+    are actually graded. Both of those were wrong in the first version of
+    this arm, and an adversarial review caught them: it measured from
+    `cap.seed_x/seed_y`, the footprint ORIGIN, where the disk is centred on
+    `_cap_geom`'s rect CENTRE; and it swept `(0, 90, 180, 270)` where the
+    graded set is those plus the cap's OWN seed rotation -- which is not
+    among them for a footprint placed at a non-orthogonal angle. Both
+    corrections are INERT on today's corpus (every cap's rect centre
+    coincides with its origin, and no cap has a non-orthogonal seed
+    rotation), so the numbers below are unchanged. An arm that exists to
+    catch the board which has not shipped yet should defend the quantity
+    the bound actually needs.
 
     MEASURED, and printed by the arm below so a shift is visible rather
     than merely non-negative: over the 115 caps of the 5 tracked boards
@@ -531,7 +634,7 @@ class TestTheExactnessMarginStaysPositive(unittest.TestCase):
         if not boards:
             print('SKIP: git cannot identify the tracked corpus')
             self.skipTest('no git')
-        worst, n_caps, n_boards = None, 0, 0
+        worst, best, n_caps, n_boards = None, None, 0, 0
         for b in boards:
             try:
                 st = _repair(parse_kicad_pcb(b), b, 'C,R,FB')
@@ -542,26 +645,36 @@ class TestTheExactnessMarginStaysPositive(unittest.TestCase):
             n_boards += 1
             overshoot = st.grid_step * math.sqrt(2.0) / 2.0
             for ref, cap in st.caps.items():
-                _cx, _cy, span, _r = st._cap_geom[ref]
+                ccx, ccy, span, _r = st._cap_geom[ref]
                 rmax = 0.0
-                for rot in (0.0, 90.0, 180.0, 270.0):
+                # the prune's anchor is the rect CENTRE, and the graded
+                # poses are the four reachable rotations PLUS the cap's
+                # own seed one
+                for rot in (0.0, 90.0, 180.0, 270.0, cap.seed_rot):
                     for r in cap.pad_rects(cap.seed_x, cap.seed_y, rot):
                         x1, y1, x2, y2 = r[0], r[1], r[2], r[3]
-                        for px, py in ((x1, y1), (x1, y2), (x2, y1), (x2, y2)):
-                            rmax = max(rmax, math.hypot(px - cap.seed_x,
-                                                        py - cap.seed_y))
+                        for px, py in ((x1, y1), (x1, y2),
+                                       (x2, y1), (x2, y2)):
+                            rmax = max(rmax,
+                                       math.hypot(px - ccx, py - ccy))
                 n_caps += 1
                 slack = span - overshoot - rmax
                 if worst is None or slack < worst[0]:
                     worst = (slack, os.path.basename(b), ref, span, rmax)
+                # the MAXIMUM is reported as well as the minimum: three
+                # docstrings quote it and no arm was printing it, and a
+                # number nothing reports is a number that drifts silently
+                # (a fact-check of this branch made exactly that point)
+                if best is None or slack > best:
+                    best = slack
         self.assertGreater(n_caps, 50,
                            'only %d caps over %d boards -- the corpus arm '
                            'collapsed and proves nothing' % (n_caps, n_boards))
         self.assertIsNotNone(worst)
         print('#775 exactness margin: min %+.4fmm (%s %s, span %.4f, '
-              'R_max %.4f) over %d caps of %d boards'
+              'R_max %.4f), max %+.4fmm, over %d caps of %d boards'
               % (worst[0], worst[1], worst[2], worst[3], worst[4],
-                 n_caps, n_boards))
+                 best, n_caps, n_boards))
         self.assertGreater(
             worst[0], 0.0,
             'the via prune bound went NEGATIVE for %s on %s (span %.4f, '

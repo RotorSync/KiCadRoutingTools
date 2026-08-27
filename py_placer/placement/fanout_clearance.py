@@ -2041,10 +2041,16 @@ class _Repair:
         used, not an exposure #775 opens -- but this method now applies it at
         the post-nudge refresh as well, so the number lives with the predicate.
 
-        NO LAYER GATE, unlike the track twin, and the asymmetry is the geometry
-        rather than an omission: a through-via spans every copper layer, so
-        there is no per-pad copper scope to intersect and nothing a #731-style
-        union could exclude.
+        NO LAYER GATE, unlike the track twin, and the reason is worth stating
+        accurately rather than flatteringly. Every via in this list is priced
+        AS THOUGH it spanned every copper layer -- self.vias is built from
+        pcb_data.vias with no span filter and the 4-tuple does not carry
+        via.layers -- so a blind or buried barrel is over-blocked here. That
+        is the safe direction and it predates #775, but it is an
+        approximation, not a geometric necessity: on a through-via there is
+        genuinely no per-pad copper scope to intersect, and on the others
+        there is one this channel does not model. Either way nothing a
+        #731-style union could exclude.
 
         Returns a NEW list. A caller must ASSIGN it and must never extend a
         cap's existing list in place: _via_effs memoises on the source list's
@@ -2214,6 +2220,14 @@ class _Repair:
         on their own. Clearing it as well would be a second mechanism doing
         one job, and the one that goes stale first.
 
+        Assigns PER KEY, where the line this replaced rebound the whole dict.
+        That is strictly more conservative for every reader -- all of them
+        index by a ref taken from self.caps -- with one consequence worth
+        naming: a key left in this view for a ref that is NO LONGER in
+        self.caps would keep its pre-move list rather than being dropped.
+        Unreachable as the module stands, because self.caps is written once
+        in __init__ and never narrowed.
+
         Exactly idempotent in VALUE and not in COST: a second call builds
         another set of equal lists and discards every memo again. One caller,
         one call.
@@ -2221,10 +2235,16 @@ class _Repair:
         n = 0
         for ref, cap in self.caps.items():
             # `.get` rather than a bare index, matching what the track
-            # registrar and the eff builders already do: st.caps is
-            # assignable from a test on a REAL _Repair (test_725 and test_732
-            # both do it), and a cap this object never pruned for has no seed
-            # pose to measure a reach from.
+            # registrar and the eff builders already do: st.caps is assignable
+            # from a test on a REAL _Repair -- test_775's own geomless-cap arm
+            # does exactly that -- and a cap this object never pruned for has
+            # no seed pose to measure a reach from.
+            #
+            # The track registrar's twin of this comment cites test_725 and
+            # test_732 for the same claim. A fact-check of #775 measured that
+            # those two assign cap_vias / cap_segs / segments on a real
+            # _Repair but never `caps`, so this one does not repeat the
+            # citation. The defensive `.get` is right either way.
             geom = self._cap_geom.get(ref)
             self.cap_vias[ref] = (list(self.vias) if geom is None
                                   else self._prune_vias(cap, geom, self.vias))
@@ -3282,9 +3302,10 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # #775: ...and re-prune the per-cap via view against the
             # list the line above just repaired, before anything
             # re-grades it. This was a wholesale reassignment onto the
-            # whole-board list, which is exact and pays an eff-matrix
-            # rebuild of n_pads x n_ALL_vias per cap. Must FOLLOW the
-            # relocation, which is what it reads.
+            # whole-board list -- a safe SUPERSET of the pruned view (it
+            # is the PRUNE that is exact), which therefore graded the same
+            # and paid an eff-matrix rebuild of n_pads x n_ALL_vias per
+            # cap. Must FOLLOW the relocation, which is what it reads.
             st.refresh_cap_vias()
             # base_seg / base_pad / base_via are deliberately NOT re-seeded --
             # exactly as base_via is left alone by the line above, though via
