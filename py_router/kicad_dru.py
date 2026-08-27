@@ -353,10 +353,19 @@ def board_track_rules(pcb_data, board_path: str = None):
     GridRouteConfig (the placement passes). Path discovery is the #498 rule:
     the caller's ``board_path`` when it has one, else ``PCBData.source_path``.
 
-    ``([], {})`` for every miss -- no path, no sibling .kicad_dru, no rule, or
-    an unreadable project -- and it never raises: a board that declares nothing
-    must cost its caller nothing, and a failed read must not become a crash in
-    a pass that was working before the rules file appeared.
+    ``([], {})`` for no path, no sibling .kicad_dru, no rule, and for a
+    membership resolution that comes back EMPTY -- a rule whose class has no
+    members can never bind a pair, and returning it would leave a caller
+    paying for a live channel that is arithmetically dead. That last case
+    covers the ordinary "project declares no netclass_patterns" board, which
+    `net_class_memberships` answers with ``{}`` rather than an exception.
+
+    It does not raise for any input `net_class_memberships` can produce; the
+    two expressions outside the guards are the ``source_path`` read and the
+    final comprehension, and neither is reachable through that resolver. The
+    point is that a board declaring nothing must cost its caller nothing, and
+    a failed read must not become a crash in a pass that worked before the
+    rules file appeared.
     """
     path = board_path or getattr(pcb_data, 'source_path', "") or ""
     if not path:
@@ -375,7 +384,10 @@ def board_track_rules(pcb_data, board_path: str = None):
     except Exception:                                       # noqa: BLE001
         # The rules parsed but nobody can be said to be IN a class, so no pair
         # can bind. Drop the rules with them rather than keep a channel that
-        # would silently grade every pair as a non-member.
+        # would silently grade every pair as a non-member. This mirrors
+        # check_drc, which clears its own rule list on the same failure.
+        return [], {}
+    if not raw:
         return [], {}
     return rules, {nid: frozenset(cls) for nid, cls in raw.items()}
 

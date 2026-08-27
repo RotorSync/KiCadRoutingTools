@@ -17,27 +17,38 @@ predicate (check_drc delegates to it), `PadClearanceModel` carries the rules
 and the class memberships, and `_Repair.track_required` is the resolver the
 nudger reads through `getattr` like every other.
 
-THE MEASURED LADDER, and why it is a ladder rather than one arm. The connector
-is 0.2 wide, the foreign track is 0.2 wide, so the requirement between them is
-`0.1 + 0.1 + R`: 0.30 with no rule, 0.65 under a 0.45 rule. Placing one foreign
-track a chosen perpendicular distance from the connector's OFF path brackets
-that number from both sides:
+THE RULE IS A PREFERENCE, NOT A GATE, and that is the load-bearing decision.
+A hard refusal would abandon the via -- which leaves the #130 pad-via graze
+this pass exists to remove sitting on the board, and `check_drc` counts that
+too. So a gate would trade one counted violation for another AND lose the
+repair. The sweep therefore runs every drill rung honouring the rule first,
+and only if nothing clears does it run again at the base requirement and keep
+the repair, saying so on stdout. Same doctrine as the #756 drill rungs.
 
-    dperp   no dru                    with the 0.45 rule
-    0.28    ALT (base gate refuses)   ALT           <- the base gate is live
-    0.45    RIG_LANDING               no clear spot <- the headline
-    0.61    RIG_LANDING               ALT           <- selective, not a blanket
-    0.75    RIG_LANDING               RIG_LANDING   <- above 0.65 it stops binding
+THE MEASURED LADDER. The connector is 0.2 wide, the foreign track is 0.2 wide,
+so the requirement between them is `0.1 + 0.1 + R`: 0.30 with no rule, 0.65
+under a 0.45 rule. Placing one foreign track a chosen perpendicular distance
+from the connector's unruled path brackets that number from both sides:
 
-The 0.75 and 0.28 rows are what make the 0.45 row mean something: without them
-"the ON arm refuses" is equally consistent with a rule that refuses everything
-and with a fixture that refuses everything. Measured, not predicted -- the
-0.65 boundary was located by sweeping and it sits between 0.64 and 0.66.
+    dperp   no dru        with the 0.45 rule
+    0.28    ALT           ALT + fallback   <- the base gate is live
+    0.45    RIG_LANDING   RIG + fallback   <- nothing satisfies it; repair KEPT
+    0.61    RIG_LANDING   ALT              <- THE HEADLINE: the rule steers
+    0.75    RIG_LANDING   RIG_LANDING      <- above 0.65 it binds nothing
 
-THE 0.61 ROW IS THE ONE NARROW MARGIN IN THIS FILE, and it is stated rather
-than hidden: the relocation band is [0.58, 0.65), 0.06 wide, so no value in it
-can be 0.05 from both edges. 0.61 is 0.03 from each. Every other constant here
-clears its boundary by 0.10 or more.
+The 0.75 and 0.28 rows are what make the 0.61 row mean something: without them
+"the two arms differ" is equally consistent with a rule that changes every
+landing and with a broken fixture. Measured, not predicted -- the 0.65 boundary
+was located by sweeping and the true bracket is (0.650, 0.652].
+
+THE 0.61 ROW IS THE NARROWEST MARGIN IN THIS FILE, and it is stated rather than
+hidden: the steering band measures ~[0.563, 0.651), 0.088 wide, so 0.61 sits
+0.047 from the lower edge and 0.041 from the upper -- under the 0.05 this file
+otherwise keeps. Every other constant here clears its boundary by 0.10 or more.
+(An earlier version of this note said the band was [0.58, 0.65), which is both
+mis-measured and internally inconsistent -- that interval is 0.07 wide, not the
+0.06 the note claimed. A fact-check caught it; the real margins are larger than
+the wrong ones were.)
 
 WHAT `tests/mutate_735.py` MEASURES AGAINST THIS FILE AND ITS `_e2e` SIBLING --
 18 rows, 17 killed, 1 survived (expected), 0 broken. Recorded FROM THE RUN:
@@ -384,8 +395,12 @@ class TestTheModelCarriesTheChannel(_TmpCase):
     def test_for_board_reads_the_rules_and_the_memberships(self):
         p = self.stage('read', dru=DRU_BOTH)
         m = PadClearanceModel.for_board(parse_kicad_pcb(p), CLEAR, p)
-        # ON THE BRANCH: `active` staying False is the claim, so assert it
-        # BEFORE anything that would be true of an active model too.
+        # NOT an `active is False` arm: this fixture is a copy of a board that
+        # carries pad `local_clearance` overrides, so `active` is True here for
+        # reasons that have nothing to do with the track channel. A review
+        # caught the earlier comment claiming otherwise. The `active` claim is
+        # made where it can be made -- on the bare board, in
+        # TestTheTrackHandleIsSeparateFromTheFloors.
         self.assertEqual(m.track_rules, [TrackRule('crit_space', 'CRIT',
                                                    False, RULE)])
         self.assertEqual(m.net_classes.get(CRIT_NET), frozenset({'CRIT'}))
@@ -422,18 +437,30 @@ class TestTheModelCarriesTheChannel(_TmpCase):
         self.assertEqual(round(m.layer_rules.get(LAYER, 0.0), 6), 0.5)
     # MUTATION: let a layer-scoped rule through _parse_track_condition.
 
-    def test_the_notes_are_not_filed_twice(self):
-        """Both readers are views of ONE _parse_dru pass. Collecting the track
-        read's notes as well would double every line the file produces."""
+    def test_the_notes_are_not_filed_twice_and_do_not_OVERCLAIM(self):
+        """Two things at once, because they have the same cause.
+
+        The two readers call `_parse_dru` separately and their note lists come
+        back identical, so collecting both would double every line.
+
+        And nothing here may say the track channel was HONOURED: `notes`
+        reaches the operator as `pad clearance: ...` from `grade_pad_legality`
+        and the quench census, neither of which reads `track_rules` -- a
+        review measured that an earlier draft printed a rule those two passes
+        do not apply. The pass that does apply it discloses it where it acts.
+        """
         p = self.stage('notes', dru=DRU_BOTH)
         m = PadClearanceModel.for_board(parse_kicad_pcb(p), CLEAR, p)
         parse = [n for n in m.notes if 'handled by the track channel' in n]
         self.assertEqual(len(parse), 1, m.notes)
-        # ...and the one thing the layer read cannot say IS said.
-        self.assertEqual(len([n for n in m.notes
-                              if 'track rule' in n and 'crit_space' in n]), 1,
-                         m.notes)
-    # MUTATION: `notes.extend(...)` the track read's notes -> two copies.
+        # ON THE BRANCH: the rule really was read, so "no honoured-note" below
+        # is not just an empty channel.
+        self.assertEqual(len(m.track_rules), 1)
+        self.assertEqual([n for n in m.notes if 'track rule' in n], [],
+                         'a note claims the track channel was honoured; two '
+                         'of this constructor\'s three callers never apply it')
+    # MUTATION: `notes.extend(...)` the track read's notes -> two copies;
+    # or re-add the per-rule "honoured" note -> the second arm fails.
 
     def test_a_board_declaring_no_dru_is_a_strict_no_op(self):
         p = self.stage('none')
@@ -520,59 +547,91 @@ class TestTheTrackHandleIsSeparateFromTheFloors(_TmpCase):
 # 4. The ladder: the connector gate honours the rule, and only where it binds
 # ---------------------------------------------------------------------------
 class TestTheConnectorGateHonoursTheRule(_TmpCase):
-    def test_the_ruled_arm_REFUSES_a_landing_the_unruled_arm_takes(self):
-        (off_land, off_n, off_out, _), (on_land, on_n, on_out, on_st) = \
-            self.run_ladder(D_REFUSE)
+    def test_the_rule_STEERS_the_landing(self):
+        """THE HEADLINE. Where a rule-satisfying landing exists, the ruled arm
+        takes it and the unruled arm takes the nearer one that does not."""
+        (off_land, _, off_out, _), (on_land, on_n, on_out, on_st) = \
+            self.run_ladder(D_RELOCATE)
         # ON THE BRANCH: the unruled arm must actually have moved, or
-        # "the ruled arm did not" is what an inert fixture looks like too.
+        # "they differ" is what a broken fixture looks like too.
         self.assertEqual(off_land, RIG_LANDING,
                          'the fixture stopped moving; out=%r' % off_out)
-        self.assertEqual(off_n, 1, 'no connector was drawn to price')
         self.assertIsNotNone(on_st._track, 'the rule never reached the pass')
-        self.assertIsNone(on_land,
-                          'the ruled arm took a landing at %g mm, inside the '
-                          '%g mm the rule demands' % (D_REFUSE,
-                                                      0.2 + RULE))
-        self.assertEqual(on_n, 0, 'the ruled arm still emitted copper')
+        self.assertEqual(on_land, ALT_LANDING,
+                         'expected the rule to steer the landing, got %r; '
+                         'out=%r' % (on_land, on_out))
+        self.assertEqual(on_n, 1, 'the repair was abandoned, not steered')
+        # It found one on the STRICT rung, so it must not have disclosed a
+        # fallback. A pass that relaxed here would land somewhere too.
+        self.assertNotIn('took a landing at the base clearance', on_out)
     # MUTATION: `track_req(...)` -> `req(...)` at the s2 arm.
 
-    def test_the_refusal_is_SELECTIVE_rather_than_a_blanket(self):
-        """One rung out, the ruled arm still repairs the graze -- it just goes
-        somewhere else. A gate that refused everything would pass the arm
-        above and fail this one."""
-        (off_land, _, off_out, _), (on_land, _, on_out, _) = \
-            self.run_ladder(D_RELOCATE)
-        self.assertEqual(off_land, RIG_LANDING, off_out)
-        self.assertEqual(on_land, ALT_LANDING,
-                         'expected a different landing, got %r; out=%r'
-                         % (on_land, on_out))
-    # MUTATION: return False unconditionally from connector_clear.
+    def test_when_nothing_satisfies_the_rule_the_repair_is_KEPT_and_disclosed(self):
+        """THE LADDER. At D_REFUSE no landing in the whole sweep satisfies the
+        rule. The pass must NOT abandon the via: the #130 pad-via graze it
+        exists to remove would simply stay on the board, and check_drc counts
+        that too -- so a hard gate would trade one counted violation for
+        another and lose the repair. Prefer, then fall back, and say so.
+
+        This is the same doctrine as the #756 drill rungs, which the comment
+        beside them states as 'prefer the board, keep the repair'. An earlier
+        version of this change made it a hard gate; an adversarial review
+        measured the trade and it is recorded here rather than in a note."""
+        (off_land, off_n, off_out, _), (on_land, on_n, on_out, on_st) = \
+            self.run_ladder(D_REFUSE)
+        self.assertEqual(off_land, RIG_LANDING,
+                         'the fixture stopped moving; out=%r' % off_out)
+        self.assertIsNotNone(on_st._track, 'the rule never reached the pass')
+        self.assertEqual(on_land, off_land,
+                         'the repair was LOST rather than relaxed; out=%r'
+                         % on_out)
+        self.assertEqual((on_n, off_n), (1, 1))
+        self.assertIn('took a landing at the base clearance', on_out,
+                      'the pass shipped copper that does not meet the '
+                      "board's rule and did not say so")
+    # MUTATION: `trk_ladder = [True]` -> the repair is abandoned.
 
     def test_above_its_own_requirement_the_rule_binds_NOTHING(self):
         """The upper bracket. At D_INERT the gap exceeds 0.1 + 0.1 + the rule,
-        so the two arms must agree exactly -- which is what makes the refusal
-        above attributable to the rule's VALUE and not to its presence."""
+        so the two arms must agree exactly AND no fallback is disclosed --
+        which is what makes the steering above attributable to the rule's
+        VALUE and not merely to its presence."""
         (off_land, off_n, _, _), (on_land, on_n, on_out, on_st) = \
             self.run_ladder(D_INERT)
         self.assertIsNotNone(on_st._track, 'the rule was not even read')
         self.assertEqual((on_land, on_n), (off_land, off_n), on_out)
         self.assertEqual(on_land, RIG_LANDING)
+        self.assertNotIn('took a landing at the base clearance', on_out)
     # MUTATION: charge the rule unconditionally instead of raise-only.
 
     def test_the_BASE_gate_is_live_without_any_rule_at_all(self):
         """The lower bracket. Below 0.1 + 0.1 + clearance the unruled arm
-        refuses the landing too, so the arms above are measuring a gate that
-        exists rather than a rule that is the only gate."""
-        (off_land, _, off_out, off_st), (on_land, _, _, _) = \
+        already refuses RIG_LANDING, so the arms above are measuring a gate
+        that exists rather than a rule that is the only gate."""
+        (off_land, _, off_out, off_st), (on_land, _, on_out, _) = \
             self.run_ladder(D_BASE)
         self.assertIsNone(off_st._track, 'the unruled arm read a rule')
         self.assertEqual(off_land, ALT_LANDING, off_out)
-        # The ruled arm refuses OUTRIGHT at this gap, which is a strictly
-        # stronger refusal than the unruled arm's relocation and is what a
-        # raise-only rule must do below its own requirement. This file's first
-        # draft predicted ALT here; the run said None, and the prediction is
-        # left recorded beside the correction.
-        self.assertIsNone(on_land)
+        # Both arms land in the same place; the ruled one gets there on the
+        # relaxed rung and says so.
+        self.assertEqual(on_land, ALT_LANDING, on_out)
+        self.assertIn('took a landing at the base clearance', on_out)
+
+    def test_the_repair_is_never_LOST_on_any_rung(self):
+        """The doctrine, asserted directly rather than inferred from the four
+        rows above: on every rung of the ladder the ruled arm still produces a
+        landing. A future 'tidy' that turns the preference back into a gate
+        fails HERE with the reason, not three arms later with a coordinate."""
+        for d in (D_BASE, D_REFUSE, D_RELOCATE, D_INERT):
+            p = self.stage('never_%s' % str(d).replace('.', ''), dru=DRU_BOTH)
+            pcb, st, _v0 = _rig(p, dperp=d)
+            self.assertIsNotNone(st._track)          # ON THE BRANCH
+            moves, segs, out = _nudge(st, pcb, max_shift=4.0)
+            self.assertIsNotNone(_landing(moves),
+                                 'the ruled arm abandoned the repair at '
+                                 'dperp=%g; out=%r' % (d, out))
+            self.assertEqual(len(segs), 1)
+    # MUTATION: `trk_ladder = [True]`, or a hard `return False` on the rule.
     # MUTATION: none -- this arm exists to catch a fixture whose only live
     # gate is the one under test.
 
@@ -662,36 +721,82 @@ class TestTheRuleReachesExactlyOnePairKind(_TmpCase):
         """`valid_via_pos` charges a BARREL against a foreign track. KiCad's
         condition names a track on both sides, so that pair is out of scope --
         and it must stay out, or the pass refuses landings check_drc grades
-        clean."""
+        clean.
+
+        Asserted BEHAVIOURALLY, on the geometry, not by comparing two
+        resolvers: a review measured that the resolver comparison stays true
+        under the very mutation this arm names, so it could not fail on it.
+        The foreign track sits at a gap that clears a BARREL's own requirement
+        (0.25 + 0.1 + 0.1) and violates the rule band (0.25 + 0.1 + 0.45), so
+        if the via arm acquired the rule this landing would be rejected."""
         p = self.stage('viaseg', dru=DRU_BOTH)
-        pcb, st, _v0 = _rig(p, dperp=D_REFUSE)
-        # The two resolvers, on the SAME pair of nets, must disagree.
-        self.assertEqual(st.required(st.via_floor(CRIT_NET),
-                                     st.seg_floor(FOREIGN_NET, LAYER)), CLEAR)
-        self.assertEqual(st.track_required(st.seg_floor(CRIT_NET, LAYER),
-                                           st.seg_floor(FOREIGN_NET, LAYER),
-                                           CRIT_NET, FOREIGN_NET), RULE)
+        pcb, st, _v0 = _rig(p, dperp=None)
+        via_gap = 0.50
+        # On ANOTHER copper layer, which is what isolates the two arms:
+        # `valid_via_pos`'s segment loop has no layer gate (a barrel spans
+        # copper), while `connector_clear`'s skips a foreign track that is not
+        # on the connector's layer. Same-layer, the connector arm reacts to
+        # this track too and the arm measures both at once -- measured: the
+        # landing moved to ALT and the failure was unattributable.
+        pcb.segments.append(make_seg(
+            RIG_LANDING[0] - 0.4, RIG_LANDING[1] + via_gap,
+            RIG_LANDING[0] + 0.4, RIG_LANDING[1] + via_gap,
+            layer='In2.Cu', net_id=FOREIGN_NET, width=0.2))
+        # ON THE BRANCH: the gap must sit strictly between the two bands, or
+        # the arm is satisfied by a position neither would reject.
+        self.assertTrue(0.25 + 0.1 + CLEAR < via_gap < 0.25 + 0.1 + RULE,
+                        'the fixture gap %g brackets nothing' % via_gap)
+        self.assertIsNotNone(st._track)
+        moves, _segs, out = _nudge(st, pcb, max_shift=4.0)
+        self.assertEqual(_landing(moves), RIG_LANDING,
+                         'the via arm acquired the track rule and rejected a '
+                         'barrel position check_drc grades clean; out=%r'
+                         % out)
     # MUTATION: route valid_via_pos's segment loop through track_req.
 
     def test_the_cap_pad_and_board_pad_arms_are_not_raised(self):
+        """The cap-rect arm of `connector_clear`, behaviourally.
+
+        Same correction as the arm above: `st.required(...) == CLEAR` is true
+        with the whole branch reverted, so it tested nothing. Here the CAP's
+        own pad is the far side and the connector runs well inside the rule
+        band of it -- which must not refuse the landing, because a cap pad is
+        not a track."""
         p = self.stage('padarms', dru=DRU_BOTH)
-        pcb, st, _v0 = _rig(p, dperp=D_REFUSE)
+        pcb, st, _v0 = _rig(p, dperp=None)
         cap = st.caps[CAP]
         self.assertTrue(cap.pad_floors, 'the cap carries no floors to price')
-        self.assertEqual(st.required(cap.pad_floors[0],
-                                     st.seg_floor(FOREIGN_NET, LAYER)), CLEAR)
+        # ON THE BRANCH: the cap pad must actually be inside the rule band of
+        # the connector's start, or "it was not refused" is trivially true.
+        rect = cap.pad_rects()[0]
+        self.assertLess(abs(rect[2] - RIG_START[0]), RULE,
+                        'the cap pad is too far away to be a control')
+        self.assertIsNotNone(st._track)
+        moves, segs, out = _nudge(st, pcb, max_shift=4.0)
+        self.assertEqual(_landing(moves), RIG_LANDING,
+                         'a cap pad was priced as a track; out=%r' % out)
+        self.assertEqual(len(segs), 1)
     # MUTATION: route connector_clear's cap-rect arm through track_req.
 
     def test_the_broad_phase_over_reach_is_not_inflated(self):
         """`_register_segment`'s keep-out is a cap-pad-vs-track reach that
         `_seg_effs` strips back. Inflating it would be cancelled on a
-        declaring board and would leak into a pad pair on an inert one."""
+        declaring board and would leak into a pad pair on an inert one.
+
+        Registered on CRIT_NET, not the foreign net: only CRIT is a member of
+        the ruled class, so a mutated `_item_reach` that consulted the track
+        channel would raise nothing for a non-member and this arm would stay
+        green while broken. A review caught that."""
         rows = []
         for dru in (None, DRU_BOTH):
             p = self.stage('reach_%s' % ('on' if dru else 'off'), dru=dru)
             pcb, st, _v0 = _rig(p, dperp=D_REFUSE)
-            t = st._register_segment(0.0, 0.0, 1.0, 0.0, FOREIGN_NET, 0.2,
-                                     LAYER)
+            if dru is not None:
+                # ON THE BRANCH: the net registered below is IN the ruled
+                # class, so a leaking reach would have something to raise.
+                m = PadClearanceModel.for_board(parse_kicad_pcb(p), CLEAR, p)
+                self.assertIn('CRIT', m.net_classes.get(CRIT_NET, ()))
+            t = st._register_segment(0.0, 0.0, 1.0, 0.0, CRIT_NET, 0.2, LAYER)
             rows.append(t[5])
         self.assertEqual(rows[0], rows[1],
                          'the track rule reached the broad-phase reach')
@@ -720,9 +825,9 @@ class TestTheRuleReachesExactlyOnePairKind(_TmpCase):
     def test_track_required_is_read_from_exactly_one_place(self):
         mod = [l.split('#')[0] for l in
                inspect.getsource(FC).splitlines()]
-        self.assertEqual(len([l for l in mod if 'self._track' in l]), 3,
-                         'expected the assignment plus the two reads in '
-                         'track_required')
+        self.assertEqual(len([l for l in mod if 'self._track' in l]), 4,
+                         'expected the assignment, the two reads in '
+                         'track_required, and the one in track_rules_active')
         self.assertEqual(len([l for l in mod if 'def track_required' in l]), 1)
         self.assertEqual(len([l for l in mod if 'self._floors = ' in l]), 1)
         # The two handles must not be defined in terms of each other -- that

@@ -27,11 +27,15 @@ Python `str.replace`, never `sed`: commit bb8f4477 records two rows of
 metacharacter. Newlines are read and written with `newline=''` so a CRLF
 checkout round-trips byte-for-byte.
 
-THREE TARGETS, because the fix is in three files and a row that can only reach
-one of them cannot test the other two.
+FOUR TARGETS, because the fix spans four files and a row that can only reach
+one of them cannot test the other three.
 
-WHAT THIS MEASURES -- 16 rows. Counts are recorded FROM THE RUN, in the header
+WHAT THIS MEASURES -- 18 rows. Counts are recorded FROM THE RUN, in the header
 of `tests/test_735_fanout_clearance_track_rules.py`, not predicted here.
+
+(Both numbers above were stale in the first draft -- "three targets", "16
+rows" -- in a file whose own rule is that counts come from the run. A
+fact-check caught them.)
 """
 from __future__ import annotations
 
@@ -58,10 +62,12 @@ T747 = os.path.join(_TESTS, 'test_747_fanout_clearance_via_registrar.py')
 T725 = os.path.join(_TESTS, 'test_725_fanout_clearance_pad_floors.py')
 
 # The gate this whole issue is about, hoisted because it spans two lines.
-_S2 = """            if d < hw + s2.width / 2.0 + track_req(
-                    cfl, seg_fl(s2.net_id, s2.layer), net_id, s2.net_id):"""
-_S2_OLD = ("            if d < hw + s2.width / 2.0 + req("
-           "cfl, seg_fl(s2.net_id, s2.layer)):")
+_S2 = """            pair_req = (track_req(cfl, sfl, net_id, s2.net_id)
+                        if honour_track_rules else req(cfl, sfl))"""
+_S2_OLD = '            pair_req = req(cfl, sfl)'
+_S2_SWAP = """            pair_req = (track_req(cfl, sfl, s2.net_id, net_id)
+                        if honour_track_rules else req(cfl, sfl))"""
+_LADDER = '            trk_ladder = [True, False] if _trk_on else [True]'
 
 ROWS = [
     # --- the defect itself -------------------------------------------------
@@ -71,10 +77,27 @@ ROWS = [
     # today, so this SHOULD survive -- and a row that survives for a reason
     # the code guarantees is worth keeping as a change detector for the day
     # the predicate stops being symmetric.
-    ('swap-the-two-nets-at-the-s2-arm', 'fc', _S2,
-     """            if d < hw + s2.width / 2.0 + track_req(
-                    cfl, seg_fl(s2.net_id, s2.layer), s2.net_id, net_id):""",
+    ('swap-the-two-nets-at-the-s2-arm', 'fc', _S2, _S2_SWAP,
      (T735, T735E), 'SURVIVED'),
+
+    # --- the LADDER: the rule is a preference, and losing that is the
+    # regression this change was rewritten to avoid ------------------------
+    ('the-ladder-becomes-an-all-or-nothing-gate', 'fc', _LADDER,
+     '            trk_ladder = [True]',
+     (T735, T735E), 'KILLED'),
+
+    ('the-relaxed-rung-runs-FIRST', 'fc', _LADDER,
+     '            trk_ladder = [False, True] if _trk_on else [True]',
+     (T735, T735E), 'KILLED'),
+
+    ('the-fallback-is-taken-SILENTLY', 'fc',
+     '            if trk_relaxed:',
+     '            if False:',
+     (T735, T735E), 'KILLED'),
+
+    ('the-second-rung-runs-on-every-board', 'fc', _LADDER,
+     '            trk_ladder = [True, False]',
+     (T735,), 'SURVIVED'),
 
     # --- the scope: the rule must NOT reach the other arms -----------------
     ('via-vs-track-arm-acquires-the-rule', 'fc',
@@ -134,11 +157,27 @@ ROWS = [
      '        self.net_classes = {}',
      (T735, T735E), 'KILLED'),
 
-    ('track_pair-becomes-a-tier-of-pair', 'leg',
+    # Renamed from `track_pair-becomes-a-tier-of-pair`, which is what it was
+    # called and NOT what it did: it prepended an early return, i.e. it
+    # DISABLED the resolver -- a duplicate of `track_required-ignores-the-
+    # channel` one layer down -- and left the "did the rule leak into the pad
+    # resolver" control, the single most load-bearing claim in legality.py,
+    # with no row exercising it. A review caught that. The row below is the
+    # leak; this one keeps the disable, honestly named.
+    ('track_pair-is-disabled', 'leg',
      '        if not self.track_rules:\n            return resolved, None',
      '        return resolved, None\n        if not self.track_rules:\n'
      '            return resolved, None',
      (T735, T735E), 'KILLED'),
+
+    ('the-rule-LEAKS-into-the-pad-pair-resolver', 'leg',
+     '        """The required clearance between two pads (mm)."""\n'
+     '        return self.pair_with_source(fa, fb)[0]',
+     '        """The required clearance between two pads (mm)."""\n'
+     '        return max(self.pair_with_source(fa, fb)[0],\n'
+     '                   max((r.clearance_mm for r in self.track_rules),\n'
+     '                       default=0.0))',
+     (T735,), 'KILLED'),
 
     # --- the shared predicate ---------------------------------------------
     ('the-predicate-stops-being-raise-only', 'dru',

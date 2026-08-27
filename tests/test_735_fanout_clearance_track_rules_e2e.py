@@ -15,11 +15,26 @@ itself, so the interesting number is what the CONNECTOR adds:
 
 Measured on this tree. The delta of exactly 1 is the defect in the checker's
 own currency: the pass drew one piece of copper that its own checker rejects.
-The ruled arm draws no connector at all, so there is nothing to add.
+
+WHAT THE FIX DOES ABOUT IT, in two arms, because the answer has two halves.
+
+At this geometry NO landing in the whole sweep satisfies the rule, so the pass
+does NOT abandon the via -- that would leave the pad-via graze it exists to
+remove sitting on the board, which check_drc also counts. It keeps the repair
+and DISCLOSES that the copper does not meet the rule. Same copper, same grade;
+what changed is that the run says so.
+
+One rung out (`D_RELOCATE`), a rule-satisfying landing does exist, and the
+ruled arm takes a different one from the unruled arm with no fallback line.
+That is the behaviour change; the arm above is the guarantee that it never
+costs a repair.
 
 Absolutes are deliberately not asserted -- 9 is a property of the rig board's
 existing copper, and pinning it would make an unrelated board edit fail here
-with a message about track rules.
+with a message about track rules. The steering arm is asserted on the LANDINGS
+rather than on a second grade: at D_RELOCATE the unruled connector's overlap
+(0.04 mm) sits close enough to check_drc's 5 % tolerance that the graded delta
+is 0, so a grade there would measure the tolerance, not the fix.
 
 This file shells out and is therefore in the integration bucket by design; it
 declares no fast-path override. Its cheap half lives in the sibling.
@@ -47,7 +62,8 @@ if _TESTS not in sys.path:
 import run_utils
 from kicad_writer import add_tracks_to_pcb
 from test_735_fanout_clearance_track_rules import (  # noqa: E402
-    CLEAR, DRU_BOTH, D_REFUSE, RIG_LANDING, _nudge, _rig, _stage, _landing)
+    CLEAR, DRU_BOTH, D_REFUSE, D_RELOCATE, RIG_LANDING, _nudge, _rig,
+    _stage, _landing)
 
 # `[^\n]*` before the colon is load-bearing: check_drc appends a contact count
 # to the header. Same expression tests/test_549_rule_pair_classification.py
@@ -135,14 +151,41 @@ def main():
         check('the rules file really is binding on this board', n_without > 0,
               'baseline rule pairs = %d' % n_without)
 
-        # --- the RULED arm: it refuses the landing, so there is no such copper
+        # --- the RULED arm at the SAME geometry. No landing in the sweep
+        # satisfies the rule here, so the pass keeps the repair rather than
+        # abandoning the via -- and discloses that the copper does not meet
+        # the rule. It is the SAME copper as the unruled arm, so the grade is
+        # the same: what changed is that the run now says so.
         ruled = _stage(td, 'on', dru=DRU_BOTH)
         pcb2, st2, _v1 = _rig(ruled, dperp=D_REFUSE)
         moves2, segs2, text2 = _nudge(st2, pcb2, max_shift=4.0)
-        check('the ruled arm emits no connector to be flagged',
-              not moves2 and not segs2,
+        check('the ruled arm KEEPS the repair rather than abandoning the via',
+              _landing(moves2) == RIG_LANDING and len(segs2) == 1,
               'landing=%r segs=%d out=%r' % (_landing(moves2), len(segs2),
                                              text2.strip()[:120]))
+        check('and discloses that the copper does not meet the board rule',
+              'took a landing at the base clearance' in text2,
+              text2.strip()[:200])
+
+        # --- and where a rule-satisfying landing DOES exist, it takes it.
+        # Same fixture, one rung out. This is the behaviour change; the arm
+        # above is the guarantee that it never costs a repair.
+        steer_off = _stage(td, 'steer_off')
+        pcb3, st3, _v2 = _rig(steer_off, dperp=D_RELOCATE)
+        moves3, _s3, text3 = _nudge(st3, pcb3, max_shift=4.0)
+        steer_on = _stage(td, 'steer_on', dru=DRU_BOTH)
+        pcb4, st4, _v3 = _rig(steer_on, dperp=D_RELOCATE)
+        moves4, segs4, text4 = _nudge(st4, pcb4, max_shift=4.0)
+        check('the rule steers the landing where one satisfies it',
+              _landing(moves3) == RIG_LANDING
+              and _landing(moves4) not in (None, RIG_LANDING)
+              and len(segs4) == 1,
+              'unruled=%r ruled=%r out=%r' % (_landing(moves3),
+                                              _landing(moves4),
+                                              text4.strip()[:120]))
+        check('and does NOT disclose a fallback, because none was needed',
+              'took a landing at the base clearance' not in text4,
+              text4.strip()[:200])
 
     print('\n%d/%d checks passed' % (passed, passed + failed))
     return 0 if failed == 0 else 1
