@@ -1471,6 +1471,51 @@ class PlanExecutor:
                     self.log("AI plan: optimize_caps has no --clearance; "
                              "cleared the Min-Clearance override so it runs at "
                              "the board's own class, as the CLI does")
+            # #772: the per-step reset below is skipped for optimize_caps, so a
+            # cap knob an earlier cap step set carries into the next one --
+            # there is no fanout step in between to reset it. A BLANKET reset
+            # here would undo the inheritance that exception exists for, so it
+            # is scoped two ways: only the CAP PANEL's controls, and only when
+            # the step actually NAMES one of them.
+            #
+            # The rule is CLI parity, and it is exact rather than approximate:
+            # the panel's creation defaults ARE place_fanout_clearance.py's
+            # argparse defaults, value for value (2.0 / 1.0 / 0.2 / 2.0 / 3.0 /
+            # 1.5 / 30 / 'C,R,FB' / rotate on / edge unset -- checked against
+            # repair_fanout_clearance's signature, 10 of 10). So "reset the cap
+            # panel, then apply this step's params" IS "run the CLI with
+            # exactly the flags this step carries", which is what a replayed
+            # manifest is supposed to mean. A recorded `--near-margin 1.5` gives
+            # the other nine flags their argparse defaults; inheriting nine
+            # leftovers instead is not that run.
+            #
+            # A step naming NO cap knob is the auto-inserted one
+            # (_insert_cap_optimization), whose documented purpose is to inherit
+            # the operator's live fanout state -- it keeps doing so.
+            #
+            # SHARED knobs (clearance / grid_step / via_size) are NOT touched:
+            # they come from the Basic tab, and the #768 inheritance rationale
+            # above is about those.
+            if step["action"] == "optimize_caps":
+                _capp = getattr(getattr(self.dialog, 'fanout_tab', None),
+                                'bga_options', None)
+                _defs = (getattr(type(_capp), 'CAP_PARAM_DEFAULTS', ())
+                         if _capp is not None else ())
+                # the LEGACY spelling counts as a cap knob too -- see the
+                # optimize_caps block in apply_step_params
+                _names = {n for n, _v in _defs} | {'board_edge_clearance'}
+                _given = sorted(set(step.get("params") or {}) & _names)
+                if _given and hasattr(self.dialog,
+                                      'reset_cap_params_to_defaults'):
+                    try:
+                        self.dialog.reset_cap_params_to_defaults()
+                        self.log("AI plan: optimize_caps names "
+                                 + ", ".join(_given)
+                                 + " -- cap knobs reset to the CLI defaults "
+                                   "first, so the ones it omits are defaults "
+                                   "rather than the previous step's values")
+                    except Exception as _e:
+                        self.log(f"AI plan: cap-panel reset skipped: {_e}")
             if (step["action"] != "optimize_caps"
                     and hasattr(self.dialog, 'reset_params_to_defaults')):
                 try:
