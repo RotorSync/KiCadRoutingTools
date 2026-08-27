@@ -24,7 +24,7 @@ Gated here:
   4. KiCad's own item kinds ('pad'/'zone') are trusted without a search.
   5. The fragment gate does NOT enroll a net whose extra fragments are all
      pad-less (routing cannot help), but DOES still enroll one whose extra
-     fragment carries a pad (the class #549 A-2 exists for).
+     fragment carries a pad (the class the #578 fragment gate exists for).
 
 Run:
     python3 tests/test_659_link_classification.py
@@ -140,7 +140,7 @@ def test_gate_skips_padless_only_fragments():
 
 
 def test_gate_still_routes_pad_bearing_fragments():
-    """NEGATIVE CONTROL: the #549 A-2 case must survive. A third pad on its
+    """NEGATIVE CONTROL: the #578 fragment-gate case must survive. A third pad on its
     own fragment is a real open, and routing IS the repair."""
     pads = [make_pad(net_id=1, x=0.0, y=0.0, ref='U1', num='1'),
             make_pad(net_id=1, x=10.0, y=0.0, ref='U2', num='1'),
@@ -159,11 +159,11 @@ def test_phantom_split_is_not_dead_copper():
 
     A fragment that is STRICTLY pad-less can still be the net's real route --
     it just ends a hair short of the pad's copper, which is the phantom split
-    #549 A-2 exists to route (and the very micro-gap class #659 is about). So
+    #578 exists to route (and the very micro-gap class #659 is about). So
     "strictly pad-less" must NEVER be used as the dead-copper test: the
     authoritative graph, which joins that gap, has to be the one asked.
 
-    Fixture is the #549 A-2 shape: a long run whose ends sit 0.09 mm from two
+    Fixture is the #578 shape: a long run whose ends sit 0.09 mm from two
     0.06 mm pads, plus a stub that touches pad 1 exactly.
     """
     pads = [make_pad(net_id=1, x=0.0, y=0.0, ref='U1', num='1',

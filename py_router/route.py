@@ -1315,7 +1315,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # oracle_links by the CALLER (the lap loop's landed-export), so re-laps
     # skip them the normal way.
     _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
-    # fragment_gate (#549 A-2): a zone-less net whose copper KiCad holds in
+    # fragment_gate (#578): a zone-less net whose copper KiCad holds in
     # pieces must not be skipped as "Already fully connected". route_diff
     # deliberately keeps the default (a fragmented net entering the diff
     # engine is a separate behavior question).
@@ -3221,12 +3221,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _p in _dp],
         })
 
-    # ---- FRAGMENT SWEEP (#549 C3) ------------------------------------------
+    # ---- FRAGMENT SWEEP -----------------------------------------------------
     # The grading verdict above is pad-oriented: a zone-less net can grade
     # "connected" while its copper sits in several KiCad islands (run 6's
     # VCC3V3: 25/27 reported, 7 islands real). Census every such net with the
     # strict-fragment model and report splits honestly. DISCLOSURE ONLY since
-    # the #549 A-2 fragment gate was removed for main parity (#578): these
+    # the #578 fragment gate was removed for main parity and ported back: these
     # entries name the splits, they no longer re-queue the net for routing.
     fragmented_nets = []
     _frag_already = {m['net_id'] for m in failed_multipoint}
@@ -3671,7 +3671,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             (pcb_data.nets[_n].name if _n in pcb_data.nets else str(_n)): _v
             for _n, _v in sorted(state.terminal_restores.items())}
     if fragmented_nets:
-        # #549 C3: pad-connected nets whose copper is several KiCad islands
+        # Fragment sweep: pad-connected nets whose copper is several KiCad islands
         # (additive; also present as failed_multipoint entries above).
         summary['fragmented_nets'] = fragmented_nets
     if stacked_copper_findings:

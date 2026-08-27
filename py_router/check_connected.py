@@ -14,7 +14,7 @@ from kicad_parser import parse_kicad_pcb, Segment, Via, Pad, PCBData, Zone
 from net_queries import expand_pad_layers
 
 
-# #549 fragment blindness: in the strict-fragment view a track-to-track joint
+# Fragment blindness: in the strict-fragment view a track-to-track joint
 # only counts when the copper overlaps by at least this depth. The grading
 # epsilon (1e-6) credits quantization-level lenses KiCad's exact geometry
 # rejects -- run 6's VCC3V3 graded 25/27 pads connected while KiCad saw 7
@@ -425,11 +425,11 @@ def bare_pad_nets(pcb_data, exclude_net_ids=None,
 
 def net_copper_fragments(net_id, segments, vias, pads, zones=None,
                          pcb_data=None, tolerance: float = 0.02) -> Dict:
-    """Strict-fragment census (#549): one strict_fragments=True graph build +
+    """Strict-fragment census: one strict_fragments=True graph build +
     UnionFind replay. A fragment = a connected component owning >=1 track
     segment (graphic=False) or via; pads ride along (a pad-only component is
     not a fragment -- that is `unrouted`'s domain). Consumers: the
-    filter_already_routed fragment gate (#549 A-2, ported to main as #578)
+    filter_already_routed fragment gate (#578, ported from the placement branch)
     and route.py's summary sweep -- which is how a plain --nets call finally
     SEES a net KiCad holds in pieces.
 
@@ -578,13 +578,13 @@ def net_dead_copper(pcb_data, net_id, segments, vias, pads, zones=None):
 
     Read-only twin of remove_orphan_islands' verdict: it answers "which of
     this net's copper is dead" without mutating anything, so callers deciding
-    whether ROUTING can help (the #549 A-2 fragment gate, the fragment sweep)
+    whether ROUTING can help (the #578 fragment gate, the fragment sweep)
     ask exactly the question the late sweep will act on.
 
     Deliberately the AUTHORITATIVE (permissive) connectivity graph, not the
     strict-fragment view. "Strictly pad-less" is a different question and
     conflating them is a real bug: a fragment can miss a pad's copper by a
-    hair and still be the net's actual route -- the phantom split #549 A-2
+    hair and still be the net's actual route -- the phantom split #578
     exists to catch -- and diverting that away from the router would ship the
     open it was built to close. Copper is dead only when the same graph that
     grades the board says nothing ties it to a pad or the net's pour.
@@ -1002,7 +1002,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
         zones: Zones (power planes) belonging to this net
         tolerance: Connection tolerance in mm
         verbose: If True, include detailed debug info
-        strict_fragments: the PLANNER's view (#549 fragmentation blindness).
+        strict_fragments: the PLANNER's view (fragmentation blindness).
             Three credit rules tighten -- pad points lose the generic 0.4mm
             proximity radius (the EXACT pad rules #195/#89/#346/#479 stay
             live), endpoint/via caps must overlap real copper by
@@ -1181,7 +1181,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # real size was for is now covered by the EXACT rules below
             # (#195 endpoint-in-pad, #89 via-in-pad, #346 pad-pad overlap),
             # so pad points keep only the small flat tolerance.
-            # strict view (#549): the flat proximity radius is exactly the
+            # strict view: the flat proximity radius is exactly the
             # credit that merged fragments a pad never touches -- the exact
             # rules below still connect every REAL pad attachment.
             pad_size = 0.0 if strict_fragments else 0.4
@@ -1483,7 +1483,7 @@ def check_net_connectivity(net_id: int, segments: List[Segment], vias: List[Via]
             # threshold also made exact-tangency flip on FP epsilon across the
             # file write/parse round-trip). Exact tangency (zero-width copper)
             # is still NOT credited, so a real end-to-end gap stays flagged.
-            # strict view (#549): demand a real STRICT_JOINT_OVERLAP copper
+            # strict view: demand a real STRICT_JOINT_OVERLAP copper
             # lens instead of the grading epsilon -- two fat rail tips a
             # hair's width apart are separate FRAGMENTS to a planner even
             # where the grader shades them connected.

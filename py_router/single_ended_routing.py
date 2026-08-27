@@ -3552,7 +3552,7 @@ def route_multipoint_main(
         print(f"  Existing copper joins {len(pad_info)} terminals into "
               f"{num_components} group(s)")
     if net_id in (getattr(pcb_data, '_zone_blob_fallback_nets', None) or ()):
-        # #549: the strict grouping above fell back to zone-outline credit
+        # strict view: the grouping above fell back to zone-outline credit
         # for a zone with no fill model (scipy absent / oversize) -- the
         # fragment view for this net is DEGRADED, disclose it.
         print("  (fragment view degraded to zone-outline credit: no fill "
@@ -3607,7 +3607,7 @@ def route_multipoint_main(
             'tap_edges_failed': 0,
             'tap_pads_connected': len(pad_info),
             'tap_pads_total': len(pad_info),
-            # #549 A-2: the STRICT component count behind this verdict --
+            # #578: the STRICT component count behind this verdict --
             # with the planner on the strict view, an "already connected"
             # return now really means one fragment per outline.
             'strict_fragments': num_components,
