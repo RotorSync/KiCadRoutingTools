@@ -799,9 +799,10 @@ class TestNudgerGraderConsistency(unittest.TestCase):
     # `vr + clearance - EPS` -> calls[0] == 0.
 
     def test_a_RELOCATED_via_keeps_its_radius(self):
-        """`nudge_vias_for_unresolved` rebuilds `st.vias`, so a moved via is a
-        NEW tuple. Without carrying its entry across, it drops out of the radius
-        map and is graded at its keep-out SLOT -- the prune over-reach -- rather
+        """`_Repair.relocate_vias` replaces the tuple of a moved via, so a
+        moved via is a NEW tuple. Without carrying its entry across, it drops
+        out of the radius map and is graded at its keep-out SLOT -- the prune
+        over-reach -- rather
         than at the pair's requirement. Conservative, but wrong, and it is the
         one map that gains entries after __init__, so the entry must also hold
         its tuple or a recycled id hands back another via's radius.
@@ -828,6 +829,12 @@ class TestNudgerGraderConsistency(unittest.TestCase):
         # ON THE BRANCH: the via must actually have moved, or the carry-over
         # branch never ran and this test would pass vacuously.
         self.assertEqual(len(moves), 1, 'no via was relocated')
+        # #747: the nudger REPORTS, _Repair applies. Both halves are asserted
+        # -- that the report left the graded view alone, and that handing it
+        # to the registrar performs the carry-over this test is about.
+        self.assertIs(st.vias[0], t0,
+                      'the nudger mutated the graded via view')
+        self.assertEqual(st.relocate_vias(moves), 1)
         self.assertEqual(len(st.vias), 1)
         moved = st.vias[0]
         self.assertNotEqual((moved[0], moved[1]), (t0[0], t0[1]))
@@ -837,8 +844,9 @@ class TestNudgerGraderConsistency(unittest.TestCase):
         self.assertIs(rec[0], moved,
                       'the map does not hold the tuple it keys on -- a '
                       'recycled id would return another via\'s radius')
-    # MUTATION: drop the `_radii[id(moved)] = ...` carry-over in
-    # `nudge_vias_for_unresolved` -> rec is None.
+    # MUTATION: drop the `radius=` carry-over in `_Repair._register_via`'s
+    # relocation caller -> rec is None. (#747 moved it there; before that it
+    # was a hand-written carry-over inside the nudger.)
 
     def test_the_nudger_grades_a_COPPERLESS_cap_pad_flat_too(self):
         """The copper-less-pad rule must not stop at the eff builders. The

@@ -990,21 +990,23 @@ class _Repair:
         # keeps every registered tuple alive. Unlike the pad/segment floor maps
         # -- which are filled only in __init__, where self.foreign_pads and
         # self.segments hold their tuples -- this one gains entries later, when
-        # nudge_vias_for_unresolved relocates a via. A tuple that died while its
-        # id entry lived would hand a recycled id ANOTHER via's radius,
-        # silently.
+        # relocate_vias files a moved barrel (#747; before that, the nudger did
+        # it inline). A tuple that died while its id entry lived would hand a
+        # recycled id ANOTHER via's radius, silently. That guarantee is also
+        # what lets _register_via file WITHOUT appending, which the track
+        # builder cannot do -- see its docstring.
         #
         # #732: the fallback is STORED rather than consumed inline and dropped,
         # because nudge_vias_for_unresolved needs the same answer and had no way
         # to reach it -- see via_radius() for what that cost.
         self._default_via_size = default_via_size
         self._via_radius_by_id: Dict[int, Tuple[tuple, float]] = {}
+        # #747: through _register_via, which is also what a via RELOCATED
+        # after construction goes through -- so a barrel the pass moves cannot
+        # be shaped, priced or filed differently from one present here.
         for v in pcb_data.vias:
-            r = self.via_radius(v)
-            t = (v.x, v.y, v.net_id,
-                 r + self._item_reach(self._via_floor_for(v.net_id)))
-            self.vias.append(t)
-            self._via_radius_by_id[id(t)] = (t, r)
+            self.vias.append(self._register_via(v.x, v.y, v.net_id,
+                                                radius=self.via_radius(v)))
 
         # --- avoidance: foreign-net tracks the cap's pads can actually TOUCH ---
         # Fanout escapes can land on the bottom (cap) side; attraction could
@@ -1454,9 +1456,9 @@ class _Repair:
     # ---- #725: per-pair required clearance -------------------------------
     # A via or a track carries no pad `(clearance ...)` override, so its floor
     # is a pure function of (net, layer scope) and is memoised on that key --
-    # never on a list position, because st.vias is reassigned wholesale by
-    # tests and rebuilt by nudge_vias_for_unresolved, which would desync any
-    # index-aligned parallel list.
+    # never on a list position, because the graded via list is reassigned
+    # wholesale by tests and rebuilt by relocate_vias (#747), which would
+    # desync any index-aligned parallel list.
 
     def _via_floor_for(self, net_id):
         """The PadFloor standing in for a via: its net's class floor, no pad
@@ -1834,9 +1836,11 @@ class _Repair:
         instead of a second pass over the whole board.
 
         Deliberately NOT called from nudge_vias_for_unresolved. That function
-        is duck-typed on `st` -- the #370/#617/#732/#733/#737 harnesses pass a
-        stand-in carrying only `caps`, `vias` and `graze_penalty` -- so every
-        `st` read there goes through getattr with a flat fallback. A RESOLVER
+        is duck-typed on `st` -- nine test files (#370, #617, #725, #730,
+        #732, #733, #737, #750, #756) drive it with a stand-in carrying only
+        `caps`, `vias` and `graze_penalty`, and one of those carries no via
+        list at all -- so every `st` read there goes through getattr with a
+        flat fallback. A RESOLVER
         has an honest flat fallback; a MUTATION does not, because "silently do
         nothing" is precisely the staleness this fixes. repair_fanout_clearance
         holds a real _Repair, so the call needs no escape hatch at all.
@@ -1870,6 +1874,155 @@ class _Repair:
                 self._seed_seg_n.setdefault(
                     ref, len(self.cap_segs[ref]) - len(kept))
         return len(fresh)
+
+    # ---- #747: THE one way a via enters this grader ----------------------
+    # The via channel's half of what #736 did for tracks, and for the same
+    # reason. __init__ and the post-nudge relocation each built a graded via
+    # tuple, and the second copy carried a hand-written restatement of the
+    # radius-map invariant the first one owns -- the shape #725, #731, #732,
+    # #733 and #736 have each fixed once already.
+
+    def _register_via(self, x, y, net_id, radius=None, keepout=None):
+        """Grade one via into the via view, and return its 4-tuple.
+
+        THE only construction site for a via tuple, and the only writer of
+        the id-keyed radius map -- both pinned by the source guard in
+        tests/test_747_fanout_clearance_via_registrar.py, which reports
+        offending line numbers rather than dumping the module.
+
+        Takes PRIMITIVE fields rather than a parser Via because its two
+        callers hold different things: __init__ has real Via objects, and
+        relocate_vias has the writer-shaped dicts the nudger returns. A
+        builder that accepted only one of those would have left the other
+        re-deriving the tuple, which is the defect being fixed.
+
+        TWO OPTIONAL ARGUMENTS RATHER THAN ONE, and the asymmetry with
+        _register_segment is the design rather than an accident.
+
+        `keepout=None` means BUILD one -- this radius plus this net's own
+        upper bound, the same _item_reach the eff builders strip back off
+        element 3. That is __init__'s question. A RELOCATION asks the other
+        one, and must CARRY the keep-out it was handed, verbatim: a moved via
+        keeps its requirement, and a tuple a test assigned wholesale carries
+        its own keep-out convention, which re-deriving would silently
+        re-price. Nothing equivalent arises on the track side, because the
+        copper register_new_segments files never had a tuple before.
+
+        `radius=None` means THIS OBJECT DOES NOT KNOW this barrel's radius,
+        so file nothing -- which is not the same as a radius of zero. A tuple
+        absent from the map is graded at its own keep-out slot verbatim, i.e.
+        exactly as injected (see the note beside the map in __init__), so
+        relocating an absent tuple must produce another absent one, or the
+        move starts pricing a via that _via_effs and via_penalty's flat path
+        both agreed not to price.
+
+        Both None is a contract violation rather than a default, and is
+        unreachable today: the only caller that omits a radius is relocating
+        a 4-tuple, which always carries element 3. Named rather than left to
+        surface as an arithmetic error on a None.
+
+        It files the map entry BEFORE returning, but -- unlike
+        _register_segment -- it does NOT append, and that difference is safe
+        here for a reason the track channel does not have. THIS map's VALUE
+        holds the tuple, so filing it IS the aliveness guarantee no matter
+        where the caller then puts it; the segment floor map holds a bare
+        floor, so only self.segments keeps a track tuple alive and its
+        builder has to append. The two callers here genuinely disagree about
+        placement -- __init__ APPENDS, relocate_vias SUBSTITUTES in order --
+        so an appending builder would be wrong for one of them.
+        """
+        if radius is None and keepout is None:
+            raise ValueError('a via tuple needs a radius or a keep-out')
+        t = (x, y, net_id,
+             keepout if keepout is not None
+             else radius + self._item_reach(self._via_floor_for(net_id)))
+        if radius is not None:
+            self._via_radius_by_id[id(t)] = (t, radius)
+        return t
+
+    def relocate_vias(self, via_moves) -> int:
+        """Take the vias nudge_vias_for_unresolved just MOVED into the graded
+        via view; return how many TUPLES were replaced (#747).
+
+        The one caller is repair_fanout_clearance, with the `via_moves` list
+        the nudger returns. The nudger mutates the parser's Via objects in
+        place and REPORTS what it did; this is where that report lands in the
+        view the re-grade and required_rows' disclosure read, so no cap is
+        graded against a barrel that has moved.
+
+        Takes the writer-shaped payload the nudger ALREADY returns --
+        (old_x, old_y, {'x', 'y', 'net_id', ...}) -- so no return contract had
+        to change to make this method possible. #747's own text assumed one
+        did; measured, everything a relocation needs was already in the dict
+        that placement/writer.py and the plugin's pcbnew mirror both consume,
+        so not one of the nine test files that unpack that pair moves.
+
+        SUBSTITUTES, and rebuilds the list once PER MOVE. Per move, because a
+        via can be relocated TWICE in one call: the offender loop re-reads
+        pcb_data.vias for each unresolved cap and keeps no moved-set, so a
+        barrel moved for one cap is matched at its NEW position when the next
+        cap flags it, and the second report's old position IS the first
+        report's landing. A single pass resolving every move against the
+        pre-nudge list would leave the tuple at the first hop while the board
+        via sits at the second, silently. Substitution rather than a rebuild
+        from the board, for the reason the track registrar is incremental:
+        every tuple that did NOT move keeps its identity, and the radius map
+        is keyed on exactly that.
+
+        The list is reassigned even for a move that matched nothing, because
+        that NEW IDENTITY is what makes _Repair's per-cap required-clearance
+        memos rebuild instead of going stale -- the property the inline
+        rebuild had, kept deliberately rather than by accident.
+
+        The OLD map entry is left in place, on purpose. It is what keeps the
+        old tuple alive, and dropping it would free an id the very next tuple
+        this builder makes could be handed -- the hazard the map's own note
+        names. The map therefore grows by one per relocation and stops being
+        the same length as self.vias, which is a fact about a nudged board
+        rather than a leak.
+
+        MATCHED ON POSITION AND NET, which is what the writer's own removal
+        pass already matches on (placement/writer.py's net_ids argument, and
+        the plugin's pcbnew twin beside it). Position alone relocates every
+        tuple at the vacated spot, including a coincident via of a DIFFERENT
+        net that has not moved at all -- a phantom at the landing and a hole
+        where it really is. What this still cannot separate is two coincident
+        vias of the SAME net: only tuple identity could, and the nudger has
+        none to hand back through a dict two front ends also read. No tracked
+        board carries either shape.
+
+        A move that matches NOTHING is neither an error nor warned about:
+        several test files inject a via into pcb_data.vias after construction,
+        so the nudger legitimately relocates barrels this object never graded.
+        The returned count is what tells the two apart -- it counts TUPLES
+        replaced, not moves handed in.
+
+        Leaves self.cap_vias alone. The caller refreshes the per-cap view on
+        the line below, exactly as it did while this rebuild was inline.
+
+        Not idempotent, and does not need to be: one caller, one call.
+        """
+        n = 0
+        for old_x, old_y, spec in via_moves:
+            net, nx, ny = spec['net_id'], spec['x'], spec['y']
+            rebuilt = []
+            for t in self.vias:
+                if (t[2] == net and abs(t[0] - old_x) < 1e-6
+                        and abs(t[1] - old_y) < 1e-6):
+                    # `.get` spelled inline rather than hoisted to a local:
+                    # test_725 reassigns the whole map on a real _Repair, and
+                    # an alias is one refactor away from being taken before
+                    # that assignment.
+                    rec = self._via_radius_by_id.get(id(t))
+                    rebuilt.append(self._register_via(
+                        nx, ny, t[2],
+                        radius=None if rec is None else rec[1],
+                        keepout=t[3]))
+                    n += 1
+                else:
+                    rebuilt.append(t)
+            self.vias = rebuilt
+        return n
 
     def _pad_effs(self, ref, cap):
         """[cap pad i][pruned foreign pad j] required clearance, or None for
@@ -2912,6 +3065,13 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # is right THERE: it wraps two independent text rewrites and is
             # defending against a caller handing it lists it did not produce.)
             st.register_new_segments(new_segs)
+            # #747: ...and the vias it MOVED, through the method that owns
+            # the tuple shape, the carried keep-out and the radius map. Under
+            # the same guard, and for the same reason, as the line above: the
+            # nudger reports rather than mutates, so a real _Repair applies
+            # the report here. Must precede the refresh below, which reads
+            # the view this repairs.
+            st.relocate_vias(via_moves)
             # refresh the per-cap pruned via lists before re-grading
             st.cap_vias = {r: st.vias for r in st.caps}
             # base_seg / base_pad / base_via are deliberately NOT re-seeded --
@@ -3872,25 +4032,29 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                     start_x=old[0], start_y=old[1], end_x=nx, end_y=ny,
                     width=w, layer=layer, net_id=v.net_id))
             v.x, v.y = nx, ny
-            # w2[2]/w2[3] (net and keep-out) are carried through unchanged --
-            # a moved via keeps its requirement. #725: this rebuild gives the
-            # list a NEW identity, which is what makes _Repair's per-cap
-            # required-clearance memos rebuild instead of going stale.
-            _radii = getattr(st, '_via_radius_by_id', None)
-            _rebuilt = []
-            for w2 in st.vias:
-                if (abs(w2[0] - old[0]) < 1e-6 and abs(w2[1] - old[1]) < 1e-6):
-                    moved = (nx, ny, w2[2], w2[3])
-                    # A relocated via is a NEW tuple, so it would drop out of
-                    # the radius map and be graded at its keep-out slot -- the
-                    # prune OVER-reach -- instead of the pair's requirement.
-                    # Carry the radius across; the via did not change size.
-                    if _radii is not None and id(w2) in _radii:
-                        _radii[id(moved)] = (moved, _radii[id(w2)][1])
-                    _rebuilt.append(moved)
-                else:
-                    _rebuilt.append(w2)
-            st.vias = _rebuilt
+            # #747: the graded via view is NOT rebuilt here any more. This
+            # function is duck-typed on `st` -- nine test files drive it with
+            # a stand-in carrying only caps, vias and graze_penalty, and one
+            # carrying no via list at all -- so every read of `st` goes
+            # through getattr with a flat fallback. A RESOLVER has an honest
+            # flat fallback; a MUTATION does not, because "silently do
+            # nothing" IS the staleness that shape of defect produces. It is
+            # the same rule register_new_segments' docstring states for the
+            # track channel, and it is why the tuple shape, the carried
+            # keep-out and the radius-map invariant now live in ONE place
+            # each, on _Repair, instead of being restated here.
+            #
+            # The move is REPORTED below instead, and repair_fanout_clearance
+            # hands the report to a real _Repair, which needs no escape
+            # hatch. Deferring it cannot change one decision made here, and
+            # that is checkable rather than asserted: the graded view was
+            # read at exactly ONE site in this function -- the rebuild that
+            # used to stand here -- and graze_penalty is consulted once, at
+            # the top, before any via has moved. Every other via this
+            # function reads comes from pcb_data.vias, whose Via objects the
+            # line above mutates in place, so the offender loop, both drill
+            # gates and the connector gate all still see each landing as it
+            # happens.
             via_moves.append((old[0], old[1],
                               {'x': nx, 'y': ny, 'size': v.size, 'drill': v.drill,
                                'layers': v.layers, 'net_id': v.net_id,
