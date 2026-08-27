@@ -1341,16 +1341,13 @@ class _Repair:
             # lists have different lengths.
             self._seed_seg_n[ref] = len(self.cap_segs[ref])
 
-            near_vias = []
-            # v[3] = via_radius + its own keep-out; a via that can reach a pad
-            # must be within (move + span + keep-out) of the seed. #725: plus
-            # this cap's excess over the flat scalar, which bounds the pair.
-            via_slack = max(0.0, cap_mf - clearance)
-            for v in self.vias:
-                if math.hypot(v[0] - ccx, v[1] - ccy) <= (
-                        max_displacement_cap + span + v[3] + via_slack):
-                    near_vias.append(v)
-            self.cap_vias[ref] = near_vias
+            # #775: through _prune_vias, the ONE spelling of this predicate.
+            # It carries the comment block that used to live here -- why v[3]
+            # is the via's own over-reach, why #725's cap-side slack bounds
+            # the pair, and how thin the exactness margin on this channel
+            # really is.
+            self.cap_vias[ref] = self._prune_vias(cap, cap_geom[ref],
+                                                  self.vias)
 
         # Baseline same-side overlaps at the seed placement. Collisions are
         # scored RELATIVE to these: the repair must not introduce or worsen a
@@ -2004,6 +2001,63 @@ class _Repair:
         if radius is not None:
             self._via_radius_by_id[id(t)] = (t, radius)
         return t
+
+    def _prune_vias(self, cap, geom, source):
+        """The vias in `source` this cap could EVER be charged against --
+        THE one spelling of the per-cap via prune.
+
+        `geom` is the cap's SEED-pose (cx, cy, span, rect) from self._cap_geom,
+        never its current rect, for the reason the track twin gives at length:
+        the bound is the reachable-DISK argument -- a cap moves at most
+        max_displacement_cap from its SEED, so anything whose seed gap already
+        exceeds that can never constrain it -- and that is what makes this
+        prune EXACT rather than an approximation. A MOVED pose silently
+        redefines what "exact" means, and required_rows grades the via
+        shortfalls at the SEED pose as well as the final one, so a moved-pose
+        radius is a superset for neither.
+
+        v[3] is the via's radius PLUS its own keep-out, so a via that can reach
+        a pad must be within (move + span + that) of the seed centre. #725's
+        slack adds this cap's excess over the flat scalar, which bounds the
+        pair from the other side: the two terms together are `radius +
+        max(clearance, the via's floor) + max(0, the cap's floor - clearance)`,
+        which is at least `radius + the pair's requirement` for every pair the
+        resolver can return, because a .kicad_dru rule REPLACES a pair value
+        but max_floor is each item's own upper bound over all of them.
+
+        THE MARGIN IS THINNER THAN THE TRACK CHANNEL'S, and is stated rather
+        than left to be rediscovered. The residual slack is
+        `span - grid_overshoot - R_max`, where R_max is the largest
+        seed-centre-to-pad-corner distance over the four reachable rotations
+        and the overshoot is real and pre-existing (_candidate_positions snaps
+        AFTER its radius test, so a final pose can sit up to
+        grid_step*sqrt(2)/2 past max_displacement_cap). Measured over the 73
+        caps of the 22 tracked boards: minimum +0.1267mm, maximum +0.2657mm,
+        never negative. The track pruner records +1.009mm for the same
+        quantity, because its bound carries `2*span + clearance` where this one
+        carries `span`. That is a fact about the bound __init__ has always
+        used, not an exposure #775 opens -- but this method now applies it at
+        the post-nudge refresh as well, so the number lives with the predicate.
+
+        NO LAYER GATE, unlike the track twin, and the asymmetry is the geometry
+        rather than an omission: a through-via spans every copper layer, so
+        there is no per-pad copper scope to intersect and nothing a #731-style
+        union could exclude.
+
+        Returns a NEW list. A caller must ASSIGN it and must never extend a
+        cap's existing list in place: _via_effs memoises on the source list's
+        IDENTITY, so an in-place append leaves a memo that still passes the
+        identity test while being one column short, and _via_shortfalls then
+        indexes past the end of its row.
+        """
+        ccx, ccy, span, _crect = geom
+        via_slack = max(0.0, cap.max_floor - self.clearance)
+        near_vias = []
+        for v in source:
+            if math.hypot(v[0] - ccx, v[1] - ccy) <= (
+                    self._max_disp_cap + span + v[3] + via_slack):
+                near_vias.append(v)
+        return near_vias
 
     def relocate_vias(self, via_moves) -> int:
         """Take the vias nudge_vias_for_unresolved just MOVED into the graded
