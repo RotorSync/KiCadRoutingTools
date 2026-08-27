@@ -112,6 +112,16 @@ Validate routed boards against the *real* spec, with the right checker — most
     clearance (base = the board's Default class, else `routing_defaults.CLEARANCE`
     0.25), and the writeback PRESERVES the classes. This is how you honor a genuine
     impedance board's class spec — just don't pass `--clearance`.
+  - **`place_fanout_clearance.py` obeys the same two branches (#768/#769)**, and
+    it is the only PLACEMENT step that does, because it is the only one that
+    lays copper (the #313 via nudge) and therefore the only one that writes a
+    DRC floor back. The ceiling caps the NETCLASS tier only -- a `.kicad_dru`
+    rule and a pad `local_clearance` outrank it, since the writeback clamps
+    neither. The project is written in EVERY exit path including the zero-move
+    one, so a run that legitimately moves nothing still ships the spec it was
+    graded against. `grade_pad_legality` and `quench` keep the uncapped
+    `max(base, netclass)` semantics: they write no project, so the class they
+    price at is one KiCad will still enforce.
   - `--hole-to-hole-clearance` / `--board-edge-clearance` work the same way: omitted →
     the board's own `min_hole_to_hole` / `min_copper_edge_clearance` constraint (via
     `list_nets.board_constraint`), else the fixed default.

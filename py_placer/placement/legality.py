@@ -1412,6 +1412,14 @@ class PadClearanceModel:
         eff  = <.kicad_dru layer rules over the SHARED copper layers>   # REPLACES
         eff  = max(eff, lc_a, lc_b)                                     # override wins
 
+    #768: when the caller passes a `ceiling` -- a `--clearance` it will then
+    CLAMP the output project's classes down to -- the netclass term alone is
+    capped at it, in `for_board`'s map and nowhere else. The dru rules and the
+    pad overrides run afterwards and keep outranking it, because the writeback
+    does not touch either. `ceiling=None` (the default) is the documented
+    "--clearance OMITTED" branch and leaves every tier as it was, which is why
+    the two callers that write no project are untouched by it.
+
     Note the override enters as a max over BOTH pads: check_drc needs a second
     max at its own pad-pad call site for the same reason, because a pair is
     equally in violation when only the SECOND pad carries the keep-clear.
@@ -1423,11 +1431,17 @@ class PadClearanceModel:
     """
 
     __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
-                 'active', 'notes', '_pair_cache')
+                 'active', 'notes', 'ceiling', '_pair_cache')
 
     def __init__(self, base: float, net_floor=None, layer_rules=None,
-                 board_copper=(), has_overrides: bool = False):
+                 board_copper=(), has_overrides: bool = False,
+                 ceiling: Optional[float] = None):
         self.base = float(base)
+        # #768: the --clearance ceiling this model was built under, or None.
+        # Recorded rather than re-derived: `net_floor` is already capped by the
+        # time anyone can look at it, so a value equal to the ceiling and a
+        # value that was never above it are indistinguishable afterwards.
+        self.ceiling = None if ceiling is None else float(ceiling)
         self.net_floor = dict(net_floor or {})
         self.layer_rules = dict(layer_rules or {})
         self.board_copper = list(board_copper or [])
@@ -1437,13 +1451,27 @@ class PadClearanceModel:
 
     # -- construction ---------------------------------------------------------
     @classmethod
-    def for_board(cls, pcb_data, clearance: float, pcb_file: str = None):
+    def for_board(cls, pcb_data, clearance: float, pcb_file: str = None,
+                  ceiling: Optional[float] = None):
         """Resolve from the board's own sibling files.
 
         Path discovery is the #498 rule: the caller's `pcb_file` when it has
         one, else `PCBData.source_path` (engines whose signature carries no
         input file). A missing sibling is a strict no-op, never an error -- the
         model simply carries fewer sources.
+
+        `ceiling` (#768) caps the NETCLASS tier at a `--clearance` that will
+        be clamped into the output project. The test is whether THE RUN THIS
+        PRICES FOR writes that clamp, not whether this process does: pass it
+        when the clamp lands, leave it None otherwise, or the pass prices at a
+        class KiCad will still enforce.
+
+        The distinction is not pedantic -- `animate_fanout_clearance.py` passes
+        a ceiling and writes no project at all, because it exists to VISUALISE
+        `place_fanout_clearance.py` and must price identically or the GIF shows
+        a repair the tool does not perform. `grade_pad_legality` and `quench`
+        leave it None for the opposite reason: nothing downstream of them
+        clamps anything.
         """
         path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
         fps = getattr(pcb_data, 'footprints', None) or {}
@@ -1475,6 +1503,35 @@ class PadClearanceModel:
                 by_name = net_clearance_map(
                     path, [n.name for n in nets.values()
                            if getattr(n, 'name', None)]) or {}
+                if ceiling is not None:
+                    # #768: --clearance is a CEILING on the netclass tier and
+                    # nothing above it. min() BEFORE the admission test below,
+                    # so a class at or under the ceiling still raises normally
+                    # and one above it collapses to the ceiling -- which is
+                    # `clearance` itself, so it never enters the map at all.
+                    #
+                    # Capped HERE and not in `pair_with_source` for two
+                    # reasons. This map IS this pass's netclass tier, and it is
+                    # the same place the router caps (route.py pre-caps the
+                    # netclass map before set_net_clearances installs it), so
+                    # the two halves of the toolchain do the same thing in the
+                    # same place. And the dru REPLACE and the pad override run
+                    # after it in `pair_with_source`, which is what keeps them
+                    # outranking the ceiling -- they must, because the project
+                    # writeback clamps neither.
+                    _capped = {}
+                    for _v in by_name.values():
+                        if _v > ceiling + 1e-9:
+                            _k = round(_v, 6)
+                            _capped[_k] = _capped.get(_k, 0) + 1
+                    if _capped:
+                        notes.append(
+                            'net classes capped at the %gmm --clearance '
+                            'ceiling: %s' % (ceiling, ', '.join(
+                                '%g -> %g (%d net%s)'
+                                % (_v, ceiling, _c, '' if _c == 1 else 's')
+                                for _v, _c in sorted(_capped.items()))))
+                    by_name = {n: min(v, ceiling) for n, v in by_name.items()}
                 # Same admission rule as check_drc: a class at or below the
                 # board-wide floor cannot raise anything, so it never enters.
                 net_floor = {nid: by_name[n.name]
@@ -1495,7 +1552,7 @@ class PadClearanceModel:
                 notes.append('.kicad_dru unread (%s: %s)'
                              % (type(exc).__name__, exc))
         model = cls(clearance, net_floor, layer_rules, board_copper,
-                    has_overrides=has_overrides)
+                    has_overrides=has_overrides, ceiling=ceiling)
         model.notes = notes
         return model
 

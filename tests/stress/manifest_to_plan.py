@@ -432,6 +432,14 @@ def parse_command(argv):
 # (in its manifest position, i.e. after the fanout it followed), for parity with a
 # live-generated plan. Flag -> fanout-tab cap-placement control name:
 CAP_FLAG_PARAMS = {
+    # #768. NOT a cap_* name, for the same reason --board-edge-clearance below
+    # is not: its GUI home is the SHARED Basic-tab clearance control, which is
+    # what fanout_gui's cap step reads. Absent from this table, a recorded
+    # `place_fanout_clearance.py ... --clearance 0.1` silently lost its
+    # clearance on conversion, and the GUI re-derived a different one -- on the
+    # one parameter whose two branches decide whether the step clamps the
+    # project at all.
+    '--clearance': 'clearance',
     '--capture-radius': 'cap_capture_radius',
     '--near-margin': 'cap_near_margin',
     '--step': 'cap_step',
