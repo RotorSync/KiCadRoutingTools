@@ -1140,9 +1140,19 @@ setting that matters (it reads each via's real size from the board).
 python3 py_placer/place_fanout_clearance.py board_step1b.kicad_pcb board_step1c.kicad_pcb \
     --clearance 0.1
 
-It prints `Moved N cap(s); resolved R/M ... K unresolved`. Any **unresolved**
-caps had no clear spot within the displacement budget — note them for a manual
-nudge; they are not auto-fixed. By default (`--cap-prefix C,R`) it moves 2-pad
+It prints `Moved N cap(s); resolved R/V initial violations; K unresolved`, plus
+`(F freed by via-nudge)` when the #313 last resort moved a via to free a boxed
+cap. **resolved** means "was grazing at the seed and is clean now", counted at
+the END of the pass, so it credits both the cap move and the via-nudge (#746).
+Any **unresolved** caps are still grazing foreign copper — a via, a track, or a
+component pad — and are not auto-fixed; note them for a manual nudge. A
+`Re-grazed by this pass's own connector copper:` line names the subset that
+was **clean before the via-nudge and is grazing after it** — copper this pass
+drew, not copper the board arrived with. Those caps are in the unresolved list
+too, so treat them as you would any other; the extra line says where the
+copper came from. Grade with `check_drc.py` before acting: the repair pass
+deliberately over-blocks a track on a layer the board never declared, so some
+of these grade clean and some are real. By default (`--cap-prefix C,R`) it moves 2-pad
 **caps and resistors** near a BGA (RN-style arrays auto-excluded since only
 2-copper-pad parts move); it never overlaps parts, and is a no-op when nothing
 collides. Feed `board_step1c.kicad_pcb`

@@ -5,9 +5,18 @@ Run this AFTER bga_fanout.py. It nudges decoupling caps near a BGA so their
 pads clear every foreign-net fanout via by `clearance`, and pulls each cap
 pad toward the nearest same-net ball (so a GND/power via dropped there later
 also lands on the cap pad). Caps move as little as possible (90-degree
-rotations allowed) and never overlap each other; a cap that can't clear a
-foreign via grows its displacement budget until it fits or is reported
-unresolved.
+rotations allowed) and never overlap each other; a cap that can't clear
+foreign copper -- a via (#130), a track (#278) or a component pad (#275) --
+grows its displacement budget until it fits or is reported unresolved.
+
+The summary counts both mechanisms from ONE board state, at the end of the
+pass (#746): `resolved R/V initial violations` means "was grazing at the seed
+and is clean now", with `(F freed by via-nudge)` naming the share the #313
+last resort freed by moving a via rather than the cap. A `Re-grazed by this
+pass's own connector copper:` line means those caps were CLEAN before the
+nudge and are grazing after it -- whether or not the pass had fixed them
+first, since copper this pass draws can also break a cap that arrived clean.
+They are in the unresolved list too; this line names the cause, which is us.
 
 Usage:
   python place_fanout_clearance.py fanned.kicad_pcb [output.kicad_pcb] [options]
@@ -62,8 +71,12 @@ Examples:
                         help=f"DRC clearance in mm (default: {defaults.CLEARANCE})")
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Position snap in mm (default: {defaults.GRID_STEP})")
-    parser.add_argument("--board-edge-clearance", type=float, default=0.55,
-                        help="Hard clearance from board edge in mm (default: 0.55)")
+    parser.add_argument("--board-edge-clearance", type=float, default=None,
+                        help="Hard clearance from board edge in mm (default: the "
+                             "board's own min_copper_edge_clearance when it asks "
+                             "for MORE than 0.55, else 0.55). #733: resolved by "
+                             "the shared engine, so the GUI plugin and "
+                             "animate_fanout_clearance.py get the same answer.")
     parser.add_argument("--capture-radius", type=float, default=2.0,
                         help="Max distance over which a same-net ball attracts "
                              "a cap pad in mm (default: 2.0)")

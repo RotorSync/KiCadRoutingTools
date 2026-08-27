@@ -737,6 +737,34 @@ class RoutingDialog(wx.Dialog):
         val = rule if (rule and rule > 1e-9) else defaults.PLANE_EDGE_CLEARANCE
         return self._fab_floored('board_edge_clearance', val)
 
+    def _effective_placement_edge_clearance(self):
+        """Cap-PLACEMENT edge margin for the #130 repair (#733), or None.
+
+        None means "the shared engine resolves it" -- exact parity with the CLI,
+        where an omitted --board-edge-clearance reaches
+        placement.fanout_clearance.resolve_cap_edge_clearance and a given one is
+        honoured as typed. Only the operator's OVERRIDE has to travel; that way
+        neither front carries its own copy of the default and they cannot drift,
+        which is the whole of #733.
+
+        NOT _effective_board_edge_clearance: that is the SIGNAL edge clearance,
+        which answers 0.0 on a board with no rule and is then fab-floored to 0.20
+        -- 0.35mm looser than this pass's own margin. _effective_plane_edge_clearance
+        above carries the same warning for the plane tab, for the same reason.
+        """
+        if self.edge_clearance_check.GetValue():
+            val = self.board_edge_clearance.GetValue()
+            # A ZERO in a ticked override is UNSET, not a margin of zero. The
+            # control is CREATED at defaults.BOARD_EDGE_CLEARANCE (0.0) with a
+            # range minimum of 0.0, so "ticked the box, typed nothing" is a
+            # reachable state -- and passing that on would inset caps at the bare
+            # clearance, LOOSER than the 0.55 this tab used before #733. Same
+            # `> 1e-9` rule as _effective_plane_edge_clearance above; the signal
+            # twin on this same control gets the equivalent guard from
+            # _fab_floored, which is why only this reading needed one.
+            return val if val > 1e-9 else None
+        return None
+
     def _effective_geometry_floor(self, name):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
@@ -1754,6 +1782,11 @@ class RoutingDialog(wx.Dialog):
                 # Edge.Cuts keep-out for QFN escape stubs/vias (issue #288);
                 # 0 = fall back to the copper clearance inside generate_qfn_fanout.
                 'board_edge_clearance': self._effective_board_edge_clearance(),
+                # #733: the decoupling-cap repair's OWN edge margin, which is a
+                # placement margin rather than the signal keep-out above. None =
+                # let the shared engine resolve it, exactly as the CLI does when
+                # --board-edge-clearance is omitted.
+                'cap_board_edge_clearance': self._effective_placement_edge_clearance(),
                 # #489 section 9: the ONE shared "Add teardrops" checkbox now
                 # reaches fanout too -- it is the step where a track-to-via
                 # teardrop matters most.

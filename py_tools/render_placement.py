@@ -763,7 +763,11 @@ def draw_legality(d, r, model, *, side=None):
         p = state.parts.get(ref)
         if p is None:
             continue
-        for (cx, cy, rad) in ctx.parts[ref].hole_circles(p.x, p.y, p.rot):
+        # #761: the KEEP-OUT, not the inflation. This panel is captioned
+        # "orange circles at NPTH keepouts"; hole_circles' radius is the growth
+        # above `clearance`, so at --clearance >= the requirement it drew the
+        # bare drill and the picture agreed with the model's own blind spot.
+        for (cx, cy, rad) in ctx.parts[ref].hole_keepouts(p.x, p.y, p.rot):
             x0, y0 = r.tf.pt(cx - rad, cy - rad)
             x1, y1 = r.tf.pt(cx + rad, cy + rad)
             d.ellipse([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],

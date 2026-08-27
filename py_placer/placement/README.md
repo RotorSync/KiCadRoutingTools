@@ -272,6 +272,18 @@ shared via connects ball + cap + plane). Caps move as little as possible
 that can't clear within the (auto-grown) displacement budget is reported
 unresolved for a manual nudge.
 
+The summary line reads `Moved N cap(s); resolved R/V initial violations;
+K unresolved`. Since #746 both counts are graded from the **same** board state,
+at the end of the pass: `resolved` means "was grazing at the seed and is clean
+now" and therefore credits the #313 via-nudge as well as the cap move, with
+`(F freed by via-nudge)` naming that share. `unresolved` means "grazing now",
+which is not a subset of the seed violators — copper the pass itself drew can
+break a cap that started clean, and when it does, a `Re-grazed by this pass's
+own connector copper:` line names those caps. Before #746 `resolved` was
+computed before the nudge and never refreshed, so a cap the nudge freed reached
+neither list, and a cap the sweep had cleaned before the pass re-grazed it
+reached both.
+
 It reads each via's actual size from the board, so the only setting that
 matters is `--clearance`, which must match the fanout / DRC floor:
 
@@ -286,8 +298,10 @@ python py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb -
 | `--cap-prefix` | `C,R` | Comma-separated reference prefix(es) for movable passives near a BGA (caps **and** resistors by default). Only 2-copper-pad parts move, so RN-style arrays are auto-excluded; paste-only apertures are ignored when counting pads. |
 | `--capture-radius` | 2 mm | Max distance over which a same-net ball attracts a pad |
 | `--max-displacement` / `--max-displacement-cap` | 2 / 3 mm | Initial and grown move budget per cap |
-| `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size |
+| `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size. Honoured by the grader **and** the via-nudge since #732; before that the nudge priced such a via at a hard-coded 0.5 and the two disagreed. |
+| `--board-edge-clearance` | the board's own `min_copper_edge_clearance` when it asks for MORE, else 0.55 mm | Copper-to-Edge.Cuts margin for a moved cap **and** for a via the #313 nudge relocates -- one number since #733, where the nudger gated its own emitted copper at the bare `--clearance` and parked it 0.30 mm inside the band the cap mover reserves. Resolved by the shared engine, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; TIGHTEN-only on an omitted flag, because `fix_project_for_output` pins this field up to the 0.20 fab floor on every board the chain writes. A given value is honoured as typed. |
 | `--lock` | – | Extra reference patterns to pin in place |
+| *(no flag)* drill-to-drill floors | the board's own `min_hole_to_hole` when it asks for MORE, else the fab tier's 0.20 (via-hole to via-hole) and 0.45 (via-hole to pad-hole) | What the #313 via-nudge charges when it relocates a barrel. Board-first and RAISE-only since #756; before that both were flat literals, so on a board declaring above 0.20 the pass parked a via at 0.20 while `check_drc` graded the same drill pair at the declared value and flagged it. Resolved by the shared engine off the board's sibling `.kicad_pro`, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; an unsaved GUI board has no project to read and keeps the fab floors. The board's value is a PREFERENCE, not a gate: the nudge sweeps for a landing that clears it and falls back to the fab floor rather than abandoning the repair, so it can never place a via worse than it would have before. `--fab-tier` cannot move these floors (both tiers declare 0.20/0.45); a `--fab-overrides` file can, but note `place_fanout_clearance.py` accepts neither flag — the fab tier reaches this pass only as the process-wide value some other step set, which is how the GUI's Fanout tab supplies it. The pad-hole floor stays stricter than `check_drc`'s pad-drill arm (which grades at the single hole-to-hole value) by `max(d, 0.45) - max(0.20, d)` — 0.25 mm on a board declaring nothing, decaying to 0 at 0.45. Deliberate: 0.45 is the JLC fab minimum and nothing else in the repo enforces it. |
 
 On ulx3s U1 (22×22, 0.8 mm) this took the fanned board from 4 PAD-VIA to
 fully DRC-clean, tidying 19 caps toward same-net balls (all ≤1.9 mm). In the
@@ -913,7 +927,20 @@ re-seating 85/92 while leaving its zone targets unmoved):
 - **`legality.PartPads` / `LegalityContext` / `grade_pad_legality`** — the
   pad+drill layer. Gate currency: rotation-inflated AABB pad rects (the
   `_Cap.pad_rects` pattern; conservative — can falsely reject, never falsely
-  accept), NPTH drills inflated to `NPTH_TO_TRACK_CLEARANCE`, per-PAIR
+  accept), NPTH drills held off foreign copper at a STANDOFF FROM THE HOLE
+  WALL of `max(--clearance, NPTH_TO_TRACK_CLEARANCE, the board's declared
+  min_hole_clearance, the hole pad's own local_clearance)` — `check_drc`'s own
+  requirement (#730, #761). Resolved in ONE place, `PartPads.hole_keepouts`:
+  the stored `holes_local` radius is the growth ABOVE `--clearance` and the
+  consumer adds the clearance back, exactly as `fanout_clearance`'s cap gate
+  and `labels.py`'s silk test each do — before #761 legality added nothing, so
+  its modelled standoff collapsed to zero at and above the requirement.
+  `copper_holes=False` opts a SILK caller out of both copper terms (the pad
+  override and the board floor); the board floor arrives as a resolved FLOAT
+  (`resolve_npth_floor`), never a board pointer, and only at the two of six
+  `build_part_pads` call sites that read hole keep-outs. `holes_extent`
+  carries the same holes WITHOUT either copper term, so an author's keep-clear
+  can never push a part off the outline. Per-PAIR
   baselines from SEED poses ("never worse than the board you were handed"; a
   NEW different-net pad intersection is never admitted). Exact `check_drc`
   geometry runs once per CLI for reports, so summaries carry no AABB phantoms.
@@ -954,8 +981,10 @@ re-seating 85/92 while leaving its zone targets unmoved):
   individual mis-move smuggled inside a hugely-improving set (run 3's J7:
   31.6 mm from home, worse than its 15.8 mm input).
 - **`render_placement --legality`** (default ON) draws the defects the caption
-  used to only count: conflict rings/links, NPTH keepout circles, dashed-red
-  off-board pad extents; caption gains `pad-conflicts` / `hole-conflict`.
+  used to only count: conflict rings/links, NPTH keepout circles (the real
+  keep-out since #761 — it drew the bare drill at `--clearance >= 0.20`,
+  agreeing with the model's own blind spot), dashed-red off-board pad
+  extents; caption gains `pad-conflicts` / `hole-conflict`.
 
 Design lineage (see the session literature survey): Abacus/minimum-
 perturbation legalization (Spindler 2008; Brenner 2012; Kahng-Markov-Reda

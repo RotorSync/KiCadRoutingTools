@@ -440,6 +440,13 @@ CAP_FLAG_PARAMS = {
     '--displacement-growth': 'cap_displacement_growth',
     '--max-passes': 'cap_max_passes',
     '--cap-prefix': 'cap_prefix',
+    # #733. NOT a cap_* name: its GUI home is the SHARED Basic-tab edge control,
+    # which ai_plan._GEOMETRY_OVERRIDE_CHECKS already maps by this exact name
+    # ('board_edge_clearance' -> 'edge_clearance_check'), so a plan carrying it
+    # ticks the override box and the value reaches the engine. Only an EXPLICIT
+    # flag needs carrying: an omitted one now resolves to the same number on
+    # both fronts (placement/fanout_clearance.resolve_cap_edge_clearance).
+    '--board-edge-clearance': 'board_edge_clearance',
 }
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sense
 

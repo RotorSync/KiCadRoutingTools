@@ -282,6 +282,13 @@ _MUST_RESOLVE = {
     'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
     'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',
+    # #733: place_fanout_clearance's --board-edge-clearance -> the SHARED
+    # Basic-tab edge control (not a cap_* one), which ai_plan's
+    # _GEOMETRY_OVERRIDE_CHECKS ticks by this exact name. This set gates the
+    # NAME (does it reach a control?); check_cap_flags below gates the
+    # converter ROW that produces it. Measured: deleting the CAP_FLAG_PARAMS
+    # row leaves this half green, which is why both exist.
+    'board_edge_clearance',
 }
 
 
@@ -342,6 +349,42 @@ def check_param_resolution():
             bad.append((p, f"alias -> {tgt!r}, but no such GUI control"))
         else:
             bad.append((p, "no control, no alias, not special -> would be ignored"))
+    return bad
+
+
+def check_cap_flags():
+    """#733: the optimize_caps step's flags survive conversion.
+
+    The pairs loop above deliberately `continue`s on place_fanout_clearance.py
+    ("optimize_caps: no routing flags to assert"), so nothing there looks at
+    CAP_FLAG_PARAMS at all. That was harmless while every row named a
+    bga_options control the plan executor ignores anyway; it stopped being
+    harmless when --board-edge-clearance joined the table, because that one
+    names a REAL dialog control and changes where cap copper may sit relative
+    to Edge.Cuts. Measured: deleting its row left the whole gate green.
+
+    Self-contained, like check_group_flags: no corpus needed.
+    """
+    bad = []
+    argv = ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb',
+            'out.kicad_pcb', '--board-edge-clearance', '0.85',
+            '--near-margin', '1.5', '--no-rotate']
+    step = m2p.cap_optimization_step(argv)
+    if step.get('action') != 'optimize_caps':
+        return [('(step)', f"action is {step.get('action')!r}")]
+    params = step.get('params') or {}
+    for flag, key, want in (('--board-edge-clearance', 'board_edge_clearance', 0.85),
+                            ('--near-margin', 'cap_near_margin', 1.5),
+                            ('--no-rotate', 'cap_allow_rotation', False)):
+        if params.get(key) != want:
+            bad.append((flag, f"-> {key}={params.get(key)!r}, expected {want!r}"))
+    # NEGATIVE CONTROL: an omitted flag must NOT be invented. An engine-resolved
+    # default that leaked into the plan would pin the margin at plan time and
+    # defeat the point of resolving it per board.
+    bare = m2p.cap_optimization_step(
+        ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb'])
+    if 'board_edge_clearance' in (bare.get('params') or {}):
+        bad.append(('(omitted)', 'an unset flag was materialised into the plan'))
     return bad
 
 
@@ -473,6 +516,13 @@ def main():
     for p, why in res_bad:
         print(f"    {p}: {why}")
 
+    # #733 optimize_caps flags (self-contained, no corpus needed).
+    cap_bad = check_cap_flags()
+    print(f"\nCap-optimization flags: {'OK' if not cap_bad else 'FAILED'} "
+          f"(--board-edge-clearance and the cap_* knobs survive).")
+    for f, why in cap_bad:
+        print(f"    {f}: {why}")
+
     # #459 placement-block flags (self-contained, no corpus needed).
     grp_bad = check_group_flags()
     print(f"\nPlacement-block flags: {'OK' if not grp_bad else 'FAILED'} "
@@ -486,7 +536,7 @@ def main():
     for f, why in ref_bad:
         print(f"    {f}: {why}")
 
-    return 1 if (total_bad or res_bad or grp_bad or ref_bad) else 0
+    return 1 if (total_bad or res_bad or cap_bad or grp_bad or ref_bad) else 0
 
 
 if __name__ == "__main__":

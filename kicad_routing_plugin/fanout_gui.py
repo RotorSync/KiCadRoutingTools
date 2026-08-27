@@ -96,6 +96,53 @@ def _get_net_classes_from_board():
         return {}, ['Default']
 
 
+def cap_optimization_summary(result):
+    """The one-line summary for a repair_fanout_clearance result (#130/#746).
+
+    A module-level function rather than a method body so it can be driven with
+    a plain dict: it needs no board, no dialog and no wx, and before #746 the
+    only way to reach it was a live pcbnew board, so nothing tested it and the
+    wording below went wrong unnoticed.
+
+    Reads every key with `.get` -- the engine's two early returns carry neither
+    'via_moves'/'new_segments' nor 'via_resolved'/'regrazed'.
+
+    #746: `resolved` is graded at the END of the pass, so it spans BOTH
+    mechanisms -- a cap the descent walked clear and a cap only the via-nudge
+    could free. `via_resolved` says which, so this line does too instead of
+    leaving the operator to infer it from the engine's stdout. `regrazed`
+    names the caps that were clean before the nudge and are grazing after it
+    -- the pass broke them, whether or not it had fixed them first. Silence
+    there is the normal case.
+    """
+    moved = len(result.get('placements') or [])
+    nudged = len(result.get('via_moves') or [])
+    unresolved = result.get('unresolved') or []
+    via_resolved = result.get('via_resolved') or []
+    regrazed = result.get('regrazed') or []
+    summary = f"Decoupling caps optimized: {moved} moved"
+    if nudged:
+        summary += f"; {nudged} via(s) nudged with reconnect (#313)"
+    if via_resolved:
+        summary += f"; {len(via_resolved)} cap(s) freed by that nudge"
+    if unresolved:
+        # The verdict has ALWAYS been via + track + pad (the engine's
+        # graze_penalty is via #130 + track #278 + pad #275). This line said
+        # "could not clear a foreign via", naming one of the three: wrong
+        # before #736 and more visibly wrong after it -- not because the
+        # track channel was new (it has been in graze_penalty since the module
+        # landed) but because #736 made the pass's OWN connector tracks
+        # reachable in this verdict for the first time. Worded to match the
+        # engine's own seed disclosure.
+        summary += (f"; {len(unresolved)} still grazing foreign copper "
+                    f"(via/track/pad) "
+                    f"(manual: {', '.join(sorted(unresolved))})")
+    if regrazed:
+        summary += (f"; {len(regrazed)} re-grazed by this pass's own "
+                    f"connector copper: {', '.join(sorted(regrazed))}")
+    return summary
+
+
 class NetSelectionPanel(wx.Panel):
     """Reusable net selection panel with filtering."""
 
@@ -1605,6 +1652,10 @@ class FanoutTab(wx.Panel):
                 # Advanced cap-placement knobs (#130) so the inline checkbox
                 # path honours them too, not just defaults.
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
+                # #733: the cap repair's edge margin. AFTER the cap_* spread, so
+                # the shared Basic-tab override wins over any same-named panel
+                # key. None = the engine resolves it (CLI parity).
+                'cap_board_edge_clearance': shared.get('cap_board_edge_clearance'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -1929,6 +1980,11 @@ class FanoutTab(wx.Panel):
                 pcb_file=self.board_filename,
                 clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
+                # #733: the plugin used to pass NOTHING here, so it silently took
+                # the signature default whatever the board or the operator said,
+                # while the cap mover insets by max(clearance, this). None = the
+                # engine resolves it, which is what an omitted CLI flag does too.
+                board_edge_clearance=fanout_config.get('cap_board_edge_clearance'),
                 default_via_size=fanout_config.get('via_size', defaults.BGA_VIA_SIZE),
                 # Advanced cap-placement knobs from the BGA fanout tab (#130)
                 capture_radius=fanout_config.get('cap_capture_radius', 2.0),
@@ -1961,7 +2017,10 @@ class FanoutTab(wx.Panel):
             # segment(s) back to the stub start. The CLI applies these via
             # write_placed_output; on the live board we must mirror it (else the
             # via stays put and the graze the summary claims to have fixed
-            # persists). GUI parity for placement/writer.py:119-141.
+            # persists). GUI parity for the via-nudge block in
+            # placement/writer.py (`# Via-nudge rewrites (#313)` to the
+            # splice) -- named by its marker comment rather than by line
+            # numbers, which this file has now got wrong twice.
             name_to_id, _ = _build_layer_mappings()
 
             def _layer_id(layer_name):
@@ -1976,6 +2035,31 @@ class FanoutTab(wx.Panel):
                 # This is the via NUDGE: the old via is deleted and an identical
                 # one re-added a fraction of a mm away. Carry its protection spec
                 # across or the nudge silently re-tents it (#489 §8).
+                #
+                # #741: the ENGINE now populates this key, so on this path it
+                # is always present -- and legitimately {} for a via that
+                # inherits the board's `(setup (tenting ...))`, which
+                # apply_via_protection correctly leaves alone.
+                #
+                # Note the guard below is `if not moved_attrs`: TRUTHINESS,
+                # not presence, so it fires for that inheriting via too. It
+                # cannot mis-stamp -- apply_via_protection returns early on an
+                # empty spec either way -- but it is NOT the regression
+                # detector for either half of #741: it re-derives its answer
+                # from the same track via the same call that built pcb_data,
+                # so it would MASK an engine revert.
+                # tests/test_741_via_nudge_tenting.py asserts on the engine
+                # dict for exactly that reason.
+                #
+                # And on KiCad 10.0.0 the re-read is inert for EVERY via, not
+                # just an inheriting one: pcbnew's SWIG wrapper does not export
+                # TENTING_MODE_TENTED and friends (measured -- the setters
+                # exist, the constants do not, and the getters hand back an
+                # opaque SwigPyObject), so _pcbnew_via_protection_attrs raises
+                # internally and returns {}. That is pre-existing #489
+                # behaviour and NOT this fix's doing, but it means the GUI half
+                # of the round trip does not currently carry a spec at all.
+                # #751.
                 moved_attrs = vd.get('tenting_attrs')
                 for track in list(board.GetTracks()):
                     if track.GetClass() != 'PCB_VIA':
@@ -2033,16 +2117,7 @@ class FanoutTab(wx.Panel):
                 from .gui_utils import refill_all_zones
                 refill_all_zones(board)
 
-            moved = len(result.get('placements', []))
-            nudged = len(via_moves)
-            unresolved = result.get('unresolved', [])
-            summary = f"Decoupling caps optimized: {moved} moved"
-            if nudged:
-                summary += f"; {nudged} via(s) nudged with reconnect (#313)"
-            if unresolved:
-                summary += (f"; {len(unresolved)} could not clear a foreign via "
-                            f"(manual: {', '.join(sorted(unresolved))})")
-            return summary
+            return cap_optimization_summary(result)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -2067,6 +2142,8 @@ class FanoutTab(wx.Panel):
             'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+            # #733, as in the inline path above.
+            'cap_board_edge_clearance': shared.get('cap_board_edge_clearance'),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones
         with redirect_prints_to_log(self.append_log):
