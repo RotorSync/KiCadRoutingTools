@@ -1998,6 +1998,19 @@ class FanoutTab(wx.Panel):
                 pcb_data,
                 pcb_file=self.board_filename,
                 clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
+                # #768: the --clearance ceiling. The CLI switches it on the
+                # PRESENCE of the flag; a dialog has no "absent", so the switch
+                # here is the condition that actually matters -- whether this tab
+                # is going to clamp the board's live DRC floors to that number
+                # (the `fix_drc_settings` gate on update_live_drc_floors below).
+                # Checked: the classes WILL be clamped, so pricing at the clamp
+                # is what KiCad will grade. Unchecked: the classes survive, so
+                # pricing must honour them, and the operator's dialog number
+                # stays the flat floor either way. Deliberately NOT a new
+                # control -- the one that exists already means exactly this.
+                netclass_ceiling=(
+                    fanout_config.get('clearance', defaults.BGA_CLEARANCE)
+                    if fanout_config.get('fix_drc_settings', True) else None),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
                 # #733: the plugin used to pass NOTHING here, so it silently took
                 # the signature default whatever the board or the operator said,
