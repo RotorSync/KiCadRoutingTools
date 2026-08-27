@@ -623,27 +623,49 @@ class TestASpecLessViaEmitsNothingAndInherits(unittest.TestCase):
     # MUTATION 4b: set the key only when the source spec is non-empty.
 
 
-class TestTheHash489DefaultDidNotMove(unittest.TestCase):
-    """The sentinel is OPT-IN, and this is what that buys: a caller with no
-    opinion still gets the #489-documented default, so nothing outside the
-    via-nudge changed behaviour.
+class TestTheHash489DefaultMovedAndThisFileFollowsIt(unittest.TestCase):
+    """THE #489 DEFAULT MOVED, DELIBERATELY, AFTER THIS FILE WAS WRITTEN.
 
-    tests/test_489_via_tenting.py OWNS these values; this file owns only the
-    fact that the new third state did not leak into them."""
+    These two arms were written when a caller with no opinion still got the
+    #489 s8 default -- front+back tenting on KiCad-10 output -- and they
+    asserted that the via-nudge's new "inherit" state had not leaked into it.
+    #748/#749/#751 then RETIRED that default: an unspecified via now emits no
+    protection token at all, in every case, so it inherits the board's own
+    `(setup ...)` policy.
 
-    def test_no_tenting_attrs_still_means_front_plus_back_on_KiCad10(self):
+    That was not a tidy-up. Probed against pcbnew 10.0.0, a via left at
+    `*_MODE_FROM_BOARD` serialises with NO token and a token appears only for
+    an explicit override -- so stamping one turned an inheriting via into an
+    override. Measured over 886 corpus boards, three (nanovoltmeter_marge,
+    hexberry_fpga, pedal_404) declare `(tenting (front no) (back no))`
+    board-wide and had every added via stamped tented: a fab error, hidden
+    because KiCad's FACTORY policy is tented so the two agree on an ordinary
+    board.
+
+    So the arms are KEPT and INVERTED rather than deleted. What they can still
+    detect changed, and saying so is the point: the empty-dict and no-attrs
+    cases are now indistinguishable from "inherit" IN THE OUTPUT, by design,
+    so these no longer discriminate the sentinel from the default. They are
+    change detectors for the RETIREMENT still being in force -- a revert of it
+    turns them red here as well as in the owning file.
+
+    tests/test_489_via_tenting.py OWNS these values ("nothing to say -> say
+    NOTHING, either way"); this file follows it. If the two ever disagree,
+    test_489 is right."""
+
+    def test_no_tenting_attrs_emits_NO_token_on_KiCad10(self):
+        """Retired #489 s8 default: was front+back tenting, now nothing."""
         v10 = generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
                                  net_name='GND')
-        self.assertIn('(tenting (front yes) (back yes))', v10)
-    # MUTATION 13: reorder via_protection_sexpr's branches so the sentinel or
-    # an empty dict reaches the default arm.
+        self.assertNotIn('(tenting', v10)
 
-    def test_an_empty_dict_is_still_the_default_not_the_sentinel(self):
-        """`{}` from a caller is NOT the sentinel. Only the sentinel means
-        'inherit'; the fix must not have collapsed the two."""
-        self.assertIn('(tenting (front yes) (back yes))',
-                      generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
-                                         net_name='GND', tenting_attrs={}))
+    def test_an_empty_dict_also_emits_NO_token(self):
+        """`{}` and the inherit keyword now agree, deliberately: an empty spec
+        is "the board said nothing about this via", and the answer to that is
+        to say nothing back."""
+        self.assertNotIn('(tenting',
+                         generate_via_sexpr(1, 2, 0.6, 0.3, ['F.Cu', 'B.Cu'], 5,
+                                            net_name='GND', tenting_attrs={}))
 
     def test_a_COPIED_spec_still_inherits_which_is_why_this_is_a_KEYWORD(self):
         """WHY THE DECISION IS A KEYWORD AND NOT A SENTINEL VALUE.
