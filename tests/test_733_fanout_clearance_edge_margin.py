@@ -700,20 +700,43 @@ class TestTheFrontEndsDoNotCarryTheirOwnCopy(unittest.TestCase):
         step = M.cap_optimization_step(
             ['py_placer/place_fanout_clearance.py', 'b.kicad_pcb',
              '--board-edge-clearance', '0.3', '--near-margin', '1.5'])
-        self.assertEqual(step['params'].get('board_edge_clearance'), 0.3,
+        # #772: the name CHANGED, and this arm is re-pointed rather than
+        # relaxed. When it was written, the converter emitted the Basic-tab
+        # SIGNAL name and the comment below justified it by
+        # _GEOMETRY_OVERRIDE_CHECKS carrying that name to the engine.
+        # Measured on the real headless dialog, it did not: the value set
+        # the SIGNAL control, ticked its override (leaking into the next
+        # step's routing), and the cap engine received None. The right name
+        # is the CAP control's, and the executor now reaches it because
+        # bga_options is one of the cap action's owners.
+        self.assertEqual(step['params'].get('cap_board_edge_clearance'),
+                         0.3,
                          'an explicit --board-edge-clearance is dropped on '
-                         'replay, so the GUI plan routes at a different margin')
+                         'replay, so the GUI plan places caps at a '
+                         'different margin')
+        self.assertIsNone(step['params'].get('board_edge_clearance'),
+                          'the cap step still converts to the Basic tab '
+                          'SIGNAL name, which is a different quantity and '
+                          'whose override box then leaks into the next step')
         # ON THE BRANCH: the converter is doing real work, not returning {}.
         self.assertEqual(step['params'].get('cap_near_margin'), 1.5)
-        # ...and the param name is one the plan executor can apply.
+        # ...and the param name is one the plan executor can apply -- which
+        # for a cap knob means the OWNER table, not the override map.
         with open(os.path.join(_ROOT, 'kicad_routing_plugin', 'ai_plan.py'),
                   encoding='utf-8') as f:
             src = f.read()
-        self.assertTrue("'board_edge_clearance': 'edge_clearance_check'" in src,
-                        'the plan executor has no override checkbox for this '
-                        'param, so a plan carrying it would set a disabled '
-                        'control and the value would be ignored')
-    # MUTATION: remove the CAP_FLAG_PARAMS row.
+        self.assertTrue("'optimize_caps': ('fanout_tab', ('bga_options',))"
+                        in src,
+                        'the cap action no longer searches the panel that '
+                        'owns cap_board_edge_clearance, so a plan carrying '
+                        'it would be logged "no control, ignored"')
+        self.assertTrue("'board_edge_clearance': 'edge_clearance_check'"
+                        in src,
+                        'the SIGNAL override map lost its row; a ROUTE step '
+                        'carrying --board-edge-clearance would set a '
+                        'disabled control and be ignored')
+    # MUTATION: remove the CAP_FLAG_PARAMS row; drop bga_options from the
+    # cap action's owners.
 
 
 class TestTheCorpusBound(unittest.TestCase):
