@@ -560,6 +560,54 @@ class TestTheConnectorGateHonoursTheRule(_TmpCase):
     # test_370 / test_617 / test_756.
 
 
+    def test_an_st_that_predates_the_resolver_keeps_its_NETCLASS_answer(self):
+        """The shim falls back through `req`, not to the flat scalar.
+
+        Added because `mutate_735`'s `the-shim-falls-back-to-the-flat-scalar`
+        row SURVIVED on the first run: every other fixture here declares its
+        classes AT the run's clearance, so `req` and `clearance` are the same
+        number and the distinction was untested. This stage declares CRIT at
+        0.35, which makes them differ by 0.25."""
+        pro = {'net_settings': {
+            'classes': [{'name': 'Default', 'clearance': CLEAR},
+                        {'name': 'CRIT', 'clearance': 0.35}],
+            'netclass_assignments': {},
+            'netclass_patterns': [{'pattern': CRIT_NAME,
+                                   'netclass': 'CRIT'}]}}
+        p = self.stage('wideclass', pro=pro)
+        pcb, st, _v0 = _rig(p, dperp=D_REFUSE)
+        # ON THE BRANCH: the class must actually raise the pair, or `req` and
+        # `clearance` agree here too and this arm proves nothing.
+        self.assertEqual(st.required(st.seg_floor(CRIT_NET, LAYER),
+                                     st.seg_floor(FOREIGN_NET, LAYER)), 0.35)
+        moves, _segs, out = _nudge(_NoTrackResolver(st), pcb, max_shift=4.0)
+        self.assertIsNone(_landing(moves),
+                          'the fallback dropped to the flat scalar: 0.45mm '
+                          'clears 0.30 but not the 0.55 this class demands; '
+                          'out=%r' % out)
+        # NEGATIVE CONTROL: the same st DOES move when the gap clears 0.55, so
+        # the refusal above is the requirement and not a broken stand-in.
+        pcb2, st2, _v1 = _rig(p, dperp=0.90)
+        moves2, _s2, out2 = _nudge(_NoTrackResolver(st2), pcb2, max_shift=4.0)
+        self.assertIsNotNone(_landing(moves2), out2)
+    # MUTATION: `return req(fa, fb)` -> `return clearance` in the shim.
+
+
+class _NoTrackResolver:
+    """A real `_Repair` with `track_required` hidden -- the shape of an `st`
+    that resolves pairs but predates this resolver. Not a hand-built fake: the
+    claim is about which of TWO resolvers the shim falls back to, so both must
+    be the genuine ones."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        if name == 'track_required':
+            raise AttributeError(name)
+        return getattr(self._real, name)
+
+
 class _FakeSt:
     """Minimal stand-in carrying only what the nudger's offender loop needs --
     the #370 B3 harness shape, built from a real _Repair so the fixture cannot
