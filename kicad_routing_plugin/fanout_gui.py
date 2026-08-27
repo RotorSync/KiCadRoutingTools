@@ -1002,6 +1002,24 @@ class BGAOptionsPanel(wx.ScrolledWindow):
         self.cap_displacement_growth = _cap_spin(
             "Displacement growth:", 1.5, 1.0, 4.0, 0.1, 2,
             "Per-pass multiplier on the displacement budget (--displacement-growth)")
+        # #733 follow-up: the cap repair's OWN board-edge margin. It lives HERE,
+        # with the other cap knobs, and NOT on the Basic tab's shared "Min Edge
+        # Clearance" control -- that one is the SIGNAL copper-to-edge keep-out,
+        # a different quantity that happens to share the CLI flag SPELLING
+        # (route.py --board-edge-clearance vs place_fanout_clearance.py
+        # --board-edge-clearance, two independent tools). Driving both from one
+        # control meant ticking the shared override for signal routing at a
+        # normal 0.20-0.25 silently dropped the cap margin from 0.55 to that
+        # value, which is the direction #733 exists to close. The CLI can set
+        # the two independently; so can this panel.
+        self.cap_board_edge_clearance = _cap_spin(
+            "Board edge margin (mm):", 0.0, 0.0, 10.0, 0.05, 2,
+            "Hard clearance from the board edge for MOVED CAPS "
+            "(--board-edge-clearance of place_fanout_clearance.py). "
+            "0 = let the engine resolve it: the board's own "
+            "min_copper_edge_clearance when it asks for MORE than 0.55mm, "
+            "else 0.55mm. This is NOT the Basic tab's Min Edge Clearance, "
+            "which is the signal copper-to-edge keep-out.")
 
         cap_grid.Add(wx.StaticText(self, label="Max passes:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.cap_max_passes = wx.SpinCtrl(self, min=1, max=200, initial=30)
@@ -1077,6 +1095,11 @@ class BGAOptionsPanel(wx.ScrolledWindow):
             'cap_max_displacement': self.cap_max_displacement.GetValue(),
             'cap_max_displacement_cap': self.cap_max_displacement_cap.GetValue(),
             'cap_displacement_growth': self.cap_displacement_growth.GetValue(),
+            # 0 in the spin control is UNSET, not a margin of zero -- None lets
+            # the shared engine resolve it, exactly as an omitted CLI flag does.
+            'cap_board_edge_clearance': (
+                self.cap_board_edge_clearance.GetValue()
+                if self.cap_board_edge_clearance.GetValue() > 1e-9 else None),
             'cap_max_passes': self.cap_max_passes.GetValue(),
             'cap_prefix': self.cap_prefix.GetValue().strip() or 'C,R,FB',
             'cap_allow_rotation': self.cap_allow_rotation.GetValue(),
@@ -1652,10 +1675,6 @@ class FanoutTab(wx.Panel):
                 # Advanced cap-placement knobs (#130) so the inline checkbox
                 # path honours them too, not just defaults.
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
-                # #733: the cap repair's edge margin. AFTER the cap_* spread, so
-                # the shared Basic-tab override wins over any same-named panel
-                # key. None = the engine resolves it (CLI parity).
-                'cap_board_edge_clearance': shared.get('cap_board_edge_clearance'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2142,8 +2161,6 @@ class FanoutTab(wx.Panel):
             'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
-            # #733, as in the inline path above.
-            'cap_board_edge_clearance': shared.get('cap_board_edge_clearance'),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones
         with redirect_prints_to_log(self.append_log):

@@ -654,9 +654,32 @@ class TestTheFrontEndsDoNotCarryTheirOwnCopy(unittest.TestCase):
             'the plugin does not pass the cap edge margin, so it takes the '
             'engine signature default whatever the operator asked for')
         # ...and the key is actually populated, on BOTH entry points.
-        self.assertEqual(
-            src.count("'cap_board_edge_clearance': shared.get("), 2,
-            'only one of the two GUI entry points populates the key')
+        #
+        # SOURCE CHANGED (#733 follow-up), intent unchanged. This used to
+        # require two `'cap_board_edge_clearance': shared.get(` lines -- the
+        # dialog's SHARED "Min Edge Clearance" control feeding both paths. That
+        # control is the SIGNAL copper-to-edge keep-out, and because
+        # resolve_cap_edge_clearance honours an explicit positive value in BOTH
+        # directions, ticking it at a normal signal 0.20 dropped the cap margin
+        # from 0.55 to 0.20 -- the same 0.35mm relaxation the negative control
+        # below was written to prevent, arriving through the operator instead of
+        # through the key. The margin now has its OWN knob on the Cap Placement
+        # box, so the two CLI tools' independently-settable flags stay
+        # independently settable here too.
+        #
+        # Both entry points therefore carry it via the PANEL config: the inline
+        # path spreads the panel's cap_* keys, the apply path copies the whole
+        # panel config. Asserted as the two mechanisms rather than a line count.
+        self.assertIn("if k.startswith('cap_')", src,
+                      'the inline path no longer spreads the panel cap_* keys, '
+                      'so the cap edge margin cannot reach the engine')
+        self.assertIn("dict(self.bga_options.get_config())", src,
+                      'the apply path no longer copies the panel config, so the '
+                      'cap edge margin cannot reach the engine')
+        self.assertNotIn("'cap_board_edge_clearance': shared.get(", src,
+                         'the cap margin is sourced from the SHARED signal edge '
+                         'control again -- ticking Min Edge Clearance for signal '
+                         'routing would loosen cap placement with it')
         # NEGATIVE CONTROL, and the trap this design had to avoid: the QFN
         # SIGNAL keep-out is a DIFFERENT key that answers 0.0 on a board with
         # no edge rule (fab-floored to 0.20 by _effective_board_edge_clearance)
