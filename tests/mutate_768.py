@@ -241,7 +241,12 @@ ROWS = [
      "            'clamp_netclasses': shared.get('clamp_netclasses', False),\n",
      '',
      (T768, TDLG), 'KILLED'),
+    # Anchored on the #768 comment above the row, not the row itself:
+    # `clamp_netclasses` is exported by the signal, planes and now fanout
+    # tabs, so the bare line matched TWICE and the runner reported BROKEN.
+    # That is the runner behaving exactly as designed.
     ('fanout-tab-stops-exporting-the-override', 'swig',
+     "                # what the pass must price at.\n"
      "                'clamp_netclasses': self.clearance_check.GetValue(),\n",
      '',
      (T768, TDLG), 'KILLED'),
