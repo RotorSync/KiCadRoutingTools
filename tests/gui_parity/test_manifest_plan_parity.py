@@ -353,7 +353,8 @@ def check_param_resolution():
 
 
 def check_cap_flags():
-    """#733: the optimize_caps step's flags survive conversion.
+    """#733/#772: the optimize_caps step's flags survive conversion, and
+    land on the CAP panel's names rather than the Basic tab's twins.
 
     The pairs loop above deliberately `continue`s on place_fanout_clearance.py
     ("optimize_caps: no routing flags to assert"), so nothing there looks at
@@ -368,23 +369,52 @@ def check_cap_flags():
     bad = []
     argv = ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb',
             'out.kicad_pcb', '--board-edge-clearance', '0.85',
-            '--near-margin', '1.5', '--no-rotate']
+            '--capture-radius', '5', '--near-margin', '1.5',
+            '--step', '0.35', '--max-displacement', '4',
+            '--max-displacement-cap', '6', '--displacement-growth', '2',
+            '--max-passes', '7', '--cap-prefix', 'C',
+            '--grid-step', '0.05', '--clearance', '0.1', '--no-rotate']
     step = m2p.cap_optimization_step(argv)
     if step.get('action') != 'optimize_caps':
         return [('(step)', f"action is {step.get('action')!r}")]
     params = step.get('params') or {}
-    for flag, key, want in (('--board-edge-clearance', 'board_edge_clearance', 0.85),
-                            ('--near-margin', 'cap_near_margin', 1.5),
-                            ('--no-rotate', 'cap_allow_rotation', False)):
+    # #772: EVERY flag, not three of twelve. The three-row version could not
+    # have caught a dropped --max-passes or --cap-prefix, and the executor
+    # was dropping all ten cap knobs at the time it was written.
+    for flag, key, want in (
+            ('--board-edge-clearance', 'cap_board_edge_clearance', 0.85),
+            ('--capture-radius', 'cap_capture_radius', 5),
+            ('--near-margin', 'cap_near_margin', 1.5),
+            ('--step', 'cap_step', 0.35),
+            ('--max-displacement', 'cap_max_displacement', 4),
+            ('--max-displacement-cap', 'cap_max_displacement_cap', 6),
+            ('--displacement-growth', 'cap_displacement_growth', 2),
+            ('--max-passes', 'cap_max_passes', 7),
+            ('--cap-prefix', 'cap_prefix', 'C'),
+            ('--grid-step', 'grid_step', 0.05),
+            ('--clearance', 'clearance', 0.1),
+            ('--no-rotate', 'cap_allow_rotation', False)):
         if params.get(key) != want:
             bad.append((flag, f"-> {key}={params.get(key)!r}, expected {want!r}"))
+    # #772 CHANGE DETECTOR: the Basic-tab SIGNAL name must not appear on a cap
+    # step. It is a different quantity, and ai_plan ticks edge_clearance_check
+    # for it -- which the cap step then leaks into the next step's routing.
+    # Asserting only the NEW name is not enough: a converter emitting BOTH
+    # would look green here and still tick the wrong box.
+    if 'board_edge_clearance' in params:
+        bad.append(('--board-edge-clearance',
+                    "converted to the Basic tab's SIGNAL name "
+                    "'board_edge_clearance'; on a cap step the flag is the "
+                    'PLACEMENT margin (cap_board_edge_clearance)'))
     # NEGATIVE CONTROL: an omitted flag must NOT be invented. An engine-resolved
     # default that leaked into the plan would pin the margin at plan time and
     # defeat the point of resolving it per board.
     bare = m2p.cap_optimization_step(
         ['python3', 'py_placer/place_fanout_clearance.py', 'in.kicad_pcb'])
-    if 'board_edge_clearance' in (bare.get('params') or {}):
-        bad.append(('(omitted)', 'an unset flag was materialised into the plan'))
+    for _k in ('cap_board_edge_clearance', 'board_edge_clearance'):
+        if _k in (bare.get('params') or {}):
+            bad.append(('(omitted)',
+                        f'an unset flag was materialised into the plan as {_k}'))
     return bad
 
 

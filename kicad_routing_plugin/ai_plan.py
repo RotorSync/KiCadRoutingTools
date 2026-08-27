@@ -393,6 +393,25 @@ def apply_step_params(step, dialog):
         # no same-named control on the fanout owners) to avoid a spurious
         # "no control, ignored" note.
         "fanout": {"qfn_track_width", "qfn_clearance"},
+        # #772: on a CAP step, `board_edge_clearance` is
+        # place_fanout_clearance.py's flag, whose GUI home is the BGA
+        # panel's cap_board_edge_clearance -- NOT the Basic tab's
+        # same-named SIGNAL copper-to-edge keep-out, a different quantity
+        # that merely shares the flag SPELLING across two independent
+        # tools (the #733 follow-up split them apart on purpose). Left to
+        # the generic loop it landed on the signal control AND ticked
+        # edge_clearance_check -- measured: `edge_clearance_check = True,
+        # board_edge_clearance = 0.85` after the step, which then leaks
+        # into the NEXT step's routing -- while the cap engine still
+        # received None. The optimize_caps block below re-homes it.
+        #
+        # NOT `clearance`, which is CORRECT through the generic loop:
+        # setting the Basic tab's Min Clearance and ticking its override
+        # is exactly the GUI's spelling of "--clearance was GIVEN"
+        # (#768). Measured on the real dialog, a cap step's
+        # `clearance: 0.1` arrives as both clearance=0.1 AND
+        # netclass_ceiling=0.1. Skipping it would break that branch.
+        "optimize_caps": {"board_edge_clearance"},
     }
 
     def _owners():
@@ -757,6 +776,30 @@ def apply_step_params(step, dialog):
                         getattr(opts, _ctl).SetValue(float(params[_pname]))
                     except (TypeError, ValueError):
                         notes.append(f"ignored non-numeric {_pname}={params[_pname]!r}")
+    elif action == "optimize_caps":
+        # Every cap_* param resolves through the generic loop now that
+        # bga_options is one of this action's owners (#772). Only the
+        # LEGACY spelling needs a block: plans converted before #772 carry
+        # place_fanout_clearance's --board-edge-clearance as
+        # `board_edge_clearance`, on the (false) claim that
+        # _GEOMETRY_OVERRIDE_CHECKS would carry it to the engine. Re-home
+        # it onto the cap knob, and do NOT touch edge_clearance_check --
+        # ticking that is what leaked a PLACEMENT margin into the next
+        # step's routing keep-out.
+        _opts = getattr(getattr(dialog, "fanout_tab", None),
+                        "bga_options", None)
+        _ctl = getattr(_opts, "cap_board_edge_clearance", None)
+        if "board_edge_clearance" in params and _ctl is not None:
+            try:
+                _ctl.SetValue(float(params["board_edge_clearance"]))
+                notes.append(
+                    f"board_edge_clearance={params['board_edge_clearance']}"
+                    f" -> cap_board_edge_clearance (#772: on a cap step"
+                    f" this is the PLACEMENT margin, not the Basic tab's"
+                    f" signal copper-to-edge keep-out)")
+            except (TypeError, ValueError):
+                notes.append("ignored non-numeric board_edge_clearance="
+                             f"{params['board_edge_clearance']!r}")
     return notes
 
 
@@ -1231,11 +1274,30 @@ class PlanExecutor:
                     return
                 if key not in floors or (smallest and v < floors[key]):
                     floors[key] = v
+            _FLOOR_KEYS = ('clearance', 'track_width', 'via_size',
+                           'via_drill', 'hole_to_hole_clearance',
+                           'board_edge_clearance', 'diff_pair_width',
+                           'diff_pair_gap')
             for step in self.steps:
                 p = step.get('params') or {}
-                for k in ('clearance', 'track_width', 'via_size', 'via_drill',
-                          'hole_to_hole_clearance', 'board_edge_clearance',
-                          'diff_pair_width', 'diff_pair_gap'):
+                _keys = _FLOOR_KEYS
+                if step.get('action') == 'optimize_caps':
+                    # #772: place_fanout_clearance's --board-edge-clearance
+                    # is a PLACEMENT margin, not a routing-enforced floor.
+                    # Its own writeback says exactly that and passes no
+                    # edge_clearance ("must not tighten the rule",
+                    # py_placer/place_fanout_clearance.py). Harvesting it
+                    # here wrote a cap margin into the project as the
+                    # routing copper-to-edge RULE -- the same wrong-quantity
+                    # confusion #772 fixes at the control, one layer down.
+                    # Converted plans now spell it
+                    # cap_board_edge_clearance, which is not a floor key at
+                    # all; this covers plans converted before that.
+                    # `clearance` is deliberately STILL harvested from a cap
+                    # step -- that IS what the CLI writes (#768/#769).
+                    _keys = tuple(k for k in _FLOOR_KEYS
+                                  if k != 'board_edge_clearance')
+                for k in _keys:
                     if p.get(k) is not None:
                         _take(k, p[k])
             clearance = floors.get('clearance')
