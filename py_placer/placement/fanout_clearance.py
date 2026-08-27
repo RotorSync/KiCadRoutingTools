@@ -850,6 +850,14 @@ class _Repair:
                                              ceiling=netclass_ceiling)
         self.clearance_notes = list(_model.notes)
         self._floors = _model if _model.active else None
+        # #735: the track-scoped .kicad_dru channel, on its OWN handle and
+        # deliberately not folded into `self._floors`. That one is the switch
+        # for every requirement in this class, and nine consumers change code
+        # path when it flips; a track rule binds track-vs-track and nothing
+        # else, which happens at exactly one site (`connector_clear`'s s2 arm,
+        # via `track_required`). A board whose only declaration is a track rule
+        # therefore keeps `self._floors is None` and every existing number.
+        self._track = _model if _model.track_rules else None
         # Pad-layer scope for the non-pad items below. A via spans copper, so
         # it is scoped to ALL copper: check_drc's pad-via path passes
         # layers_b=None meaning "scope to the pad's own layers", and
@@ -1535,6 +1543,27 @@ class _Repair:
         unresolved that its own nudger then refuses to see). The via eff rows
         are built from this same call, so they cannot drift from it either."""
         return self._pair_or_flat(pad_floor, self._via_floor_for(via_net))
+
+    def track_required(self, fa, fb, net_a, net_b):
+        """The required clearance between two TRACKS: `required(fa, fb)` raised
+        by any binding track-scoped `.kicad_dru` rule (#735).
+
+        THE ONLY track-vs-track pair kind in this module, which is why it is a
+        separate resolver rather than an argument to `required`. KiCad's rule
+        condition names a track on BOTH sides, so a pad or a via on either side
+        exempts the pair -- and every other requirement resolved here has one.
+        The cap-pad arms, the via arms and the broad-phase over-reach are
+        exempt by that condition, not by omission.
+
+        Composition is check_drc's, term for term: resolve the pair first, THEN
+        raise. So the rule outranks the net class and the layer rule and can
+        lower neither. The raise is keyed on NETS, so it applies to the flat
+        fallback too -- which is the whole answer on a board whose only
+        declaration is a track rule."""
+        base = self._pair_or_flat(fa, fb)
+        if self._track is None:
+            return base
+        return self._track.track_pair(net_a, net_b, base)[0]
 
     @property
     def edge_margin(self) -> float:
@@ -3573,6 +3602,7 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     _pad_fl = getattr(st, 'pad_floor', None)
     _via_fl = getattr(st, 'via_floor', None)
     _seg_fl = getattr(st, 'seg_floor', None)
+    _trk_req = getattr(st, 'track_required', None)
     _via_rad = getattr(st, 'via_radius', None)
     # #733: the board-edge requirement comes from st, so the two edge helpers
     # below cannot gate the copper this function EMITS more weakly than the cap
@@ -3615,6 +3645,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     def seg_fl(net, layer):
         return None if _seg_fl is None else _seg_fl(net, layer)
+
+    def track_req(fa, fb, net_a, net_b):
+        """The TRACK-vs-track requirement (#735), st-resolved when it can be.
+
+        Falls back through `req`, not to `clearance`: an st that resolves pairs
+        but predates this resolver must still get its netclass and layer-rule
+        answer. The duck-typed harnesses carry neither, and grade flat -- the
+        same contract every shim above keeps."""
+        if _trk_req is None:
+            return req(fa, fb)
+        return _trk_req(fa, fb, net_a, net_b)
 
     def via_rad(v):
         """This via's RADIUS, resolved by st when it can (#732), so the offender
@@ -3882,14 +3923,23 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     def connector_clear(net_id, layer, width, sx, sy, ex, ey):
         hw = width / 2.0
-        # The connector is a TRACK on `layer`, so it resolves like one. Note
-        # this honours netclasses and .kicad_dru LAYER rules, but not
-        # TRACK-SCOPED .kicad_dru rules, which live in a channel
-        # PadClearanceModel does not carry (kicad_dru.read_board_track_clearances,
-        # applied by check_drc at the seg-seg site only). Under-blocking a
-        # geometric connector that is separately DRC'd is the safe direction.
-        # Filed as #735. (check_drc.py tags that channel `#549`; GitHub #549 is
-        # a closed, unrelated issue, so this cites the tracker instead.)
+        # The connector is a TRACK on `layer`, so it resolves like one: net
+        # classes, .kicad_dru LAYER rules, and -- since #735 -- the board's
+        # TRACK-SCOPED .kicad_dru rules, through the same resolver check_drc
+        # grades a seg-seg pair with.
+        #
+        # THE TRACK RULE REACHES ONE ARM OF THIS FUNCTION, and the arms below
+        # are exempt by KiCad's own rule condition rather than by omission: it
+        # names a track on BOTH sides, so a cap pad, a board pad or a via on
+        # the far side takes the pair out of scope. The last loop is the only
+        # place both sides are tracks. The same reasoning exempts the via
+        # mover above and this module's broad-phase over-reach, whose far side
+        # is always a cap pad.
+        #
+        # Before #735 this arm priced at the net class alone, so on a board
+        # declaring a track rule the pass drew a connector closer to foreign
+        # copper than its own checker accepts -- an under-block, which ships
+        # the violation rather than refusing the landing.
         cfl = seg_fl(net_id, layer)
         # board edge / cutouts + NPTH drill holes at their floor (#370 B3):
         # a connector is drawn geometrically, not routed, so it must gate
@@ -3948,7 +3998,8 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                     _point_to_seg_dist(ex, ey, s2.start_x, s2.start_y, s2.end_x, s2.end_y),
                     _point_to_seg_dist(s2.start_x, s2.start_y, sx, sy, ex, ey),
                     _point_to_seg_dist(s2.end_x, s2.end_y, sx, sy, ex, ey))
-            if d < hw + s2.width / 2.0 + req(cfl, seg_fl(s2.net_id, s2.layer)):
+            if d < hw + s2.width / 2.0 + track_req(
+                    cfl, seg_fl(s2.net_id, s2.layer), net_id, s2.net_id):
                 return False
         return True
 
