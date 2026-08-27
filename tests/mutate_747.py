@@ -247,11 +247,24 @@ ROWS = [
      (T747,), 'KILLED'),
 
     # ---- the one-writer property itself --------------------------------
-    # KILLED BY A SOURCE GUARD ALONE, and that is a finding rather than a gap.
-    # With the old block restored the nudger relocates the tuple first and the
-    # registrar then matches nothing, so the END STATE is identical and no
-    # behavioural arm can separate them. What it destroys is exactly the
-    # property #747 exists to establish: one writer.
+    # THE ANNOTATION HERE WAS WRONG AND A FACT-CHECK REFUTED IT BY READING THE
+    # RUN. It said "killed by a source guard alone, no behavioural arm can
+    # separate them". Measured: 5 killers, of which FOUR are behavioural. Two
+    # reasons, and both were checkable before the claim was written:
+    #
+    #   * test_747's headline arm asserts the nudger leaves the graded list the
+    #     SAME OBJECT holding the SAME TUPLES. Any write from inside the nudger
+    #     fails that, whatever it writes -- so a behavioural arm for exactly
+    #     this mutation already existed.
+    #   * the block below is the PRE-6af3495a rebuild, which carries no radius
+    #     across. So the end state is NOT identical either: the moved tuple
+    #     loses its map entry and the registrar, finding nothing at the old
+    #     position, returns 0 where the arms expect 1.
+    #
+    # Left as measured rather than re-tuned into the claim it was supposed to
+    # make: what this row shows is that the one-writer property is defended
+    # behaviourally AND structurally, which is a better answer than the one
+    # predicted.
     ('nudger-writes-the-graded-view-again', 'fc',
      "            nm = pcb_data.nets[v.net_id].name "
      "if v.net_id in pcb_data.nets else v.net_id",
