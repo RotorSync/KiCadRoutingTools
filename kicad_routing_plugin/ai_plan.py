@@ -323,6 +323,39 @@ def _enable_geometry_override(dialog, name):
         ctrl.Enable(True)
 
 
+# #772: action -> (tab attribute, sub-panel attributes searched BEFORE the tab).
+# The generic loop resolves a param by walking these owners IN ORDER and taking
+# the first one carrying a same-named control, so this table decides which
+# controls a plan step can reach AT ALL.
+#
+# `optimize_caps` had no entry and fell through to [dialog], while every one of
+# the ten "Cap Placement (advanced)" controls lives on fanout_tab.bga_options.
+# Measured on the real headless dialog before this landed: TEN of the eleven
+# params a converted manifest carries were logged "no control, ignored" and the
+# engine ran at its signature defaults (capture_radius 2.0 for a plan's 5.0,
+# max_passes 30 for 7, cap_prefix 'C,R,FB' for 'C', allow_rotations True for
+# False). Only `clearance` arrived -- correctly, see _GENERIC_SKIP below.
+#
+# A MODULE-LEVEL TABLE rather than the if/elif chain it replaces, for two
+# reasons. ONE: the wx-free parity gate can AST-extract it, exactly as it does
+# _PARAM_CONTROL_ALIASES, and assert OWNER-SCOPED reachability. That check did
+# not exist, which is why #772 shipped -- check_param_resolution only asks "does
+# a control with this name exist ANYWHERE across the four GUI files", and every
+# cap_* control has always existed, throughout the entire period not one of them
+# was reachable. TWO: swig_gui.reset_params_to_defaults already descends into
+# these same sub-panels, and its own comment names this bug class. Apply and
+# reset must agree about what a step can touch; two hand-written lists in two
+# files did not, and that disagreement IS #772.
+_ACTION_OWNERS = {
+    'route_diff': ('differential_tab', ()),
+    'fanout': ('fanout_tab', ()),
+    'optimize_caps': ('fanout_tab', ('bga_options',)),
+    'route_planes': ('planes_tab', ('create_options',)),
+    'repair_planes': ('planes_tab', ('create_options',)),
+    # `route` is deliberately absent: its controls are all on the dialog.
+}
+
+
 def apply_step_params(step, dialog):
     """Fill parameter controls from the step (plan time). Returns notes."""
     notes = []
@@ -363,25 +396,26 @@ def apply_step_params(step, dialog):
     }
 
     def _owners():
+        # Owner search order for this action (see _ACTION_OWNERS). An
+        # action with no entry -- `route` -- resolves on the dialog only.
+        #
+        # Behaviour-identical to the if/elif chain this replaced for the
+        # four actions that had one: route_diff -> [differential_tab, d]
+        # or [d]; fanout -> [fanout_tab, d] or [d]; route_planes and
+        # repair_planes -> [create_options?, planes_tab, d] or [d];
+        # anything unlisted -> [d]. Only optimize_caps changes.
         d = dialog
-        if action == "route_diff":
-            t = getattr(d, "differential_tab", None)
-            return [t, d] if t is not None else [d]
-        if action == "fanout":
-            t = getattr(d, "fanout_tab", None)
-            return [t, d] if t is not None else [d]
-        if action in ("route_planes", "repair_planes"):
-            t = getattr(d, "planes_tab", None)
-            subs = []
-            if t is not None:
-                for sub in ("create_options",):
-                    s = getattr(t, sub, None)
-                    if s is not None:
-                        subs.append(s)
-                subs.append(t)
-            subs.append(d)
-            return subs
-        return [d]
+        tab_attr, subs = _ACTION_OWNERS.get(action, (None, ()))
+        if not tab_attr:
+            return [d]
+        t = getattr(d, tab_attr, None)
+        if t is None:
+            return [d]
+        out = [p for p in (getattr(t, name, None) for name in subs)
+               if p is not None]
+        out.append(t)
+        out.append(d)
+        return out
 
     def _set_control(owner, name, value):
         ctrl = getattr(owner, name, None)
