@@ -30,6 +30,10 @@ WHAT THIS FILE HOLDS, class by class:
   TestAnUnmatchedMoveIsANoOp             an injected barrel this object never
                                          graded, and a net that disagrees
   TestOneViaRule                         the source guard
+  TestTheOneRealBoardArmWhereTheRegistrarRUNS
+                                         the whole pass, on orangecrab, at the
+                                         one configuration in the repo that
+                                         actually relocates vias
   TestInertOnTheTrackedCorpus            the self-expiring bound
 
 THE HOUSE CONVENTIONS THIS FILE FOLLOWS, and why each earned its place:
@@ -48,7 +52,7 @@ THE HOUSE CONVENTIONS THIS FILE FOLLOWS, and why each earned its place:
     places, and #756 recorded a source arm passing against a DELETED line
     because a comment two thousand lines up carried the needle.
 
-Runs in-process in ~40 s; the corpus arm makes one `git ls-files` call.
+Runs in-process in ~60 s; the corpus arm makes one `git ls-files` call.
 """
 from __future__ import annotations
 
@@ -608,6 +612,72 @@ class TestOneViaRule(unittest.TestCase):
                 % (token, len(hits), floor))
     # MUTATION: rename either new member -> this arm fails instead of the
     # `== 1` rows passing vacuously.
+
+
+class TestTheOneRealBoardArmWhereTheRegistrarRUNS(unittest.TestCase):
+    """Every other arm in this file either hand-builds a report or widens
+    `max_shift` past anything a chain would use. This one drives the WHOLE pass
+    on a tracked board, at a configuration that genuinely relocates vias, so
+    the new code executes on real geometry.
+
+    It took finding: at the shipped defaults 0 of the 33 in-repo boards print a
+    single `via-nudge: moved` line. The three kwargs below are each
+    load-bearing -- with the fallback off but the default displacement and pass
+    count, this same board reports nothing unresolved and the nudger is never
+    called. Recorded so the next person does not conclude the code is
+    unreachable on real boards.
+    """
+
+    BOXED = dict(clearance=0.1, max_displacement=0.0, max_passes=1,
+                 via_clear_fallback=False)
+
+    # Measured at 42e09a1a AND at the merge base 988634d0 -- identical, which
+    # is the whole claim of this change.
+    N_MOVES = 9
+    N_CONNECTORS = 17
+    N_UNRESOLVED = 10
+    N_PLACEMENTS = 18
+    VIA_FREED = ['C19', 'C44', 'C45']
+
+    def _run(self):
+        pcb = parse_kicad_pcb(BOARD)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = repair_fanout_clearance(pcb, BOARD, **self.BOXED)
+        return pcb, r, buf.getvalue()
+
+    def test_the_whole_pass_relocates_nine_vias_and_credits_three_caps(self):
+        pcb, r, out = self._run()
+        self.assertEqual(len(r['via_moves']), self.N_MOVES)
+        self.assertEqual(len(r['new_segments']), self.N_CONNECTORS)
+        self.assertEqual(len(r['unresolved']), self.N_UNRESOLVED)
+        self.assertEqual(len(r['placements']), self.N_PLACEMENTS)
+        self.assertEqual(sorted(r['via_resolved']), self.VIA_FREED)
+        self.assertEqual(
+            sum(1 for l in out.splitlines() if 'via-nudge: moved' in l),
+            self.N_MOVES,
+            'the transcript and the returned report disagree about how many '
+            'barrels moved')
+    # MUTATION: any change to the registrar that alters the re-grade -- e.g.
+    # skipping the call, or refreshing the per-cap view before it.
+
+    def test_every_relocated_barrel_is_where_the_report_says_it_is(self):
+        """The end-to-end form of the whole issue: after the pass, the PARSER's
+        vias and the report must agree, and neither may still sit at a vacated
+        position. Reads the board through the parser rather than the grader, so
+        it cannot be satisfied by the view this change repairs."""
+        pcb, r, _out = self._run()
+        live = {(round(v.x, 6), round(v.y, 6)) for v in pcb.vias}
+        for old_x, old_y, vd in r['via_moves']:
+            landing = (round(vd['x'], 6), round(vd['y'], 6))
+            self.assertIn(landing, live,
+                          'a reported landing carries no via: %r' % (landing,))
+            self.assertNotIn(
+                (round(old_x, 6), round(old_y, 6)), live,
+                'a via is still at a vacated position %r' % ((old_x, old_y),))
+    # MUTATION: none in the battery -- this arm measures the NUDGER's own
+    # bookkeeping, which #747 does not touch. It is here as a change detector
+    # for the fixture, so a configuration that stops relocating is caught.
 
 
 class TestInertOnTheTrackedCorpus(unittest.TestCase):
