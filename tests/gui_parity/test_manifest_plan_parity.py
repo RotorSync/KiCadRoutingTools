@@ -332,6 +332,171 @@ def _gui_control_attrs():
     return attrs
 
 
+# --- #772: OWNER-SCOPED resolution -------------------------------------------
+# check_param_resolution above asks "does a control with this name exist
+# ANYWHERE across the four GUI files". Every cap_* control has always existed,
+# so that half stayed green for the whole time the plan executor could not
+# reach one of them: ai_plan._owners() searched [dialog] for an optimize_caps
+# step, and the controls live on fanout_tab.bga_options.
+#
+# This arm closes that hole WITHOUT wx. It AST-extracts ai_plan's
+# _ACTION_OWNERS table and a PER-CLASS map of control attributes, then walks
+# the owner chain exactly as _owners() does and asserts the param resolves on
+# one of them.
+_OWNER_CLASSES = {
+    'differential_tab': 'DifferentialTab',
+    'fanout_tab': 'FanoutTab',
+    'planes_tab': 'PlanesTab',
+    'bga_options': 'BGAOptionsPanel',
+    'qfn_options': 'QFNOptionsPanel',
+    'create_options': 'CreatePlanesOptionsPanel',
+    '<dialog>': 'RoutingDialog',
+}
+
+# action -> params that must resolve ON THAT ACTION'S OWNERS.
+_MUST_RESOLVE_ON = {
+    'optimize_caps': {
+        'cap_capture_radius', 'cap_near_margin', 'cap_step',
+        'cap_max_displacement', 'cap_max_displacement_cap',
+        'cap_displacement_growth', 'cap_board_edge_clearance',
+        'cap_max_passes', 'cap_prefix', 'cap_allow_rotation',
+        # the Basic-tab knobs a cap step legitimately drives: `clearance` is
+        # the GUI's spelling of "--clearance was GIVEN" (#768), and grid_step
+        # is the position snap the pass reads through get_shared_params.
+        'clearance', 'grid_step',
+    },
+    'route_planes': {'stitch_pitch', 'gnd_via_net', 'zone_clearance'},
+    'route_diff': {'diff_pair_width', 'diff_pair_gap'},
+}
+
+
+def _class_control_attrs():
+    """{class name: {control attribute names}} across the four GUI files.
+
+    Per-CLASS, where _gui_control_attrs is a flat union -- that union is what
+    made owner-scoped unreachability invisible.
+    """
+    out = {}
+    gui_dir = REPO / "kicad_routing_plugin"
+    for fn in ("swig_gui.py", "differential_gui.py", "fanout_gui.py",
+               "planes_gui.py"):
+        tree = ast.parse((gui_dir / fn).read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            attrs = out.setdefault(node.name, set())
+            for n in ast.walk(node):
+                if isinstance(n, ast.Assign):
+                    targets = n.targets
+                elif isinstance(n, ast.AnnAssign):
+                    targets = [n.target]
+                else:
+                    continue
+                for t in targets:
+                    if (isinstance(t, ast.Attribute)
+                            and isinstance(t.value, ast.Name)
+                            and t.value.id == 'self'):
+                        attrs.add(t.attr)
+            attrs |= _setattr_loop_attrs(node)
+    return out
+
+
+def _setattr_loop_attrs(node):
+    """Control names created by `for name, ... in <list of tuples>:
+    setattr(self, name, ctrl)` (and `setattr(self, name + '_check', chk)`).
+
+    THREE loops in swig_gui.py build controls this way -- the geometry floors
+    with their override checkboxes, the integer params and the float params --
+    and a plain `self.X = ...` walk cannot see any of them. That blind spot is
+    pre-existing and was harmless only because the affected names are handled
+    by per-action blocks; it is not harmless for an owner-scoped check, which
+    would report FALSE failures for clearance / track_width / the via floors.
+    """
+    tables = {}
+    for n in ast.walk(node):
+        if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Name)
+                and isinstance(n.value, (ast.List, ast.Tuple))):
+            names = [e.elts[0].value for e in n.value.elts
+                     if isinstance(e, ast.Tuple) and e.elts
+                     and isinstance(e.elts[0], ast.Constant)
+                     and isinstance(e.elts[0].value, str)]
+            if names:
+                tables[n.targets[0].id] = names
+    out = set()
+    for n in ast.walk(node):
+        if not isinstance(n, ast.For):
+            continue
+        names = tables.get(n.iter.id) if isinstance(n.iter, ast.Name) else None
+        if (not names or not isinstance(n.target, ast.Tuple)
+                or not n.target.elts
+                or not isinstance(n.target.elts[0], ast.Name)):
+            continue
+        var = n.target.elts[0].id
+        for c in ast.walk(n):
+            if not (isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    and c.func.id == 'setattr' and len(c.args) >= 2
+                    and isinstance(c.args[0], ast.Name)
+                    and c.args[0].id == 'self'):
+                continue
+            a = c.args[1]
+            if isinstance(a, ast.Name) and a.id == var:
+                out |= set(names)
+            elif (isinstance(a, ast.BinOp) and isinstance(a.op, ast.Add)
+                  and isinstance(a.left, ast.Name) and a.left.id == var
+                  and isinstance(a.right, ast.Constant)
+                  and isinstance(a.right.value, str)):
+                out |= {x + a.right.value for x in names}
+    return out
+
+
+def _action_owners_table():
+    """AST-extract ai_plan._ACTION_OWNERS without importing it (it needs wx)."""
+    src = (REPO / "kicad_routing_plugin" / "ai_plan.py").read_text(
+        encoding='utf-8')
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == '_ACTION_OWNERS':
+                    return ast.literal_eval(node.value)
+    return None
+
+
+def check_owner_scoping():
+    """Return [(what, why)] for params that cannot resolve on their action."""
+    table = _action_owners_table()
+    if table is None:
+        return [('_ACTION_OWNERS',
+                 'ai_plan no longer exposes the owner table as a module-level '
+                 'literal -- this gate cannot see which controls a step can '
+                 'reach, and #772 is exactly what that blindness costs')]
+    bad = []
+    ent = table.get('optimize_caps')
+    if not ent or 'bga_options' not in (ent[1] or ()):
+        bad.append(('optimize_caps',
+                    'the _ACTION_OWNERS entry is %r -- it must search '
+                    'fanout_tab.bga_options, which owns every cap_* control'
+                    % (ent,)))
+    by_class = _class_control_attrs()
+    aliases, special = _ai_plan_tables()
+    for action, params in sorted(_MUST_RESOLVE_ON.items()):
+        tab_attr, subs = table.get(action, (None, ()))
+        chain = list(subs) + ([tab_attr] if tab_attr else []) + ['<dialog>']
+        reachable = set()
+        for owner in chain:
+            reachable |= by_class.get(_OWNER_CLASSES.get(owner, ''), set())
+        for p in sorted(params):
+            if p in special:
+                continue
+            tgt = aliases.get(p, p)
+            if tgt not in reachable:
+                bad.append(('%s.%s' % (action, p),
+                            'resolves to %r, on none of %s -- the step would '
+                            'log "no control, ignored" and run at the reset '
+                            'default' % (tgt, chain)))
+    return bad
+
+
 def check_param_resolution():
     """Return list of (param, reason) for MUST-resolve params that don't."""
     aliases, special = _ai_plan_tables()
@@ -553,6 +718,16 @@ def main():
     for f, why in cap_bad:
         print(f"    {f}: {why}")
 
+    # #772: OWNER-scoped resolution. check_param_resolution above only asks
+    # whether a control with the name exists SOMEWHERE; this asks whether
+    # the action that carries the param can actually REACH it.
+    own_bad = check_owner_scoping()
+    print(f"\nOwner-scoped resolution: "
+          f"{'OK' if not own_bad else 'FAILED'} "
+          f"(each param resolves on the owners its ACTION searches).")
+    for p, why in own_bad:
+        print(f"    {p}: {why}")
+
     # #459 placement-block flags (self-contained, no corpus needed).
     grp_bad = check_group_flags()
     print(f"\nPlacement-block flags: {'OK' if not grp_bad else 'FAILED'} "
@@ -566,7 +741,8 @@ def main():
     for f, why in ref_bad:
         print(f"    {f}: {why}")
 
-    return 1 if (total_bad or res_bad or cap_bad or grp_bad or ref_bad) else 0
+    return 1 if (total_bad or res_bad or cap_bad or own_bad or grp_bad
+                 or ref_bad) else 0
 
 
 if __name__ == "__main__":
