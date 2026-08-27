@@ -182,6 +182,96 @@ def resolve_cap_edge_clearance(pcb_file, explicit=None):
     return CAP_EDGE_CLEARANCE, 'fixed default'
 
 
+def resolve_pair_clearance(pcb_file, clearance=None):
+    """The flat different-net PAIR floor, resolved ONCE. ``(mm, source)``.
+
+    THE ONE ANSWER for every front end, the shape #733 gave the edge margin and
+    #756 gave the drill floors. This one is the last of the three, and it is the
+    one that carried a defect rather than a gap (#768).
+
+    Two branches, and they are CLAUDE.md's, not this function's invention:
+
+      ``clearance is None``  -- the flag was OMITTED. Base is the board's own
+                                Default net-class clearance ('board netclass'),
+                                else ``routing_defaults.CLEARANCE``
+                                ('fixed default'). Every class is then honoured
+                                as declared, and the caller writes no clamp.
+      ``clearance`` given    -- it is a CEILING. Base is ``min(Default class,
+                                clearance)`` ('cli'), so the Default class is
+                                capped exactly like every other class, and the
+                                caller passes the same number as
+                                ``netclass_ceiling`` so the map is capped too.
+
+    This is `route.py`'s resolution (route.py:6165-6183) with the same
+    vocabulary as `list_nets.board_floor_knobs`, which is what the five sibling
+    placement CLIs use. It is spelled here rather than delegated to
+    `board_floor_knobs` for one reason: that helper has no notion of a ceiling,
+    so it cannot express ``min(Default, cli)`` -- handed an explicit value it
+    returns it verbatim as 'cli', which is the OMITTED branch's arithmetic
+    wearing the GIVEN branch's label.
+
+    NOT raise-only, and deliberately not wrapped at the fab floor. See
+    `fab_pair_clearance_floor` below for why, and note that this is the opposite
+    decision from `resolve_drill_floors` -- for a checkable reason, not a taste.
+    """
+    from list_nets import board_default_netclass_clearance
+    import routing_defaults as _defaults
+    try:
+        declared = board_default_netclass_clearance(pcb_file)
+    except Exception:                                          # noqa: BLE001
+        declared = None    # e.g. pcb_file is not a path at all (an unsaved GUI
+                           # board). Same swallow as resolve_cap_edge_clearance.
+    # A non-positive declaration is UNSET, not a floor of zero -- KiCad writes 0
+    # for "not configured", and `board_floor_knobs` encodes the same rule
+    # (list_nets.py:352-355). Reading it straight collapses the pass to no
+    # clearance at all.
+    if declared is not None and declared <= 0:
+        declared = None
+    if clearance is None:
+        if declared is not None:
+            return float(declared), 'board netclass'
+        return float(_defaults.CLEARANCE), 'fixed default'
+    if declared is not None:
+        return min(float(declared), float(clearance)), 'cli'
+    return float(clearance), 'cli'
+
+
+def fab_pair_clearance_floor(pcb_data):
+    """``(mm, copper_layer_count)`` -- the fab copper-clearance floor for this
+    board's LAYER BUCKET. For DISCLOSURE ONLY; never applied.
+
+    Unlike the drill floors, this one MOVES with the layer count: `fab_floor_min`
+    buckets at 2 (0.10mm) vs 4 (0.09mm), and 3 copper layers already rounds into
+    the 4 bucket. So "is this clearance manufacturable" has a different answer on
+    a 2-layer board than on a 4-layer one, and a hardcoded number would be wrong
+    on one of them.
+
+    NOT WRAPPED, and that is the checkable half. #756's rule for this function's
+    two siblings is MATCH THE GRADER: raise a floor here iff `check_drc` raises
+    it. `check_drc` does NOT fab-floor copper clearance -- `_pair_cl`
+    (check_drc.py:2042-2047) is ``max(clearance, ncl_a, ncl_b)`` -> the dru
+    replace -> the pad override, with no `fab_floor_min` anywhere in the chain;
+    `fab_floor_min` enters only the SIZE checks (track width / via diameter /
+    via drill), and `_pin_up` covers board-edge, hole-to-hole and hole clearance
+    but NOT clearance. Wrapping here would make this pass refuse cap landings
+    its own grader passes -- inventing a divergence to paper over nothing.
+
+    So the sub-fab case is DISCLOSED by the caller and priced as asked. That
+    matters more since #768 than before it: the netclass tier used to rescue a
+    too-small ``--clearance`` by raising the pair back up to the class, and a
+    ceiling deliberately removes that rescue.
+    """
+    from fab_tiers import fab_floor_min
+    # The SAME `.Cu` filter `resolve_drill_floors` and `_Repair.__init__` apply
+    # to the SAME field, so nothing in this pass can disagree about the bucket.
+    # The `or 2` fallback is check_drc's own (check_drc.py:2049,
+    # `len(copper_layers) if copper_layers else 2`): an unreadable layer list
+    # takes the CONSERVATIVE bucket, never bucket 0.
+    _cu = getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+    n = len([l for l in (_cu or []) if str(l).endswith('.Cu')]) or 2
+    return float(fab_floor_min(n)['clearance']), n
+
+
 def resolve_drill_floors(pcb_data):
     """The two DRILL-to-drill floors the via-nudge gates at (#756).
 
@@ -664,7 +754,8 @@ class _Repair:
                  board_edge_clearance: float, near_margin: float,
                  capture_radius: float, default_via_size: float,
                  cap_prefix: str, extra_locked: Set[str],
-                 max_displacement_cap: float = 3.0):
+                 max_displacement_cap: float = 3.0,
+                 netclass_ceiling: Optional[float] = None):
         bounds = pcb_data.board_info.board_bounds
         if bounds is None:
             raise ValueError("No board boundary (Edge.Cuts) found")
@@ -715,7 +806,13 @@ class _Repair:
         # does and is STRICTLY INERT on a board declaring none of the three.
         # `notes` must be read BEFORE the active-drop: a FAILED read (an
         # unreadable sibling) is exactly what makes the model look inert.
-        _model = PadClearanceModel.for_board(pcb_data, clearance, pcb_file)
+        # #768: `netclass_ceiling` is the --clearance the CALLER will clamp the
+        # output project's classes down to, or None when it will clamp nothing.
+        # It caps the netclass tier and only that tier -- the .kicad_dru rules
+        # and the pad overrides survive it, because the writeback touches
+        # neither and KiCad will go on enforcing both.
+        _model = PadClearanceModel.for_board(pcb_data, clearance, pcb_file,
+                                             ceiling=netclass_ceiling)
         self.clearance_notes = list(_model.notes)
         self._floors = _model if _model.active else None
         # Pad-layer scope for the non-pad items below. A via spans copper, so
@@ -2354,7 +2451,8 @@ class _Repair:
 
 
 def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
-                            clearance: float = 0.2,
+                            clearance: Optional[float] = None,
+                            netclass_ceiling: Optional[float] = None,
                             grid_step: float = 0.1,
                             board_edge_clearance: Optional[float] = None,
                             near_margin: float = 1.0,
@@ -2457,6 +2555,23 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     # transcript should never have to know which of three fronts invoked this to
     # know which margin it used -- printing only the resolved case would disclose
     # exactly the branch that needs no explaining.
+    # #768: `clearance` defaults to None meaning "resolve it from the board",
+    # exactly as board_edge_clearance has since #733 -- and for the same reason,
+    # that this engine has three front ends and only one of them ever had a
+    # resolution step. Printed unconditionally, for the reason spelled above the
+    # edge margin: an operator reading a transcript should not have to know
+    # which front invoked the pass to know what it priced at.
+    clearance, _clr_src = resolve_pair_clearance(pcb_file, clearance)
+    print(f"  cap pair clearance: {clearance}mm ({_clr_src})")
+    _fab_clr, _fab_n = fab_pair_clearance_floor(pcb_data)
+    if clearance < _fab_clr - 1e-9:
+        # Disclosed, never applied -- see fab_pair_clearance_floor. Worth saying
+        # out loud because the netclass tier used to raise a too-small value
+        # back up and a ceiling stops it doing that.
+        print(f"  NOTE: {clearance}mm is below the {_fab_n}-layer fab "
+              f"clearance floor {_fab_clr:g}mm. Pricing at it anyway, because "
+              f"check_drc grades at it too -- but nothing can etch that.")
+
     board_edge_clearance, _edge_src = resolve_cap_edge_clearance(
         pcb_file, board_edge_clearance)
     print(f"  board-edge margin for caps: {board_edge_clearance}mm "
@@ -2465,7 +2580,8 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     st = _Repair(pcb_data, pcb_file, clearance, grid_step,
                  board_edge_clearance, near_margin, capture_radius,
                  default_via_size, cap_prefix, extra_locked,
-                 max_displacement_cap=max_displacement_cap)
+                 max_displacement_cap=max_displacement_cap,
+                 netclass_ceiling=netclass_ceiling)
 
     print(f"BGAs: {', '.join(st.bga_refs) or '(none)'}  "
           f"fanout vias: {len(st.vias)}  "
