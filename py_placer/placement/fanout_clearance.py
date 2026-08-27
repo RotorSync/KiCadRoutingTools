@@ -260,6 +260,17 @@ def fab_pair_clearance_floor(pcb_data):
     matters more since #768 than before it: the netclass tier used to rescue a
     too-small ``--clearance`` by raising the pair back up to the class, and a
     ceiling deliberately removes that rescue.
+
+    THE GUI DOES NOT AGREE WITH THIS, and the divergence is named rather than
+    papered over. Its ``_effective_geometry_floor`` ends in ``_fab_floored``,
+    so a dialog clearance below the bucket floor is PINNED UP before it ever
+    reaches this engine: the CLI prices 0.09 on a 2-layer board and says so,
+    the GUI prices 0.10. That pin predates #768 and applies to every geometry
+    knob the dialog owns, not just this one, so moving it is a change to the
+    GUI's floor policy rather than to this pass -- filed, not fixed here. What
+    #768 does change is that the CLI's value now reaches the pricing instead of
+    being raised back up by the netclass tier, which is what makes the two
+    fronts visibly differ where before they only differed in principle.
     """
     from fab_tiers import fab_floor_min
     # The SAME `.Cu` filter `resolve_drill_floors` and `_Repair.__init__` apply

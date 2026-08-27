@@ -2000,17 +2000,28 @@ class FanoutTab(wx.Panel):
                 clearance=fanout_config.get('clearance', defaults.BGA_CLEARANCE),
                 # #768: the --clearance ceiling. The CLI switches it on the
                 # PRESENCE of the flag; a dialog has no "absent", so the switch
-                # here is the condition that actually matters -- whether this tab
-                # is going to clamp the board's live DRC floors to that number
-                # (the `fix_drc_settings` gate on update_live_drc_floors below).
-                # Checked: the classes WILL be clamped, so pricing at the clamp
-                # is what KiCad will grade. Unchecked: the classes survive, so
-                # pricing must honour them, and the operator's dialog number
-                # stays the flat floor either way. Deliberately NOT a new
-                # control -- the one that exists already means exactly this.
+                # is the control that already MEANS "I am overriding the board's
+                # clearance": the Basic tab's Min Clearance override, exported
+                # as `clamp_netclasses` (swig_gui.py, `self.clearance_check`)
+                # and consumed as `clamp_nondefault_netclasses` by every other
+                # step. ai_plan.py:1283 spells the same equivalence.
+                #
+                # It is NOT `fix_drc_settings`, which an earlier cut of this
+                # change used, on the premise that a checked box means the
+                # classes get clamped. Measured, that premise is false:
+                # `update_live_drc_floors` writes `m_MinClearance` and the
+                # DEFAULT class only, carries no `clamp_nondefault_netclasses`,
+                # and this tab never calls `apply_targets_to_board`. Gated
+                # there, the GUI priced every pair at the ceiling and clamped no
+                # class at all -- pricing on the GIVEN branch and writing back
+                # on the OMITTED one, which is #768 pointing the other way.
+                #
+                # Default False, not True: an absent key means the operator
+                # never ticked the override, and the safe reading of that is
+                # "honour the board", which is what an omitted CLI flag means.
                 netclass_ceiling=(
                     fanout_config.get('clearance', defaults.BGA_CLEARANCE)
-                    if fanout_config.get('fix_drc_settings', True) else None),
+                    if fanout_config.get('clamp_netclasses', False) else None),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
                 # #733: the plugin used to pass NOTHING here, so it silently took
                 # the signature default whatever the board or the operator said,
@@ -2174,6 +2185,14 @@ class FanoutTab(wx.Panel):
             'clearance': shared.get('clearance', defaults.BGA_CLEARANCE),
             'grid_step': shared.get('grid_step', defaults.GRID_STEP),
             'via_size': shared.get('via_size', defaults.BGA_VIA_SIZE),
+            # #768: this path builds its config from a HANDFUL of shared keys,
+            # so anything the engine call reads off `fanout_config` and that is
+            # not listed here silently takes its `.get` default. That is how the
+            # first cut of the ceiling gate came to be INERT on the standalone
+            # and plan-executor path while looking correct on the inline one --
+            # the same shape as the #693 finding the parity ledger records.
+            'clamp_netclasses': shared.get('clamp_netclasses', False),
+            'fix_drc_settings': shared.get('fix_drc_settings', True),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones
         with redirect_prints_to_log(self.append_log):

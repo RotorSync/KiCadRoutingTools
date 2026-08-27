@@ -1460,10 +1460,18 @@ class PadClearanceModel:
         input file). A missing sibling is a strict no-op, never an error -- the
         model simply carries fewer sources.
 
-        `ceiling` (#768) caps the NETCLASS tier at a `--clearance` the caller
-        will clamp the output project to. Pass it only if you actually write
-        that clamp back; a consumer that grades and writes nothing must leave
-        it None, or it prices at a class KiCad will still enforce.
+        `ceiling` (#768) caps the NETCLASS tier at a `--clearance` that will
+        be clamped into the output project. The test is whether THE RUN THIS
+        PRICES FOR writes that clamp, not whether this process does: pass it
+        when the clamp lands, leave it None otherwise, or the pass prices at a
+        class KiCad will still enforce.
+
+        The distinction is not pedantic -- `animate_fanout_clearance.py` passes
+        a ceiling and writes no project at all, because it exists to VISUALISE
+        `place_fanout_clearance.py` and must price identically or the GIF shows
+        a repair the tool does not perform. `grade_pad_legality` and `quench`
+        leave it None for the opposite reason: nothing downstream of them
+        clamps anything.
         """
         path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
         fps = getattr(pcb_data, 'footprints', None) or {}

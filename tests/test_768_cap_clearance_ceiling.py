@@ -815,30 +815,70 @@ class TestTheWritebackWritesWhatWasPriced(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
-    """wx-free. The GUI has no "absent flag", so the switch is the condition
-    that actually matters: whether the tab is going to clamp the board's live
-    DRC floors to that number."""
+    """wx-free, and DELIBERATELY LIMITED to the two things source text can
+    actually decide. The behaviour lives in
+    `tests/gui_parity/test_768_cap_ceiling_real_dialog.py`, which drives the
+    real headless dialog and captures the kwargs the engine is handed.
+
+    That split is not tidiness. The first version of this class was two string
+    counts, and both were TRUE of a gate that was wrong (it read
+    `fix_drc_settings`, a box that clamps no net class at all) and, on the
+    standalone call path, inert (that key is not in the config that path
+    builds). A parity review found it by measuring the value; nothing textual
+    could have."""
 
     GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'fanout_gui.py')
+    SWIG = os.path.join(_ROOT, 'kicad_routing_plugin', 'swig_gui.py')
 
-    def test_the_cap_step_passes_a_ceiling_gated_on_fix_drc_settings(self):
-        with open(self.GUI, encoding='utf-8') as fh:
-            src = '\n'.join(l.split('#')[0] for l in fh.read().splitlines())
+    def _src(self, path):
+        with open(path, encoding='utf-8') as fh:
+            return '\n'.join(l.split('#')[0] for l in fh.read().splitlines())
+
+    def test_the_cap_step_passes_a_ceiling_gated_on_the_override(self):
+        """The gate must be `clamp_netclasses` -- the Min Clearance override,
+        which is the GUI's counterpart of "--clearance was GIVEN" everywhere
+        else in this dialog -- and must default to NO ceiling when the key is
+        absent, because an absent key means the operator never ticked it.
+
+        MUTATION: swap the key for `fix_drc_settings` -> this fails, and so do
+        4 checks in the real-dialog gate."""
+        src = self._src(self.GUI)
         m = re.search(r'netclass_ceiling=\((.*?)\),\n', src, re.S)
         self.assertIsNotNone(m, 'the GUI cap step passes no ceiling at all, so '
-                                'it still prices with max() and clamps with '
-                                'min() -- the #768 defect, GUI side')
-        self.assertIn("fix_drc_settings", m.group(1))
-        self.assertIn("else None", m.group(1))
+                                'it still prices with max() while clamping '
+                                'with min() -- the #768 defect, GUI side')
+        gate = m.group(1)
+        self.assertIn("clamp_netclasses", gate)
+        self.assertNotIn("fix_drc_settings", gate,
+                         'that box writes m_MinClearance and the Default class '
+                         'only; it clamps no net class, so it cannot be the '
+                         'ceiling switch')
+        self.assertIn("False", gate,
+                      'an absent clamp_netclasses must default to NO ceiling')
 
-    def test_the_gate_is_the_SAME_key_that_gates_the_floor_write(self):
-        """If these two ever diverge the GUI prices against a clamp it will not
-        apply, or applies one it did not price against."""
-        with open(self.GUI, encoding='utf-8') as fh:
-            src = fh.read()
-        self.assertEqual(src.count("_fcfg.get('fix_drc_settings', True)"), 1)
-        self.assertEqual(
-            src.count("fanout_config.get('fix_drc_settings', True)"), 1)
+    def test_the_fanout_tab_exports_the_override_at_all(self):
+        """It was the one step tab whose shared params did not carry it, so the
+        gate above had nothing to read on either call path."""
+        self.assertIn("'clamp_netclasses': self.clearance_check.GetValue(),",
+                      self._src(self.SWIG))
+
+    def test_the_standalone_path_carries_it_into_its_own_config(self):
+        """`run_cap_optimization` builds a config from a handful of shared keys
+        rather than passing them through, so a key it does not list reads as
+        its `.get` default however correct the gate is. That is how the first
+        cut of this change was inert on the plan-executor path while looking
+        right inline -- the #693 shape the parity ledger records."""
+        src = self._src(self.GUI)
+        self.assertIn("'clamp_netclasses': shared.get('clamp_netclasses', False),",
+                      src)
+
+    def test_the_real_dialog_gate_exists_and_is_registered(self):
+        """A behavioural claim this file cannot make must be made SOMEWHERE."""
+        gate = os.path.join(_ROOT, 'tests', 'gui_parity',
+                            'test_768_cap_ceiling_real_dialog.py')
+        self.assertTrue(os.path.isfile(gate),
+                        'the wx-free half above cannot detect a wrong gate; '
+                        'the real-dialog half is not optional')
 
 
 # ---------------------------------------------------------------------------

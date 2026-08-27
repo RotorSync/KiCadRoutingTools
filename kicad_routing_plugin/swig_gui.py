@@ -1772,6 +1772,15 @@ class RoutingDialog(wx.Dialog):
                 # to gate on. Unchecked must mean "change no DRC setting" on
                 # every tab, not just the ones that happened to pass it.
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
+                # #768: and the same tab was the ONE that never carried the
+                # Min-Clearance override either. That control is the GUI's
+                # counterpart of "--clearance was GIVEN" -- ai_plan.py:1283
+                # spells the equivalence where it clamps ("only when this plan
+                # routed with a --clearance ceiling (the Min-Clearance
+                # override)") -- and the cap pass needs it for exactly that:
+                # unchecked means the board's own classes stand, so they are
+                # what the pass must price at.
+                'clamp_netclasses': self.clearance_check.GetValue(),
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),

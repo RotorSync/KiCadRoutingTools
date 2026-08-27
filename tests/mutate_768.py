@@ -12,11 +12,15 @@ inert row recorded as an expected survivor is a finding, while an inert row
 quietly deleted is a hole. `writeback-spends-the-flag-not-the-priced-value` is
 the one here, and its reasoning is written beside it.
 
-FOUR targets, which is one more than any previous copy: the change spans the
-model (`legality.py`), the engine (`fanout_clearance.py`), the CLI main
-(`place_fanout_clearance.py`) and the GUI call site (`fanout_gui.py`). That
-spread is the point -- CLAUDE.md's CLI/GUI rule says a fix to one front is not
-automatically a fix to the other, and rows 20-21 are what hold the GUI to it.
+SEVEN targets, four more than any previous copy: the change spans the model
+(`legality.py`), the engine (`fanout_clearance.py`), the CLI main
+(`place_fanout_clearance.py`), the GUI call site (`fanout_gui.py`), the tab's
+shared params (`swig_gui.py`), the plan executor (`ai_plan.py`) and the manifest
+converter. That spread is the point -- CLAUDE.md's CLI/GUI rule says a fix to
+one front is not automatically a fix to the other, and a parity review proved it
+here the hard way: the first cut of the GUI gate read a checkbox that clamps no
+net class at all, and TWO string-count assertions passed it. The GUI rows now
+name the real-dialog gate, which captures the value the engine is handed.
 
 This is the FOURTH copy of this runner (`mutate_730.py`, `mutate_750.py`,
 `mutate_756.py`, `mutate_761.py`). It is not refactored into a shared one
@@ -62,10 +66,18 @@ LEG = os.path.join(_ROOT, 'py_placer', 'placement', 'legality.py')
 FC = os.path.join(_ROOT, 'py_placer', 'placement', 'fanout_clearance.py')
 CLI = os.path.join(_ROOT, 'py_placer', 'place_fanout_clearance.py')
 GUI = os.path.join(_ROOT, 'kicad_routing_plugin', 'fanout_gui.py')
+SWIG = os.path.join(_ROOT, 'kicad_routing_plugin', 'swig_gui.py')
+PLAN = os.path.join(_ROOT, 'kicad_routing_plugin', 'ai_plan.py')
 MAN = os.path.join(_ROOT, 'tests', 'stress', 'manifest_to_plan.py')
-TARGETS = {'leg': LEG, 'fc': FC, 'cli': CLI, 'gui': GUI, 'man': MAN}
+TARGETS = {'leg': LEG, 'fc': FC, 'cli': CLI, 'gui': GUI, 'swig': SWIG,
+           'plan': PLAN, 'man': MAN}
 
 T768 = os.path.join(_TESTS, 'test_768_cap_clearance_ceiling.py')
+# The real headless dialog. Not a unittest -- it exits non-zero on failure,
+# which is all the runner's kill rule needs. Rows touching the GUI name it,
+# because the wx-free half deliberately cannot decide a VALUE.
+TDLG = os.path.join(_TESTS, 'gui_parity',
+                    'test_768_cap_ceiling_real_dialog.py')
 T697 = os.path.join(_TESTS, 'test_697_placement_pad_clearance.py')
 T725 = os.path.join(_TESTS, 'test_725_fanout_clearance_pad_floors.py')
 
@@ -85,7 +97,14 @@ _HOLE_KW = """                hole_clearance=board_constraint(args.input_file,
 
 _GUI_CEILING = """                netclass_ceiling=(
                     fanout_config.get('clearance', defaults.BGA_CLEARANCE)
-                    if fanout_config.get('fix_drc_settings', True) else None),
+                    if fanout_config.get('clamp_netclasses', False) else None),
+"""
+
+_PLAN_UNTICK = """            if step["action"] == "optimize_caps" and not (
+                    step.get("params") or {}).get("clearance"):
+                _cc = getattr(self.dialog, 'clearance_check', None)
+                if _cc is not None and _cc.GetValue():
+                    _cc.SetValue(False)
 """
 
 ROWS = [
@@ -197,12 +216,40 @@ ROWS = [
 
     # ---- the GUI half (CLAUDE.md: a CLI fix is not a GUI fix) ------------
     ('gui-ceiling-ungated', 'gui',
-     "                    if fanout_config.get('fix_drc_settings', True) else None),",
+     "                    if fanout_config.get('clamp_netclasses', False) else None),",
      '                    if True else None),',
-     (T768,), 'KILLED'),
+     (T768, TDLG), 'KILLED'),
     ('gui-no-ceiling', 'gui',
      _GUI_CEILING, '',
-     (T768,), 'KILLED'),
+     (T768, TDLG), 'KILLED'),
+    # THE DEFECT THE FIRST CUT SHIPPED. `fix_drc_settings` clamps no net class
+    # at all -- update_live_drc_floors writes m_MinClearance and the Default
+    # class only -- so gated there the GUI prices on the GIVEN branch and writes
+    # back on the OMITTED one. Found by a parity review measuring the value,
+    # after two string-count assertions passed it.
+    ('gui-gate-is-fix-drc-settings', 'gui',
+     "                    if fanout_config.get('clamp_netclasses', False) else None),",
+     "                    if fanout_config.get('fix_drc_settings', True) else None),",
+     (T768, TDLG), 'KILLED'),
+    # Absent key must mean NO ceiling: True here is the same defect arriving
+    # through the default rather than through the key.
+    ('gui-absent-key-defaults-to-clamping', 'gui',
+     "fanout_config.get('clamp_netclasses', False) else None),",
+     "fanout_config.get('clamp_netclasses', True) else None),",
+     (TDLG,), 'KILLED'),
+    ('gui-standalone-cfg-drops-the-key', 'gui',
+     "            'clamp_netclasses': shared.get('clamp_netclasses', False),\n",
+     '',
+     (T768, TDLG), 'KILLED'),
+    ('fanout-tab-stops-exporting-the-override', 'swig',
+     "                'clamp_netclasses': self.clearance_check.GetValue(),\n",
+     '',
+     (T768, TDLG), 'KILLED'),
+    # #768's plan-executor half: an OMITTED --clearance must not inherit the
+    # preceding fanout step's override and become a GIVEN one.
+    ('plan-inherits-the-given-branch', 'plan',
+     _PLAN_UNTICK, '',
+     (TDLG,), 'KILLED'),
 
     # ---- the recorded-manifest round trip --------------------------------
     # Anchored on the comment, not the row: `'--clearance': 'clearance',` is

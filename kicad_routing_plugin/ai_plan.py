@@ -1353,6 +1353,28 @@ class PlanExecutor:
             # runs it at the wrong clearance and it stops moving the caps. So
             # skip the per-step reset for optimize_caps and let it keep the
             # fanout step's live control state.
+            # #768: inheriting the VALUE is right, inheriting the SEMANTIC
+            # BIT is not. Since #768 the PRESENCE of --clearance decides whether
+            # the cap step caps the net classes and clamps the project, so a
+            # step that carries no `clearance` param must run the OMITTED
+            # branch -- and with the Min-Clearance override left ticked by the
+            # preceding fanout step, it would run the GIVEN one. Unticking it
+            # also lands the right flat value: `_effective_clearance()` then
+            # returns the board's own Default class, which is exactly what
+            # `resolve_pair_clearance(pcb_file, None)` gives the CLI.
+            #
+            # A step that DOES carry `clearance` is unaffected: apply_step_params
+            # ticks the override for it two lines below. That case exists now
+            # because manifest_to_plan carries the flag into the step (#768);
+            # before it did not, which is why this exception was blanket.
+            if step["action"] == "optimize_caps" and not (
+                    step.get("params") or {}).get("clearance"):
+                _cc = getattr(self.dialog, 'clearance_check', None)
+                if _cc is not None and _cc.GetValue():
+                    _cc.SetValue(False)
+                    self.log("AI plan: optimize_caps has no --clearance; "
+                             "cleared the Min-Clearance override so it runs at "
+                             "the board's own class, as the CLI does")
             if (step["action"] != "optimize_caps"
                     and hasattr(self.dialog, 'reset_params_to_defaults')):
                 try:
