@@ -95,10 +95,8 @@ _HOLE_KW = """                hole_clearance=board_constraint(args.input_file,
                                                 'min_hole_clearance'),
 """
 
-_GUI_CEILING = """                netclass_ceiling=(
-                    fanout_config.get('clearance', defaults.BGA_CLEARANCE)
-                    if fanout_config.get('clamp_netclasses', False) else None),
-"""
+_GUI_CEILING = ("                netclass_ceiling="
+                "fanout_config.get('clearance_ceiling'),\n")
 
 _PLAN_UNTICK = """            if step["action"] == "optimize_caps" and not (
                     step.get("params") or {}).get("clearance"):
@@ -199,26 +197,33 @@ ROWS = [
      '        _write_drc_floors()\n',
      '        print(f"Wrote {args.output_file} (unchanged copy)")\n',
      (T768,), 'KILLED'),
-    # EXPECTED SURVIVOR, and the reason is worth recording rather than hiding.
-    # `_priced` and `args.clearance` are provably equal whenever the flag is
-    # given (the ceiling is min(Default, flag), and compute_targets is
-    # lower-only, so a target above the current value is a no-op either way),
-    # and when the flag is OMITTED `fix_project_for_output` falls back to
-    # `project_copper_clearance`, which is the same Default class `_priced`
-    # resolved to. So no board in the corpus can tell them apart. `_priced` is
-    # kept because it is the honest expression of "write back what you priced
-    # at" -- but nothing here can prove that, and pretending otherwise with a
-    # KILLED expectation would be the folklore this file exists to prevent.
-    ('writeback-spends-the-flag-not-the-priced-value', 'cli',
-     '                clearance=_priced,',
-     '                clearance=args.clearance,',
-     (T768,), 'SURVIVED'),
+    # This row REPLACES an expected survivor, and the replacement is the
+    # finding. The shipped code used to pass `_priced` (= min(Default, ceiling))
+    # and the battery's row for it SURVIVED, correctly: on every board it could
+    # reach, Default >= ceiling and the two are equal. An adversarial review
+    # found the case that is not -- a class BETWEEN the Default and the ceiling
+    # is priced at the ceiling and was shipped at the Default. The writeback is
+    # lower-only, so passing the CEILING leaves each class at min(its own,
+    # ceiling), which is what was priced, per class.
+    ('writeback-clamps-to-the-base-not-the-ceiling', 'cli',
+     '            _target = args.clearance if args.clearance is not None else _priced',
+     '            _target = _priced',
+     (T768,), 'KILLED'),
+    ('hole-clearance-invented-from-the-ceiling', 'cli',
+     '''            if _hc is None:
+                try:
+                    _hc = resolve_npth_floor(pcb_data, args.input_file)
+                except Exception:                              # noqa: BLE001
+                    _hc = None
+''',
+     '',
+     (T768,), 'KILLED'),
+    ('nan-ceiling-accepted', 'cli',
+     '    if args.clearance is not None and not math.isfinite(args.clearance):',
+     '    if False:',
+     (T768,), 'KILLED'),
 
     # ---- the GUI half (CLAUDE.md: a CLI fix is not a GUI fix) ------------
-    ('gui-ceiling-ungated', 'gui',
-     "                    if fanout_config.get('clamp_netclasses', False) else None),",
-     '                    if True else None),',
-     (T768, TDLG), 'KILLED'),
     ('gui-no-ceiling', 'gui',
      _GUI_CEILING, '',
      (T768, TDLG), 'KILLED'),
@@ -228,18 +233,26 @@ ROWS = [
     # back on the OMITTED one. Found by a parity review measuring the value,
     # after two string-count assertions passed it.
     ('gui-gate-is-fix-drc-settings', 'gui',
-     "                    if fanout_config.get('clamp_netclasses', False) else None),",
-     "                    if fanout_config.get('fix_drc_settings', True) else None),",
+     "netclass_ceiling=fanout_config.get('clearance_ceiling'),",
+     "netclass_ceiling=(fanout_config.get('clearance')\n"
+     "                                  if fanout_config.get("
+     "'fix_drc_settings', True) else None),",
      (T768, TDLG), 'KILLED'),
-    # Absent key must mean NO ceiling: True here is the same defect arriving
-    # through the default rather than through the key.
-    ('gui-absent-key-defaults-to-clamping', 'gui',
-     "fanout_config.get('clamp_netclasses', False) else None),",
-     "fanout_config.get('clamp_netclasses', True) else None),",
+    # THE SECOND CUT'S DEFECT, found by an adversarial review: the RESOLVED base
+    # is already min(Default class, override), so handing it over as a ceiling
+    # caps a class BETWEEN the two down to the Default. Measured 22 cap
+    # clearance violations against main's 2 at the default dialog config.
+    ('gui-ceiling-is-the-resolved-base', 'gui',
+     "netclass_ceiling=fanout_config.get('clearance_ceiling'),",
+     "netclass_ceiling=fanout_config.get('clearance'),",
      (TDLG,), 'KILLED'),
     ('gui-standalone-cfg-drops-the-key', 'gui',
-     "            'clamp_netclasses': shared.get('clamp_netclasses', False),\n",
+     "            'clearance_ceiling': shared.get('clearance_ceiling'),\n",
      '',
+     (T768, TDLG), 'KILLED'),
+    ('fanout-tab-exports-the-RESOLVED-clearance-as-the-ceiling', 'swig',
+     "                'clearance_ceiling': (self.clearance.GetValue()",
+     "                'clearance_ceiling': (self._effective_clearance()",
      (T768, TDLG), 'KILLED'),
     # Anchored on the #768 comment above the row, not the row itself:
     # `clamp_netclasses` is exported by the signal, planes and now fanout

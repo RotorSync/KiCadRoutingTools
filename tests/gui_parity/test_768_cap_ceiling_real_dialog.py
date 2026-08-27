@@ -14,12 +14,17 @@ the two call paths, INERT (that key is not in the config that path builds). Only
 capturing the kwargs the engine is handed, from the real dialog, distinguishes
 those.
 
-THE RULE. The CLI switches the ceiling on the PRESENCE of `--clearance`. A
-dialog has no absent value, so the switch has to be the control that already
-means "I am overriding the board's clearance": the Basic tab's Min Clearance
-override, exported as `clamp_netclasses` (`swig_gui.py`, `self.clearance_check`)
-and consumed as `clamp_nondefault_netclasses` by the signal, planes and diff
-steps. `ai_plan.py` states the same equivalence where it clamps.
+THE RULE. The CLI switches the ceiling on the PRESENCE of `--clearance`, and
+the GUI now carries a value with exactly that contract: `clearance_ceiling` is
+the Basic tab's Min Clearance override spin value when its box is ticked, and
+None when it is not. Presence IS the switch, on both fronts.
+
+IT MUST BE THE RAW OVERRIDE, not `_effective_clearance()`. That helper already
+returns `min(Default class, override)`, which is right for the BASE and wrong
+for the ceiling: handed it, a class sitting BETWEEN the Default and the
+operator's number gets capped to the Default instead of to the number typed.
+An adversarial review measured 22 cap clearance violations against main's 2 at
+the default dialog configuration when the resolved base was passed as a ceiling.
 
 WHY NOT `fix_drc_settings`, which the first cut of #768 used: measured, that box
 does not clamp a net class at all. `update_live_drc_floors` writes
@@ -167,7 +172,7 @@ def main():
     # -- 2. the INLINE path, both positions of the override -----------------
     for ticked in (False, True):
         cfg = dict(shared)
-        cfg['clamp_netclasses'] = ticked
+        cfg['clearance_ceiling'] = 0.2 if ticked else None
         cfg['clearance'] = 0.2
         kw = _drive(cfg)
         got = kw.get('netclass_ceiling', ABSENT)
@@ -175,6 +180,24 @@ def main():
         check("inline: override %s -> ceiling %r"
               % ('CHECKED' if ticked else 'unchecked', want),
               got == want, "got %r" % (got,))
+
+    # -- 2b. THE RAW OVERRIDE, not the resolved base ------------------------
+    # flat_hierarchy declares Default 0.2. An override of 0.3 must arrive as
+    # 0.3: `_effective_clearance()` would hand over min(0.2, 0.3) = 0.2, which
+    # caps a class between the two to the Default instead of to what was typed.
+    dlg.clearance_check.SetValue(True)
+    dlg.clearance.SetValue(0.3)
+    shared_raw = tab.get_shared_params()
+    check("shared params export the RAW override, not min(Default, override)",
+          abs((shared_raw.get('clearance_ceiling') or 0) - 0.3) < 1e-9,
+          "clearance_ceiling=%r effective clearance=%r"
+          % (shared_raw.get('clearance_ceiling'), shared_raw.get('clearance')))
+    kw = _drive(dict(shared_raw))
+    got = kw.get('netclass_ceiling', ABSENT)
+    check("and the engine receives the raw override",
+          abs((got if isinstance(got, float) else -1) - 0.3) < 1e-9,
+          "got %r" % (got,))
+    dlg.clearance_check.SetValue(False)
 
     # -- 3. the STANDALONE path, which builds its own cfg -------------------
     # This is the one the plan executor uses, and the one an earlier cut of
@@ -188,6 +211,7 @@ def main():
             'grid_step': shared2.get('grid_step'),
             'via_size': shared2.get('via_size'),
             'clamp_netclasses': shared2.get('clamp_netclasses', False),
+            'clearance_ceiling': shared2.get('clearance_ceiling'),
             'fix_drc_settings': shared2.get('fix_drc_settings', True),
         })
         check("standalone: shared params report override %s"
@@ -206,7 +230,7 @@ def main():
     # override UNCHECKED, no value of the Fix-DRC box may produce a ceiling.
     for fix in (False, True):
         cfg = dict(shared)
-        cfg['clamp_netclasses'] = False
+        cfg['clearance_ceiling'] = None
         cfg['fix_drc_settings'] = fix
         cfg['clearance'] = 0.2
         kw = _drive(cfg)
@@ -216,18 +240,18 @@ def main():
 
     # -- 5. an ABSENT key means "honour the board" --------------------------
     cfg = dict(shared)
-    cfg.pop('clamp_netclasses', None)
+    cfg.pop('clearance_ceiling', None)
     cfg['clearance'] = 0.2
     kw = _drive(cfg)
     got = kw.get('netclass_ceiling', ABSENT)
-    check("an absent clamp_netclasses defaults to NO ceiling",
+    check("an absent clearance_ceiling defaults to NO ceiling",
           got is None, "got %r" % (got,))
 
     # -- 6. and the flat floor is unaffected by the switch ------------------
     # The operator's number stays the pair floor either way; only whether the
     # net CLASSES are capped by it moves.
     cfg = dict(shared)
-    cfg['clamp_netclasses'] = False
+    cfg['clearance_ceiling'] = None
     cfg['clearance'] = 0.2
     kw = _drive(cfg)
     check("the flat clearance is handed over regardless of the switch",

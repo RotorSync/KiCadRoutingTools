@@ -2019,9 +2019,7 @@ class FanoutTab(wx.Panel):
                 # Default False, not True: an absent key means the operator
                 # never ticked the override, and the safe reading of that is
                 # "honour the board", which is what an omitted CLI flag means.
-                netclass_ceiling=(
-                    fanout_config.get('clearance', defaults.BGA_CLEARANCE)
-                    if fanout_config.get('clamp_netclasses', False) else None),
+                netclass_ceiling=fanout_config.get('clearance_ceiling'),
                 grid_step=fanout_config.get('grid_step', defaults.GRID_STEP),
                 # #733: the plugin used to pass NOTHING here, so it silently took
                 # the signature default whatever the board or the operator said,
@@ -2192,6 +2190,7 @@ class FanoutTab(wx.Panel):
             # and plan-executor path while looking correct on the inline one --
             # the same shape as the #693 finding the parity ledger records.
             'clamp_netclasses': shared.get('clamp_netclasses', False),
+            'clearance_ceiling': shared.get('clearance_ceiling'),
             'fix_drc_settings': shared.get('fix_drc_settings', True),
         })
         from .gui_utils import redirect_prints_to_log, refill_all_zones

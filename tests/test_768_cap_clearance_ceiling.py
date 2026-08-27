@@ -792,6 +792,79 @@ class TestTheWritebackWritesWhatWasPriced(unittest.TestCase):
                                    msg='the copper ceiling redefined the '
                                        'copper-to-hole floor')
 
+    def test_a_class_BETWEEN_the_default_and_the_ceiling_ships_at_the_ceiling(self):
+        """The writeback clamps to the CEILING, not to the resolved base.
+
+        This is the one case the two differ, and my battery could not see it:
+        `_priced` is `min(Default, ceiling)`, so on a board whose Default sits
+        BELOW the ceiling, a class BETWEEN them is priced at the ceiling and was
+        shipped at the Default. Measured before the fix, Default 0.2 / Wide 0.4
+        / `--clearance 0.3`: 10 pairs priced at 0.3, project shipped Wide 0.2.
+        #768's own shape in the safe direction, and still #768's shape. Found by
+        an adversarial review, not by the battery, whose row for it SURVIVED
+        because every board it could reach has Default >= ceiling.
+
+        The writeback is lower-only, so passing the ceiling leaves each class at
+        min(its own, ceiling): Default 0.2 stays, Wide 0.4 becomes 0.3.
+
+        MUTATION: `_target = args.clearance if ... else _priced` -> `_priced`
+        -- battery row `writeback-clamps-to-the-base-not-the-ceiling`."""
+        with tempfile.TemporaryDirectory() as td:
+            src = _stage(td, FLAT, 'bin', classes=_classes(FLAT_DEFAULT,
+                                                           FLAT_WIDE))
+            dst = os.path.join(td, 'bout.kicad_pcb')
+            _run_cli(src, dst, '--clearance', 0.3)
+            got = _pro(dst)['classes']
+            self.assertAlmostEqual(got['Wide'], 0.3, places=9,
+                                   msg='a class between the Default and the '
+                                       'ceiling must ship AT the ceiling')
+            self.assertAlmostEqual(got['Default'], FLAT_DEFAULT, places=9,
+                                   msg='and one below it must not be raised')
+
+    def test_min_hole_clearance_is_not_INVENTED_from_the_ceiling_either(self):
+        """The board declares none, so `compute_targets` defaults the
+        copper-to-hole target to the copper clearance and `apply_targets`
+        CREATES the rule. Measured before the fix: a board declaring no
+        `min_hole_clearance`, run at `--clearance 0.1`, shipped
+        `min_hole_clearance: 0.1` while the pass priced that geometry at the
+        0.2 NPTH floor.
+
+        So the value written is the one the pass USED, board-declared or not.
+
+        MUTATION: drop the `if _hc is None` fallback -> battery row
+        `hole-clearance-invented-from-the-ceiling`."""
+        with tempfile.TemporaryDirectory() as td:
+            src = _stage(td, FLAT, 'nhc', classes=_classes(FLAT_DEFAULT))
+            pro = os.path.splitext(src)[0] + '.kicad_pro'
+            doc = json.load(open(pro, encoding='utf-8'))
+            doc['board']['design_settings']['rules'].pop('min_hole_clearance',
+                                                         None)
+            json.dump(doc, open(pro, 'w', encoding='utf-8'), indent=2)
+            dst = os.path.join(td, 'nhcout.kicad_pcb')
+            _run_cli(src, dst, '--clearance', 0.1)
+            got = _pro(dst)['min_hole_clearance']
+            self.assertIsNotNone(got)
+            self.assertGreater(got, 0.1,
+                               'the copper ceiling was written in as the '
+                               'copper-to-hole rule on a board that declares '
+                               'none; got %r' % (got,))
+
+    def test_a_non_finite_clearance_is_REFUSED(self):
+        """`type=float` accepts nan and inf, and `min(v, nan)` is `v` -- so a
+        nan ceiling disables the cap while the writeback still clamps, which
+        reproduces #768 through the code that fixes it.
+
+        MUTATION: drop the isfinite guard -> battery row `nan-ceiling-accepted`."""
+        with tempfile.TemporaryDirectory() as td:
+            src = _stage(td, FLAT, 'nan')
+            dst = os.path.join(td, 'nanout.kicad_pcb')
+            r = run_utils.check(
+                [sys.executable, '-X', 'utf8', CLI, src, dst,
+                 '--clearance', 'nan'],
+                refuse='--clearance must be a finite number',
+                allow=('error: argument',))
+            self.assertNotEqual(r.returncode, 0)
+
     def test_a_run_that_MOVED_something_agrees_with_what_it_priced(self):
         """End to end on the one tracked board that actually moves caps, with
         a project this file staged. The claim is AGREEMENT, not a smaller
@@ -851,24 +924,31 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         MUTATION: swap the key for `fix_drc_settings` -> this fails, and so do
         4 checks in the real-dialog gate."""
         src = self._src(self.GUI)
-        m = re.search(r'netclass_ceiling=\((.*?)\),\n', src, re.S)
+        m = re.search(r'netclass_ceiling=([^\n]*)\n', src)
         self.assertIsNotNone(m, 'the GUI cap step passes no ceiling at all, so '
                                 'it still prices with max() while clamping '
                                 'with min() -- the #768 defect, GUI side')
         gate = m.group(1)
-        self.assertIn("clamp_netclasses", gate)
+        self.assertIn("clearance_ceiling", gate,
+                      'the ceiling must be the RAW override the tab exports, '
+                      'not a value already resolved to min(Default, it)')
         self.assertNotIn("fix_drc_settings", gate,
                          'that box writes m_MinClearance and the Default class '
                          'only; it clamps no net class, so it cannot be the '
                          'ceiling switch')
-        self.assertIn("False", gate,
-                      'an absent clamp_netclasses must default to NO ceiling')
+        self.assertNotIn("BGA_CLEARANCE", gate,
+                         'an absent ceiling must be None, not a packaged '
+                         'default: presence IS the switch')
 
     def test_the_fanout_tab_exports_the_override_at_all(self):
         """It was the one step tab whose shared params did not carry it, so the
         gate above had nothing to read on either call path."""
+        src = self._src(self.SWIG)
         self.assertIn("'clamp_netclasses': self.clearance_check.GetValue(),",
-                      self._src(self.SWIG))
+                      src)
+        self.assertIn("'clearance_ceiling': (self.clearance.GetValue()", src,
+                      'the ceiling must be the RAW spin value; '
+                      '_effective_clearance() is already min(Default, it)')
 
     def test_the_standalone_path_carries_it_into_its_own_config(self):
         """`run_cap_optimization` builds a config from a handful of shared keys
@@ -877,8 +957,9 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         cut of this change was inert on the plan-executor path while looking
         right inline -- the #693 shape the parity ledger records."""
         src = self._src(self.GUI)
-        self.assertIn("'clamp_netclasses': shared.get('clamp_netclasses', False),",
-                      src)
+        for key in ("'clamp_netclasses': shared.get('clamp_netclasses', False),",
+                    "'clearance_ceiling': shared.get('clearance_ceiling'),"):
+            self.assertIn(key, src)
 
     def test_the_real_dialog_gate_exists_and_is_registered(self):
         """A behavioural claim this file cannot make must be made SOMEWHERE."""

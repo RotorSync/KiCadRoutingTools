@@ -202,13 +202,22 @@ def resolve_pair_clearance(pcb_file, clearance=None):
                                 caller passes the same number as
                                 ``netclass_ceiling`` so the map is capped too.
 
-    This is `route.py`'s resolution (route.py:6165-6183) with the same
-    vocabulary as `list_nets.board_floor_knobs`, which is what the five sibling
-    placement CLIs use. It is spelled here rather than delegated to
-    `board_floor_knobs` for one reason: that helper has no notion of a ceiling,
-    so it cannot express ``min(Default, cli)`` -- handed an explicit value it
-    returns it verbatim as 'cli', which is the OMITTED branch's arithmetic
-    wearing the GIVEN branch's label.
+    This is `route.py`'s resolution with the same vocabulary as
+    `list_nets.board_floor_knobs`, which is what the five sibling placement CLIs
+    use. It is spelled here rather than delegated to `board_floor_knobs` for one
+    reason: that helper has no notion of a ceiling, so it cannot express
+    ``min(Default, cli)`` -- handed an explicit value it returns it verbatim as
+    'cli', which is the OMITTED branch's arithmetic wearing the GIVEN branch's
+    label.
+
+    IT DIVERGES FROM route.py ON ONE INPUT, deliberately, and the docstring used
+    to claim they were the same resolution: a DECLARED clearance of 0 or less.
+    route.py reads that straight (`board_default_netclass_clearance` returns
+    0.0, and only the hole/edge floors go through `resolve_cli_floor`'s unset
+    rule), so it would price at 0. This follows `board_floor_knobs`
+    (list_nets.py:352-355) and treats it as UNSET, because KiCad writes 0 into
+    these fields for "not configured" and a pass that priced every pair at 0
+    would move nothing and grade everything clean.
 
     NOT raise-only, and deliberately not wrapped at the fab floor. See
     `fab_pair_clearance_floor` below for why, and note that this is the opposite
@@ -275,9 +284,13 @@ def fab_pair_clearance_floor(pcb_data):
     from fab_tiers import fab_floor_min
     # The SAME `.Cu` filter `resolve_drill_floors` and `_Repair.__init__` apply
     # to the SAME field, so nothing in this pass can disagree about the bucket.
-    # The `or 2` fallback is check_drc's own (check_drc.py:2049,
-    # `len(copper_layers) if copper_layers else 2`): an unreadable layer list
-    # takes the CONSERVATIVE bucket, never bucket 0.
+    # The `or 2` fallback is check_drc's own (`len(copper_layers) if
+    # copper_layers else 2`, in its size-floor block): an unreadable layer list
+    # takes the CONSERVATIVE bucket, never bucket 0. check_drc counts that list
+    # WITHOUT the `.Cu` filter, so the two disagree on a layer list mixing
+    # copper and non-copper names -- unreachable through either parse path (the
+    # text one requires '.Cu' in the name, the pcbnew one maps copper ids
+    # through a canonical table), and the filter is the safer side of it.
     _cu = getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
     n = len([l for l in (_cu or []) if str(l).endswith('.Cu')]) or 2
     return float(fab_floor_min(n)['clearance']), n

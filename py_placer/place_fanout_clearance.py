@@ -33,6 +33,7 @@ vias, route)
 """
 import _path  # noqa: F401  (py_placer -> py_router/py_tools on sys.path)
 
+import math
 import os
 import sys  # declare_lever() below reads sys.argv -- without this the module
              # raised NameError on EVERY invocation, --help included (run 20)
@@ -74,9 +75,13 @@ Examples:
                              "down to it. OMITTED: each pair is priced at its own "
                              "net-class clearance (base = the board's Default "
                              "class from the sibling .kicad_pro, else "
-                             f"{defaults.CLEARANCE}) and the project is left "
-                             "alone. The PRESENCE of the flag is the clamp "
-                             "switch, exactly as in route.py.")
+                             f"{defaults.CLEARANCE}) and the net CLASSES are "
+                             "preserved. The PRESENCE of the flag is the clamp "
+                             "switch, exactly as in route.py. Note OMITTED "
+                             "preserves the clearance family specifically, not "
+                             "the whole project: the size minima, the "
+                             "severities and the fab-floor provenance are "
+                             "written either way (#441 chain of custody).")
     parser.add_argument("--grid-step", type=float, default=defaults.GRID_STEP,
                         help=f"Position snap in mm (default: {defaults.GRID_STEP})")
     parser.add_argument("--board-edge-clearance", type=float, default=None,
@@ -121,6 +126,13 @@ Examples:
                         help="Print each accepted move")
 
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
+    # #768: `type=float` accepts nan and inf. `min(v, nan)` is `v`, so a nan
+    # ceiling silently disables the cap while the writeback still clamps -- the
+    # #768 defect reproduced through the code that fixes it. Refused rather than
+    # guarded downstream, so the message names the argument.
+    if args.clearance is not None and not math.isfinite(args.clearance):
+        parser.error("--clearance must be a finite number, got %r"
+                     % (args.clearance,))
     from fix_kicad_drc_settings import warn_if_missing_project_floor
     warn_if_missing_project_floor(args.input_file)  # #441: a dropped sibling .kicad_pro strands the DRC floor
 
@@ -207,12 +219,36 @@ Examples:
             from fix_kicad_drc_settings import fix_project_for_output
             from list_nets import board_constraint
             from placement.fanout_clearance import resolve_pair_clearance
+            from placement.legality import resolve_npth_floor
             _priced, _ = resolve_pair_clearance(args.input_file, args.clearance)
+            # GIVEN, the value to clamp to is the CEILING, not the base. The
+            # writeback is lower-only, so passing the ceiling leaves every class
+            # at min(its own, ceiling) -- which IS what was priced, per class.
+            # Passing the base instead ships a class that sits BETWEEN the
+            # board's Default and the ceiling below the value it was priced at:
+            # measured, Default 0.2 / Wide 0.4 / --clearance 0.3 prices 10 pairs
+            # at 0.3 and shipped 0.2. That is #768's own shape in the safe
+            # direction, and it is still #768's shape.
+            # OMITTED, there is no ceiling and `_priced` is the board's own
+            # class, which the lower-only write then leaves alone.
+            _target = args.clearance if args.clearance is not None else _priced
+            # And the copper-to-hole floor is the one the pass USED. The board's
+            # own declaration when it has one; otherwise the NPTH floor the
+            # keep-outs were actually priced at, because `compute_targets`
+            # defaults this key to the copper clearance and `apply_targets`
+            # CREATES the rule when the project has none -- so a board that
+            # declared nothing got `--clearance` written in as its copper-to-hole
+            # rule while the pass had priced that geometry at 0.2.
+            _hc = board_constraint(args.input_file, 'min_hole_clearance')
+            if _hc is None:
+                try:
+                    _hc = resolve_npth_floor(pcb_data, args.input_file)
+                except Exception:                              # noqa: BLE001
+                    _hc = None
             fix_project_for_output(
                 args.output_file, input_pcb=args.input_file,
-                clearance=_priced,
-                hole_clearance=board_constraint(args.input_file,
-                                                'min_hole_clearance'),
+                clearance=_target,
+                hole_clearance=_hc,
                 clamp_nondefault_netclasses=args.clearance is not None)
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")

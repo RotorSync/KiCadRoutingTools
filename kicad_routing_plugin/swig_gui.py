@@ -1781,6 +1781,17 @@ class RoutingDialog(wx.Dialog):
                 # unchecked means the board's own classes stand, so they are
                 # what the pass must price at.
                 'clamp_netclasses': self.clearance_check.GetValue(),
+                # #768: the CEILING itself, and it must be the RAW override
+                # rather than `_effective_clearance()`. That helper already
+                # returns min(Default class, override), which is correct for the
+                # BASE and wrong for the ceiling: a class sitting BETWEEN the
+                # two would be capped to the Default class instead of to the
+                # number the operator typed. None when the box is unchecked,
+                # which gives this the same one-value contract `--clearance`
+                # has -- the presence of a value IS the switch.
+                'clearance_ceiling': (self.clearance.GetValue()
+                                      if self.clearance_check.GetValue()
+                                      else None),
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
