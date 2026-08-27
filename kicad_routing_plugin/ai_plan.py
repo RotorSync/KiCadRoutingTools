@@ -141,7 +141,20 @@ def _insert_cap_optimization(steps):
         if s["action"] == "fanout" and (s.get("kind") or "bga").lower() == "bga":
             last_bga = i
     if last_bga is not None:
-        steps.insert(last_bga + 1, {"action": "optimize_caps", "cap_prefix": "C,R,FB"})
+        # NO params, deliberately: this step INHERITS the preceding fanout's
+        # live control state, which is what the plan executor's reset exception
+        # exists to preserve.
+        #
+        # #772: it used to carry a TOP-LEVEL "cap_prefix": "C,R,FB" -- outside
+        # `params`, which apply_step_params never reads -- so it was inert while
+        # reading, in the plan JSON and in review, as though the prefix were
+        # being set. Nothing anywhere reads a top-level step key of that name
+        # (checked). Moving it INTO params would be WORSE than dropping it:
+        # since #772 a cap step that names a cap knob gets the SCOPED cap reset,
+        # so the auto-inserted step would stop inheriting the operator's
+        # interactive cap tweaks -- the one behaviour it is documented to have.
+        # The panel's own default is 'C,R,FB' regardless, so nothing changes.
+        steps.insert(last_bga + 1, {"action": "optimize_caps"})
 
 
 def _append_final_plane_verify(steps):
