@@ -59,7 +59,7 @@ THE MUTATION BATTERY, AS RUN (`tests/mutate_775.py`): **15 rows, 13 killed,
   10 fallback skips the geomless cap ...... 2 arms
   11 fallback aliases the whole list ...... 1 arm
   12 guard made unconditional ............. 1 arm  (736, the re-armed guard)
-  13 init prunes from an empty source ..... 13 arms
+  13 init prunes from an empty source ..... 14 arms
   14 INERT: a trailing comment names the de-pruned write ... SURVIVED
   15 INERT: the refresh iterates in sorted order ........... SURVIVED
 
@@ -595,7 +595,11 @@ class TestTheGradeIsUNCHANGEDByThePrune(unittest.TestCase):
             self.assertEqual(rows, rows2,
                              'the disclosure MOVED when the via view was '
                              'de-pruned -- the prune is not exact')
-    # MUTATION: drop any term of the predicate; de-prune the refresh.
+    # MUTATION: drop any term of the predicate. NOT the refresh: this arm
+    # builds a _Repair directly and never runs the pass, so it is provably
+    # insensitive to a de-pruned refresh -- an adversarial review caught
+    # the note claiming otherwise, which is the kind of over-claim that
+    # makes a battery's expectations unreadable.
 
 
 class TestTheExactnessMarginStaysPositive(unittest.TestCase):
@@ -661,7 +665,7 @@ class TestTheExactnessMarginStaysPositive(unittest.TestCase):
                 slack = span - overshoot - rmax
                 if worst is None or slack < worst[0]:
                     worst = (slack, os.path.basename(b), ref, span, rmax)
-                # the MAXIMUM is reported as well as the minimum: three
+                # the MAXIMUM is reported as well as the minimum: two
                 # docstrings quote it and no arm was printing it, and a
                 # number nothing reports is a number that drifts silently
                 # (a fact-check of this branch made exactly that point)

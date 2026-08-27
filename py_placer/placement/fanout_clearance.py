@@ -2028,8 +2028,11 @@ class _Repair:
         THE MARGIN IS THINNER THAN THE TRACK CHANNEL'S, and is stated rather
         than left to be rediscovered. The residual slack is
         `span - grid_overshoot - R_max`, where R_max is the largest
-        seed-centre-to-pad-corner distance over the four reachable rotations
-        and the overshoot is real and pre-existing (_candidate_positions snaps
+        seed-centre-to-pad-corner distance over the reachable rotations AND
+        the cap's own seed pose -- which is not among the four when a
+        footprint sits at a non-orthogonal angle, inert on today's corpus
+        where every seed_rot is a multiple of 90, and swept by the arm
+        regardless -- and the overshoot is real and pre-existing (_candidate_positions snaps
         AFTER its radius test, so a final pose can sit up to
         grid_step*sqrt(2)/2 past max_displacement_cap). Measured over
         every cap of every tracked board that offers one -- 115 caps on
