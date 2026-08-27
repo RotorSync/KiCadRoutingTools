@@ -1900,8 +1900,12 @@ class _Repair:
         _register_segment is the design rather than an accident.
 
         `keepout=None` means BUILD one -- this radius plus this net's own
-        upper bound, the same _item_reach the eff builders strip back off
-        element 3. That is __init__'s question. A RELOCATION asks the other
+        upper bound, spelled exactly as __init__ spelled it inline. That is
+        __init__'s question. Note element 3 is NOT strip-back territory on
+        this channel, unlike the track one: since #732 _via_effs reads the
+        radius out of the map and uses element 3 verbatim only for a tuple the
+        map does not carry, which is why the map exists at all. A RELOCATION
+        asks the other
         one, and must CARRY the keep-out it was handed, verbatim: a moved via
         keeps its requirement, and a tuple a test assigned wholesale carries
         its own keep-out convention, which re-deriving would silently
