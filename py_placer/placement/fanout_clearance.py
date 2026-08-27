@@ -2586,6 +2586,13 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
     # resolution step. Printed unconditionally, for the reason spelled above the
     # edge margin: an operator reading a transcript should not have to know
     # which front invoked the pass to know what it priced at.
+    # NOTE FOR DIRECT CALLERS, and it is a behaviour change: `clearance` used to
+    # default to a flat 0.2 and be spent as given. It is now resolved, so an
+    # explicit `clearance=X` becomes min(the board's Default class, X) -- the
+    # GIVEN branch, because a caller that names a number is naming a ceiling.
+    # Pass None to get the board's own class. All three in-repo fronts were
+    # updated with this; an out-of-tree caller passing a number ABOVE the
+    # board's Default class will now price at the class instead.
     clearance, _clr_src = resolve_pair_clearance(pcb_file, clearance)
     print(f"  cap pair clearance: {clearance}mm ({_clr_src})")
     _fab_clr, _fab_n = fab_pair_clearance_floor(pcb_data)

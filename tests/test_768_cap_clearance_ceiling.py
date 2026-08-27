@@ -449,7 +449,20 @@ class TestTheOtherTwoCallersAreUntouched(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 class TestResolvePairClearance(unittest.TestCase):
-    """The two branches, as route.py:6165-6183 spells them."""
+    """The two branches, as route.py spells them, and the ONE input where they
+    deliberately differ.
+
+    A DECLARED clearance of 0 or less: route.py reads it straight
+    (`board_default_netclass_clearance` returns 0.0, and only the hole and edge
+    floors go through `resolve_cli_floor`'s unset rule), so it would price at 0.
+    This follows `board_floor_knobs` (list_nets.py:352-355) and treats it as
+    UNSET, because KiCad writes 0 into these fields for "not configured" and a
+    pass that priced every pair at 0 would move nothing and grade everything
+    clean.
+
+    Reachable, not theoretical: `allwinner_h3_ddr3` and `spartan6_4layer` both
+    declare exactly 0.0. This class used to claim the two resolutions were the
+    same; a fact-check refuted it."""
 
     def test_omitted_takes_the_boards_own_default_class(self):
         self.assertEqual(resolve_pair_clearance(FLAT, None),
@@ -466,7 +479,7 @@ class TestResolvePairClearance(unittest.TestCase):
     def test_given_caps_the_DEFAULT_class_too(self):
         """`min(Default, ceiling)`, not the ceiling and not the class. There is
         nothing special about the Default class -- CLAUDE.md says so in as many
-        words, and route.py:6183 is the same expression.
+        words, and route.py's base resolution is the same expression.
 
         MUTATION: `min(declared, clearance)` -> `clearance` -- battery row
         `base-ignores-the-declaration` (KILLED, 1 assertion: the ceiling-ABOVE
@@ -495,6 +508,23 @@ class TestResolvePairClearance(unittest.TestCase):
             self.assertEqual(resolve_pair_clearance(b, None),
                              (defaults.CLEARANCE, 'fixed default'))
             self.assertEqual(resolve_pair_clearance(b, 0.15), (0.15, 'cli'))
+
+    def test_it_DIVERGES_from_route_py_on_a_declared_zero(self):
+        """Pinned rather than left in prose, because the divergence is the
+        thing a reader is most likely to assume away.
+
+        MUTATION: make the `declared <= 0` guard match route.py (drop it) ->
+        battery row `zero-declaration-honoured`, and this arm names WHY."""
+        with tempfile.TemporaryDirectory() as td:
+            b = _stage(td, FLAT, 'zero_div', classes=_classes(0.0))
+            from list_nets import board_default_netclass_clearance
+            # route.py's input: the raw declaration, which is 0.0 and not None.
+            self.assertEqual(board_default_netclass_clearance(b), 0.0,
+                             'the fixture no longer declares a zero class; '
+                             'this arm proves nothing')
+            # ours: UNSET, so the packaged default rather than 0.
+            self.assertEqual(resolve_pair_clearance(b, None),
+                             (defaults.CLEARANCE, 'fixed default'))
 
     def test_an_unreadable_project_does_not_raise(self):
         with tempfile.TemporaryDirectory() as td:
