@@ -768,9 +768,23 @@ class TestTheRefreshStillRunsAfterTheRegistrar(unittest.TestCase):
                         'the copper this pass drew (#736)')
 
     def test_the_via_view_refresh_also_precedes_the_re_grade(self):
-        via = self._lines('st.cap_vias = {r: st.vias for r in st.caps}')
+        """#775 replaced the inline `cap_vias` comprehension with a method
+        on _Repair; the ordering constraint is unchanged and the spelling
+        follows it.
+
+        The RELOCATION half is asserted here too, which it was not before.
+        The refresh READS the list the registrar repairs, so refreshing
+        first leaves every cap holding pre-move tuples -- a phantom via at
+        the landing and a hole where the barrel really is. That ordering had
+        only a behavioural killer (mutate_747's own row); now it has a
+        structural one too."""
+        via = self._lines('st.refresh_cap_vias()')
+        reloc = self._lines('st.relocate_vias(via_moves)')
         grade = self._lines('resolved, unresolved = _grade()')
-        self.assertEqual(len(via), 1)
+        self.assertEqual(len(via), 1, 'the refresh moved or was duplicated')
+        self.assertEqual(len(reloc), 1)
+        self.assertLess(reloc[0], via[0],
+                        'the refresh now runs BEFORE the registrar it reads')
         self.assertLess(via[0], grade[1])
 
     def test_swept_is_bound_before_the_re_grade_rebinds_resolved(self):

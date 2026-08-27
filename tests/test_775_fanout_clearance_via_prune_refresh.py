@@ -250,7 +250,7 @@ class TestTheRefreshRePrunesInsteadOfDePruning(unittest.TestCase):
             pcb, _v = _board(VIA_CLEAR, 'F.Cu', second_cap=True)
             pcb.vias.append(make_via(FAR_VIA_X, CAP_XY[1], net_id=FAR_NET,
                                      size=V_SIZE, drill=V_DRILL))
-            cls.res, cls.st, cls.out = _run(pcb, path)
+            cls.res, cls.st, cls.out, cls.pre = _run(pcb, path)
 
     def test_the_run_actually_moved_a_via(self):
         self.assertTrue(self.res['via_moves'],
@@ -272,6 +272,18 @@ class TestTheRefreshRePrunesInsteadOfDePruning(unittest.TestCase):
             self.assertNotIn(far[0], st.cap_vias[ref],
                              'cap %s can be charged against a barrel 45mm '
                              'away' % ref)
+
+    def test_the_refresh_actually_REBUILT_every_view(self):
+        """#736's `_run` snapshots the per-cap lists at the seed frame, so
+        this class can say the refresh RAN rather than only that the lists
+        look pruned -- which they would if it had never been called at
+        all."""
+        st = self.st
+        self.assertTrue(self.pre, 'the seed frame never fired')
+        for ref in st.caps:
+            self.assertIsNot(st.cap_vias[ref], self.pre[ref],
+                             'cap %s kept its construction-time list '
+                             'through a run that moved a via' % ref)
 
     def test_at_least_one_view_is_strictly_shorter(self):
         st = self.st

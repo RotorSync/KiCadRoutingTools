@@ -6,7 +6,9 @@ nudger does TWO things to the board: it moves vias, and it APPENDS new
 connector `Segment`s to `pcb_data.segments` to restore continuity back to each
 moved via's stub start.
 
-The re-grade refreshed only the via view (`st.cap_vias = {r: st.vias ...}`).
+The re-grade refreshed only the via view, and by pointing every cap at the
+whole board list (spelled `refresh_cap_vias` since #775 gave that its own
+method and made it re-prune).
 `st.segments`, `st.cap_segs` and `st._seg_floor_by_id` were snapshotted in
 `_Repair.__init__`, before those connectors existed, and nothing rebuilt them --
 so `_seg_shortfalls`, the PAD-SEGMENT channel of `graze_penalty`, and
@@ -120,10 +122,16 @@ Two more exist because the FIRST run of the battery let them through, and both
 are recorded rather than quietly fixed:
 
   * `if via_moves:` -> `if True:` changes no NUMBER, because the via prune is
-    exact and de-pruning grades identically. The first version of
-    `TestTheRefreshIsSkippedWhenNothingMoved` asserted only the track half and
-    the mutation survived. It is now caught on list IDENTITY -- `cap_vias[ref]
-    is not st.vias` -- which is the real consequence: an eff-matrix rebuild of
+    exact and re-pruning and de-pruning grade identically. This mutation has
+    now escaped TWO spellings of its killer. The first version of
+    `TestTheRefreshIsSkippedWhenNothingMoved` asserted only the track half
+    and it survived. The second caught it on `cap_vias[ref] is not st.vias`,
+    which #775 made VACUOUS -- a re-pruning refresh never yields the board
+    list either -- measured, not predicted: with #775 in and the guard
+    mutated, this file passed. It is now caught on the identity of the list
+    `__init__` built, snapshotted at the seed frame through `on_move`, with
+    a positive control beside it so a DELETED refresh cannot satisfy it.
+    The consequence it guards is unchanged: an eff-matrix rebuild of
     n_pads x n_ALL_vias per cap, on every board that reaches the nudger and
     moves nothing, i.e. every tracked board at the shipped defaults.
   * anchoring the prune on `cap.rect()` instead of `self._cap_geom` survived
@@ -328,22 +336,33 @@ def _run(pcb, path, **kw):
     max_displacement=0.0 with max_passes=1 is the BOXED cap of #313 expressed
     as a budget rather than as a wall of obstacle geometry -- the same rig
     tests/test_fanout_clearance.py's via-clear-fallback check uses.
+
+    THE FOURTH RETURN is the SEED-FRAME snapshot of the per-cap via lists
+    (#775). `on_move` fires at the seed placement, BEFORE the nudge, with the
+    live object, so it is the only way to see what __init__ built. It holds
+    the LIST OBJECTS and not their ids: the refresh frees what it replaces,
+    and CPython recycles a freed list's id readily, so an id-keyed snapshot
+    can report "unchanged" about two different objects.
     """
-    seen, buf = [], io.StringIO()
+    seen, pre, buf = [], {}, io.StringIO()
+
+    def _hook(st):
+        seen.append(st)
+        if len(seen) == 1:
+            pre.update({r: st.cap_vias[r] for r in st.caps})
+
     with contextlib.redirect_stdout(buf):
         res = repair_fanout_clearance(
             pcb, path, clearance=CLEAR, cap_prefix='C',
             max_displacement=0.0, max_passes=1, allow_rotations=False,
-            via_clear_fallback=False, on_move=lambda st: seen.append(st), **kw)
-    return res, (seen[0] if seen else None), buf.getvalue()
+            via_clear_fallback=False, on_move=_hook, **kw)
+    return res, (seen[0] if seen else None), buf.getvalue(), pre
 
 
 def _arm(via_x, zone_layer, **kw):
     with _stub(kw.pop('classes', None)) as path:
         pcb, v = _board(via_x, zone_layer, **kw)
-        pre = None
-
-        res, st, out = _run(pcb, path)
+        res, st, out, pre = _run(pcb, path)
         return pcb, v, res, st, out, pre
 
 
@@ -656,29 +675,56 @@ class TestTheRefreshIsSkippedWhenNothingMoved(unittest.TestCase):
             before = {r: st_probe.cap_segs[r] for r in st_probe.caps}
             segs_before = st_probe.segments
 
-            res, st, out = _run(pcb, path)
+            res, st, out, pre = _run(pcb, path)
         self.assertIn('no clear spot', out)
         self.assertEqual(res['via_moves'], [])
         # the run built its OWN _Repair, so compare the live one's identities
         self.assertEqual(len(st.segments), 0)
+        self.assertTrue(pre, 'the seed frame never fired, so every identity '
+                             'assertion below is vacuous')
         for ref in st.caps:
             self.assertEqual(st.cap_segs[ref], [])
             # ...and the VIA half of the refresh did not run either. This is
-            # the only observable consequence of an unguarded refresh: the
-            # `cap_vias` line DE-prunes every cap onto the whole-board list,
-            # which is numerically identical (the prune is exact) but pays an
-            # eff-matrix rebuild of n_pads x n_ALL_vias per cap on every board
-            # that reaches the nudger and moves nothing -- which is every
-            # tracked board at the shipped defaults.
-            self.assertIsNot(st.cap_vias[ref], st.vias,
-                             'the per-cap via lists were de-pruned on a run '
-                             'that moved NO via -- the refresh is unguarded')
+            # the only observable consequence of an unguarded refresh, and
+            # since #775 it is no longer `is not st.vias`: the refresh
+            # RE-prunes, so a pruned list is not the board list whether it ran
+            # or not, and that spelling went vacuous. MEASURED, not predicted
+            # -- with #775 in and the guard mutated to `if True:`, this file
+            # passed. What still discriminates is the identity of the list
+            # __init__ built: the refresh ASSIGNS a new one per cap,
+            # unconditionally, and every _cap_via_eff memo dies with the old
+            # one. That is the cost the guard exists to avoid -- an eff-matrix
+            # rebuild of n_pads x n_ALL_vias per cap on every board that
+            # reaches the nudger and moves nothing, which is every tracked
+            # board at the shipped defaults.
+            self.assertIs(st.cap_vias[ref], pre[ref],
+                          'the per-cap via list for %s was REBUILT on a run '
+                          'that moved NO via -- the refresh is unguarded'
+                          % ref)
         self.assertEqual(len(segs_before), 0)
         self.assertEqual(sorted(before), sorted(st.caps))
     # MUTATION: `if via_moves:` -> `if True:`. It changes no number -- the
-    # via prune is exact, so de-pruning grades the same -- which is why the
-    # assertion above is on list IDENTITY. The first version of this class
-    # asserted only the track half and the mutation SURVIVED the battery.
+    # via prune is exact, so re-pruning and de-pruning both grade the same --
+    # which is why the assertion above is on list IDENTITY. The first version
+    # of this class asserted only the track half and the mutation SURVIVED
+    # the battery; the second asserted `is not st.vias`, which #775 made
+    # vacuous.
+
+    def test_a_run_that_DID_move_a_via_rebuilds_every_cap_via_list(self):
+        """POSITIVE CONTROL for the arm above (#775). Without it, a refresh
+        that had been deleted outright would satisfy every identity assertion
+        in this class -- the lists would be untouched because nothing touches
+        them -- and the guard would read as held."""
+        pcb, v, res, st, out, pre = _arm(VIA_CLEAR, 'F.Cu', second_cap=True)
+        self.assertTrue(res['via_moves'], out)
+        self.assertTrue(pre)
+        for ref in st.caps:
+            self.assertIsNot(st.cap_vias[ref], pre[ref],
+                             'cap %s kept its construction-time list through '
+                             'a run that DID move a via' % ref)
+            self.assertIsNot(st.cap_vias[ref], st.vias,
+                             'the refresh de-pruned instead of re-pruning')
+    # MUTATION: delete the refresh call.
 
 
 class TestTheSeedHalfOfTheDisclosureIgnoresPassCreatedCopper(unittest.TestCase):

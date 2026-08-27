@@ -683,8 +683,12 @@ class TestPruneRadiiStayExact(unittest.TestCase):
             b = len(getattr(st, name)[ANCHOR_CAP])
             self.assertGreater(b, a, '%s did not grow with the cap-side slack '
                                      '(%d -> %d)' % (name, a, b))
-    # MUTATION: `via_slack = 0.0`, or drop `max(0.0, cap_mf - clearance)` from
-    # `seg_reach` -> that list stops growing.
+    # MUTATION: `via_slack = 0.0` in `_prune_vias`, or drop
+    # `max(0.0, cap.max_floor - self.clearance)` from `_prune_segs`'
+    # `seg_reach` -> that list stops growing. Since #775 the via term has ONE
+    # spelling, so this note now covers the construction prune AND the
+    # post-nudge refresh; before it, a mutation could have zeroed one and
+    # left the other intact.
 
     def test_the_seed_baseline_is_in_the_SAME_currency(self):
         """A baseline priced flat while candidates price at the requirement
