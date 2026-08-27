@@ -2031,8 +2031,10 @@ class _Repair:
         seed-centre-to-pad-corner distance over the four reachable rotations
         and the overshoot is real and pre-existing (_candidate_positions snaps
         AFTER its radius test, so a final pose can sit up to
-        grid_step*sqrt(2)/2 past max_displacement_cap). Measured over the 73
-        caps of the 22 tracked boards: minimum +0.1267mm, maximum +0.2657mm,
+        grid_step*sqrt(2)/2 past max_displacement_cap). Measured over
+        every cap of every tracked board that offers one -- 115 caps on
+        5 of the 22 -- the minimum is +0.1267mm (orangecrab_ext_pll R14,
+        span 0.7826, R_max 0.5852), the maximum +0.2716mm, and it is
         never negative. The track pruner records +1.009mm for the same
         quantity, because its bound carries `2*span + clearance` where this one
         carries `span`. That is a fact about the bound __init__ has always
