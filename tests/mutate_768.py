@@ -205,8 +205,15 @@ ROWS = [
      (T768,), 'KILLED'),
 
     # ---- the recorded-manifest round trip --------------------------------
+    # Anchored on the comment, not the row: `'--clearance': 'clearance',` is
+    # ALSO FLAG_PARAMS' own row, so the bare string matched twice and the
+    # battery reported BROKEN -- which is the runner behaving correctly.
     ('manifest-drops-clearance', 'man',
-     "    '--clearance': 'clearance',\n", '',
+     "    # one parameter whose two branches decide whether the step clamps the\n"
+     "    # project at all.\n"
+     "    '--clearance': 'clearance',\n",
+     "    # one parameter whose two branches decide whether the step clamps the\n"
+     "    # project at all.\n",
      (T768,), 'KILLED'),
 ]
 

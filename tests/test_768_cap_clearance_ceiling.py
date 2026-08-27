@@ -76,7 +76,24 @@ Conventions (from #725/#731/#732/#733/#737/#750/#756 and CLAUDE.md): REAL parser
 dataclasses; every assertion names the single-line MUTATION that must kill it,
 with the count the battery measured; assert you are ON the branch before
 asserting about it; every refusal paired with an acceptance that still happens.
-The battery ships as `tests/mutate_768.py`.
+The battery ships as `tests/mutate_768.py`. Measured, 23 rows:
+
+    22 KILLED, 1 SURVIVED (expected), 0 BROKEN
+
+The expected survivor is `writeback-spends-the-flag-not-the-priced-value`:
+`clearance=_priced` and `clearance=args.clearance` are provably equal on every
+board reachable here, so nothing can prove the honest spelling is the one that
+shipped. It is recorded rather than deleted, because an inert row quietly
+removed is a hole and an inert row recorded is a finding.
+
+TWO OF THESE ARMS EXIST BECAUSE THE BATTERY FOUND THEM HOLLOW, and both are
+labelled where they sit: the layer-degradation arm's three degenerate lists all
+had length 0 or 2, so a resolver that dropped the `.Cu` filter still bucketed
+correctly and the row SURVIVED; and the cap-is-a-min arm compared the value SET
+only, so a mutant that put EVERY net at the ceiling matched it. Six `# MUTATION:`
+notes also carried counts written before the run, one of them naming the wrong
+test entirely -- corrected here against what was measured, which is the whole
+reason `test_750:151-155` records the same mistake.
 """
 RUN_ALL_FAST_OK = True
 RUN_ALL_TIMEOUT = 1800
@@ -129,6 +146,7 @@ FLAT_DEFAULT = 0.2      # its Default net class
 FLAT_WIDE = 0.4         # its second class, the one clamp_nondefault_netclasses
                         # silently took to 0.25 with no flag given at all
 CLI = os.path.join(_ROOT, 'py_placer', 'place_fanout_clearance.py')
+ANIM = os.path.join(_ROOT, 'py_tools', 'animate_fanout_clearance.py')
 
 
 def _classes(clearance, wide=None):
@@ -234,8 +252,10 @@ class TestTheCapIsAMinNotADrop(unittest.TestCase):
         side; it is restated here so the default can never quietly become
         opt-out without a named test going red.
 
-        MUTATION: `if ceiling is not None:` -> `if True:` (with ceiling=None
-        then crashing on the comparison) -- battery row `cap-guard-dropped`."""
+        MUTATION: `if ceiling is not None:` -> `if ceiling is None:`, which
+        sends the uncapped path into `min(v, None)` -- battery row
+        `cap-guard-inverted`, the widest in the battery (KILLED, 10 assertions,
+        3 of them in test_697)."""
         m = self._model(FLAT_DEFAULT)
         self.assertEqual({round(v, 6) for v in m.net_floor.values()},
                          {FLAT_WIDE})
@@ -249,10 +269,23 @@ class TestTheCapIsAMinNotADrop(unittest.TestCase):
         This is the arm a `del by_name` or a `by_name = {}` mutant fails while
         the collapse arm below stays green.
 
+        THE MEMBERSHIP MATTERS AS MUCH AS THE VALUE, and the battery is why
+        this arm says so. It first compared only the value SET, and the row
+        `cap-is-assignment-not-min` -- `{n: ceiling}` instead of
+        `{n: min(v, ceiling)}` -- SURVIVED it: that mutant puts EVERY net at
+        0.3, so `{0.3}` still matched while the map had gone from 4 nets to
+        111. Only `test_a_ceiling_ABOVE_every_class_changes_nothing` caught it.
+
         MUTATION: `min(v, ceiling)` -> `ceiling` -- battery row
-        `cap-is-assignment-not-min` (KILLED here, 3 assertions)."""
+        `cap-is-assignment-not-min` (KILLED, 2 assertions, one of them here)."""
         m = self._model(FLAT_DEFAULT, ceiling=0.3)
+        bare = self._model(FLAT_DEFAULT)
         self.assertEqual({round(v, 6) for v in m.net_floor.values()}, {0.3})
+        self.assertEqual(sorted(m.net_floor), sorted(bare.net_floor),
+                         'the ceiling changed WHICH nets are admitted, not '
+                         'just their value: %d nets capped vs %d admitted '
+                         'without a ceiling'
+                         % (len(m.net_floor), len(bare.net_floor)))
         self.assertTrue(m.active)
         # and the pair really resolves there, not just the map
         wide = _nets_by_class(m, 0.3)
@@ -268,7 +301,7 @@ class TestTheCapIsAMinNotADrop(unittest.TestCase):
         original flat path.
 
         MUTATION: drop the `min(v, ceiling)` line entirely -- battery row
-        `cap-removed`."""
+        `cap-removed` (KILLED, 3 assertions)."""
         m = self._model(0.1, ceiling=0.1)
         self.assertEqual(m.net_floor, {})
         self.assertFalse(m.active,
@@ -287,7 +320,8 @@ class TestTheCapIsAMinNotADrop(unittest.TestCase):
         """A silent cap is the same defect in the other direction: the operator
         cannot tell a class that was honoured from one that was overruled.
 
-        MUTATION: delete the notes.append -> battery row `cap-not-disclosed`."""
+        MUTATION: delete the notes.append -> battery row `cap-not-disclosed`
+        (KILLED, 1 assertion -- this one)."""
         m = self._model(0.1, ceiling=0.1)
         capped = [n for n in m.notes if 'capped at the' in n]
         self.assertEqual(len(capped), 1, m.notes)
@@ -427,7 +461,9 @@ class TestResolvePairClearance(unittest.TestCase):
         words, and route.py:6183 is the same expression.
 
         MUTATION: `min(declared, clearance)` -> `clearance` -- battery row
-        `base-ignores-the-declaration` (KILLED, 2 assertions)."""
+        `base-ignores-the-declaration` (KILLED, 1 assertion: the ceiling-ABOVE
+        case below. The ceiling-BELOW case cannot catch it, because there the
+        two expressions agree)."""
         # ceiling BELOW the class: the ceiling wins
         self.assertEqual(resolve_pair_clearance(FLAT, 0.1), (0.1, 'cli'))
         # ceiling ABOVE the class: the CLASS wins, because a ceiling is a cap
@@ -445,7 +481,7 @@ class TestResolvePairClearance(unittest.TestCase):
         encodes the same rule and this must not diverge from it.
 
         MUTATION: drop the `declared <= 0` guard -> battery row
-        `zero-declaration-honoured`."""
+        `zero-declaration-honoured` (KILLED, 1 assertion)."""
         with tempfile.TemporaryDirectory() as td:
             b = _stage(td, FLAT, 'zeroed', classes=_classes(0.0))
             self.assertEqual(resolve_pair_clearance(b, None),
@@ -510,7 +546,11 @@ class TestLayerCountIsNotAnAxis(unittest.TestCase):
         """`len(copper_layers) if copper_layers else 2` (check_drc.py:2049):
         an unreadable layer list takes the CONSERVATIVE bucket, never bucket 0.
 
-        MUTATION: drop the `or 2` -> battery row `layer-fallback-dropped`."""
+        MUTATIONS: drop the `or 2` -> battery row `layer-fallback-dropped`
+        (KILLED, 1). Drop the `.Cu` filter -> `layer-filter-dropped`, which
+        SURVIVED until this arm grew its last case: the three degenerate lists
+        all have length 0 or 2, so an unfiltered resolver still landed in
+        bucket 2 and the row passed against a defect it had introduced."""
         class _BI:
             def __init__(self, layers):
                 self.copper_layers = layers
@@ -523,6 +563,18 @@ class TestLayerCountIsNotAnAxis(unittest.TestCase):
         for layers in ([], None, ['F.Mask', 'Edge.Cuts']):
             self.assertEqual(fab_pair_clearance_floor(_P(layers)), (two, 2),
                              'layers=%r took the wrong bucket' % (layers,))
+        # THE DISCRIMINATING CASE, and the battery is why it is here: the three
+        # above all have length 0 or 2, so a resolver that dropped the `.Cu`
+        # filter outright still landed in bucket 2 and the row
+        # `layer-filter-dropped` SURVIVED. A real 2-layer board carries mask,
+        # silk and Edge.Cuts entries too, so the unfiltered length is 5 -- a
+        # DIFFERENT bucket from the 2 copper layers it actually has.
+        two_layer_board = ['F.Cu', 'B.Cu', 'F.Mask', 'F.SilkS', 'Edge.Cuts']
+        self.assertEqual(fab_pair_clearance_floor(_P(two_layer_board)),
+                         (two, 2),
+                         'the .Cu filter was dropped: a 2-copper-layer board '
+                         'carrying mask and silk entries bucketed as if it '
+                         'had %d copper layers' % len(two_layer_board))
 
         class _NoInfo:
             board_info = None
@@ -543,7 +595,7 @@ class TestLayerCountIsNotAnAxis(unittest.TestCase):
         deliberately stops it doing that.
 
         MUTATION: `if clearance < _fab_clr` -> `clearance = max(clearance,
-        _fab_clr)` -- battery row `sub-fab-clamped` (KILLED, 2 assertions)."""
+        _fab_clr)` -- battery row `sub-fab-clamped` (KILLED, 1 assertion)."""
         if not os.path.exists(NOPRO):
             self.skipTest('tigard fixture not present')
         pcb = parse_kicad_pcb(NOPRO)
@@ -588,7 +640,8 @@ class TestTheEngineResolvesAndDiscloses(unittest.TestCase):
         disclosed this number: the measured glasgow "omitted" run names no
         copper clearance anywhere in its transcript.
 
-        MUTATION: delete the print -> battery row `priced-not-disclosed`."""
+        MUTATION: delete the print -> battery row `priced-not-disclosed`
+        (KILLED, 3 assertions across three arms)."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             repair_fanout_clearance(parse_kicad_pcb(FLAT), FLAT)
@@ -604,15 +657,32 @@ class TestTheEngineResolvesAndDiscloses(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestTheCLI(unittest.TestCase):
 
-    def test_the_flag_declares_no_numeric_default(self):
-        """The source guard, alongside the one test_733:638-644 keeps for
-        --board-edge-clearance. Comment-stripped, because a docstring quoting
-        the old line would otherwise satisfy a plain `in` test -- the exact
-        false pass #756's fact-check found in its own source arm."""
-        with open(CLI, encoding='utf-8') as fh:
+    def test_neither_front_declares_a_numeric_default(self):
+        """The source guard, over the SAME two scripts test_733:638-644 covers
+        for --board-edge-clearance. The animator is the third front, and the
+        placement README promises it "gets the same answer" -- left with a
+        numeric default it would price with max(base, netclass) while the CLI
+        priced with the ceiling, so the GIF would show a repair the tool does
+        not perform.
+
+        Comment-stripped, because a docstring quoting the old line would
+        otherwise satisfy a plain `in` test -- the exact false pass #756's
+        fact-check found in its own source arm."""
+        for script in (CLI, ANIM):
+            with open(script, encoding='utf-8') as fh:
+                src = '\n'.join(l.split('#')[0]
+                                for l in fh.read().splitlines())
+            self.assertIn('"--clearance", type=float, default=None', src,
+                          os.path.basename(script))
+            self.assertNotIn('"--clearance", type=float, default=defaults',
+                             src, os.path.basename(script))
+
+    def test_the_animator_passes_the_same_ceiling(self):
+        """It writes no project, so it clamps nothing; it takes the ceiling
+        anyway because its job is to SHOW what the CLI does."""
+        with open(ANIM, encoding='utf-8') as fh:
             src = '\n'.join(l.split('#')[0] for l in fh.read().splitlines())
-        self.assertIn('"--clearance", type=float, default=None', src)
-        self.assertNotIn('"--clearance", type=float, default=defaults', src)
+        self.assertIn('netclass_ceiling=args.clearance', src)
 
     def test_the_ceiling_reaches_the_engine(self):
         with open(CLI, encoding='utf-8') as fh:
@@ -635,7 +705,8 @@ class TestTheWritebackWritesWhatWasPriced(unittest.TestCase):
         grade against.
 
         MUTATION: drop the `_write_drc_floors()` call from the copy branch --
-        battery row `769-copy-branch-unwritten` (KILLED, 2 assertions)."""
+        battery row `769-copy-branch-unwritten` (KILLED, 2 assertions: this one
+        and the custody arm, which is the pairing that makes #769 checkable)."""
         with tempfile.TemporaryDirectory() as td:
             src = _stage(td, FLAT, 'zin', classes=_classes(FLAT_DEFAULT,
                                                            FLAT_WIDE))
@@ -656,7 +727,7 @@ class TestTheWritebackWritesWhatWasPriced(unittest.TestCase):
         clamp_nondefault_netclasses defaults True.
 
         MUTATION: `clamp_nondefault_netclasses=args.clearance is not None` ->
-        `True` -- battery row `omitted-clamps-anyway` (KILLED, 2 assertions)."""
+        `True` -- battery row `omitted-clamps-anyway` (KILLED, 1 assertion)."""
         with tempfile.TemporaryDirectory() as td:
             src = _stage(td, FLAT, 'oin', classes=_classes(FLAT_DEFAULT,
                                                            FLAT_WIDE))
@@ -702,7 +773,7 @@ class TestTheWritebackWritesWhatWasPriced(unittest.TestCase):
         copper-to-hole, and this pass does not price that from it.
 
         MUTATION: drop the `hole_clearance=` argument -> battery row
-        `hole-clearance-rides-the-ceiling` (KILLED, 1 assertion)."""
+        `hole-clearance-rides-the-ceiling` (KILLED, 1 assertion -- this one)."""
         with tempfile.TemporaryDirectory() as td:
             src = _stage(td, FLAT, 'hin', classes=_classes(FLAT_DEFAULT),
                          hole_clearance=0.25)
