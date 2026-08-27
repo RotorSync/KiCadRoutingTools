@@ -2433,6 +2433,30 @@ class RoutingDialog(wx.Dialog):
 
         self.reset_params_to_defaults()
 
+    def reset_cap_params_to_defaults(self):
+        """Reset ONLY the BGA panel's "Cap Placement (advanced)" knobs (#772).
+
+        Separate from reset_params_to_defaults because the plan executor
+        deliberately SKIPS the full per-step reset for an `optimize_caps` step
+        -- it must inherit the preceding fanout's clearance / grid / via, see
+        ai_plan._next_step -- while still needing the CAP knobs at the CLI
+        defaults when the step names any of them.
+
+        BGAOptionsPanel.CAP_PARAM_DEFAULTS is the single table; the full reset
+        delegates here rather than keeping a second copy, which is the shape
+        #772 exists to remove.
+        """
+        opts = getattr(getattr(self, 'fanout_tab', None), 'bga_options', None)
+        if opts is None:
+            return
+        for _name, _val in getattr(type(opts), 'CAP_PARAM_DEFAULTS', ()):
+            _ctl = getattr(opts, _name, None)
+            if _ctl is not None:
+                try:
+                    _ctl.SetValue(_val)
+                except Exception:
+                    pass
+
     def reset_params_to_defaults(self):
         """Reset every routing PARAMETER control to routing_defaults --
         selections and the log untouched. The plan executor calls this
@@ -2515,8 +2539,6 @@ class RoutingDialog(wx.Dialog):
                     ('check_previous', False),
                     ('no_inner_top', False),
                     ('optimize_caps', False),
-                    ('cap_allow_rotation', True),
-                    ('cap_max_passes', 30),
                     ('underpad_escape', False),
                     ('allow_via_in_pad', False),
                     ('plane_drop', True),    # #424 drops: default ON
@@ -2534,6 +2556,17 @@ class RoutingDialog(wx.Dialog):
                         _ctl.SetSelection(0)
                     except Exception:
                         pass
+            # #772: the ten "Cap Placement (advanced)" knobs. Only THREE
+            # were ever reset here -- optimize_caps above, plus
+            # cap_allow_rotation and cap_max_passes, which have moved into
+            # the shared table. The other eight -- capture radius, near
+            # margin, search step, max displacement, displacement cap,
+            # growth, board-edge margin, movable prefix -- were not, so an
+            # interactive tweak or a restored session setting survived
+            # every plan step. CLAUDE.md: "add it to
+            # reset_params_to_defaults ... or the param leaks between
+            # steps". Delegated so the table has exactly one home.
+            self.reset_cap_params_to_defaults()
             # #381 D7: QFN width/clearance controls live on qfn_options; reset
             # them to the QFN-tuned defaults so a plan step doesn't inherit a
             # prior step's value (the plan executor resets through here).

@@ -819,6 +819,48 @@ class BGAOptionsPanel(wx.ScrolledWindow):
     # wx.Choice index -> engine escape_method value (order matches the dropdown)
     ESCAPE_METHODS = ('auto', 'channel', 'underpad', 'dogbone')
 
+    #: The "Cap Placement (advanced)" knobs: control attribute -> the value
+    #: the control is CREATED with -- which is ALSO
+    #: place_fanout_clearance.py's argparse default for the same flag and
+    #: repair_fanout_clearance's signature default for the same kwarg
+    #: (--capture-radius / --near-margin / --step / --max-displacement /
+    #: --max-displacement-cap / --displacement-growth /
+    #: --board-edge-clearance / --max-passes / --cap-prefix / --no-rotate).
+    #:
+    #: ONE table, three readers (#772):
+    #:   swig_gui.reset_params_to_defaults      CLAUDE.md's "add it to
+    #:       reset_params_to_defaults ... or the param leaks between
+    #:       steps". EIGHT of these ten had never been in it -- only
+    #:       optimize_caps, cap_allow_rotation and cap_max_passes were.
+    #:   swig_gui.reset_cap_params_to_defaults  the SCOPED reset the plan
+    #:       executor runs before a cap step that names any of them (the
+    #:       per-step reset is skipped for optimize_caps by design).
+    #:   ai_plan._next_step                     reads the NAMES, to decide
+    #:       whether the step named a cap knob at all.
+    #:
+    #: Hand-written next to the _cap_spin calls rather than derived from
+    #: them, so tests/gui_parity/test_772_cap_params_reach_engine.py can
+    #: assert on a FRESHLY CONSTRUCTED panel that every name exists and
+    #: every default matches -- and, separately, that each equals the
+    #: engine signature default. Drift is caught by the gate, not hoped
+    #: away.
+    CAP_PARAM_DEFAULTS = (
+        ('cap_capture_radius', 2.0),
+        ('cap_near_margin', 1.0),
+        ('cap_step', 0.2),
+        ('cap_max_displacement', 2.0),
+        ('cap_max_displacement_cap', 3.0),
+        ('cap_displacement_growth', 1.5),
+        # 0.0 == UNSET, not a margin of zero: get_config maps it to None,
+        # and the engine's resolve_cap_edge_clearance applies the same
+        # non-positive-is-unset rule to an EXPLICIT CLI value, so both
+        # fronts land on the same resolved margin.
+        ('cap_board_edge_clearance', 0.0),
+        ('cap_max_passes', 30),
+        ('cap_prefix', 'C,R,FB'),
+        ('cap_allow_rotation', True),
+    )
+
     def __init__(self, parent, on_differential_changed=None):
         """
         Create BGA options panel.
