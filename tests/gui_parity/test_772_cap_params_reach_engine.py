@@ -141,7 +141,8 @@ def main():
     from kicad_routing_plugin.fanout_gui import BGAOptionsPanel
     from kicad_routing_plugin import ai_plan
     from placement import fanout_clearance as _fc
-    from placement.fanout_clearance import resolve_cap_edge_clearance
+    from placement.fanout_clearance import (CAP_EDGE_CLEARANCE,
+                                            resolve_cap_edge_clearance)
 
     real_engine = _fc.repair_fanout_clearance      # captured BEFORE patching
     app = wx.App(False)  # noqa: F841
@@ -242,8 +243,11 @@ def main():
           'got %r' % (kw.get('board_edge_clearance', ABSENT),))
     _resolved = resolve_cap_edge_clearance(board,
                                            kw.get('board_edge_clearance'))
+    # the CONSTANT, not a copy of its current value: a gate that hard-codes
+    # 0.55 goes stale the day the placement default moves
     check('...and the engine then resolves the placement default',
-          close(_resolved[0], 0.55), 'got %r' % (_resolved,))
+          close(_resolved[0], CAP_EDGE_CLEARANCE),
+          'got %r want %r' % (_resolved, CAP_EDGE_CLEARANCE))
 
     # == 5. NO LEAK between two consecutive cap steps ========================
     # The per-step reset is SKIPPED for optimize_caps by design, so without the
@@ -253,8 +257,19 @@ def main():
     dlg.reset_params_to_defaults()
     kws = drive([
         {'action': 'optimize_caps',
-         'params': {'cap_near_margin': 1.5, 'cap_prefix': 'C'}},
+         'params': {'cap_near_margin': 1.5, 'cap_prefix': 'C',
+                    'cap_max_passes': 7}},
         {'action': 'optimize_caps', 'params': {'cap_capture_radius': 5.0}},
+        # STEP C NAMES NO CAP KNOB AT ALL, only Basic-tab params -- exactly
+        # what `place_fanout_clearance.py --clearance 0.1 --grid-step 0.05`
+        # converts to. An adversarial review measured that the first version
+        # of the fix skipped its reset (the condition was "names a cap
+        # knob", not "the plan specified this step") and it inherited step
+        # A's knobs. The --grid-step row this branch adds makes the shape
+        # more reachable, and arm 5 originally could not see it because
+        # every step it drove named one.
+        {'action': 'optimize_caps',
+         'params': {'clearance': 0.1, 'grid_step': 0.05}},
     ])
     check('step A: its own knobs are delivered',
           close(kws[0].get('near_margin'), 1.5)
@@ -270,22 +285,48 @@ def main():
           kws[1].get('cap_prefix') == 'C,R,FB',
           'cap_prefix=%r -- step A\'s value leaked'
           % (kws[1].get('cap_prefix'),))
+    # The knob to watch is CAPTURE_RADIUS: step B named it, so step B's own
+    # reset left it at 5.0 while returning everything else to the defaults.
+    # It is therefore the only non-default value standing when step C runs,
+    # and the only one that can demonstrate the leak. Checking near_margin
+    # here would pass either way -- step B already restored it -- which is
+    # how the first version of this arm managed to be green against the
+    # very defect it was added for.
+    check('step C names NO cap knob and still starts from the defaults',
+          close(kws[2].get('capture_radius'), 2.0),
+          'capture_radius=%r -- a step whose params are all Basic-tab '
+          'ones inherited the earlier cap step (want the CLI default 2.0)'
+          % (kws[2].get('capture_radius', ABSENT),))
+    check('...while its OWN Basic-tab params still arrive',
+          close(kws[2].get('clearance'), 0.1)
+          and close(kws[2].get('grid_step'), 0.05),
+          'clearance=%r grid_step=%r' % (kws[2].get('clearance', ABSENT),
+                                         kws[2].get('grid_step', ABSENT)))
 
-    # == 6. a step with NO cap params still INHERITS =========================
-    # This is what the reset exception exists for, and what the auto-inserted
-    # step relies on: the operator's interactive cap tweaks, and the preceding
-    # fanout's live state, must survive it. A blanket reset would be a
-    # regression dressed as a fix.
+    # == 6. a step with NO PARAMS is left alone ==============================
+    # The auto-inserted step (_insert_cap_optimization) carries no `params`
+    # key at all, and the scoped reset must not fire for it.
+    #
+    # WHAT IT THEN INHERITS IS NARROWER THAN THIS ARM ORIGINALLY CLAIMED, and
+    # the correction came from an adversarial review. It used to set the
+    # panel by hand and drive a ONE-step plan, then say the operator's tweaks
+    # "must survive". In a real plan a `fanout` step precedes the cap step,
+    # and that step gets the FULL per-step reset -- which, since the cap
+    # knobs joined reset_params_to_defaults, returns them to the CLI
+    # defaults. So the honest claim is: the scoped reset does not fire, and
+    # the step sees whatever the panel holds AT THAT MOMENT. Both halves are
+    # asserted below, the second one through a preceding step rather than a
+    # scenario no plan produces.
     dlg.reset_params_to_defaults()
     dlg.fanout_tab.bga_options.cap_near_margin.SetValue(1.5)
     dlg.fanout_tab.bga_options.cap_prefix.SetValue('C')
     kw = drive([{'action': 'optimize_caps'}])[0]
-    check('a bare optimize_caps step inherits the panel near margin',
-          close(kw.get('near_margin'), 1.5),
-          'near_margin=%r -- the scoped reset fired on a step that named '
-          'nothing' % (kw.get('near_margin', ABSENT),))
-    check('...and its prefix', kw.get('cap_prefix') == 'C',
-          'cap_prefix=%r' % (kw.get('cap_prefix'),))
+    check('a bare optimize_caps step does not trigger the scoped reset',
+          close(kw.get('near_margin'), 1.5)
+          and kw.get('cap_prefix') == 'C',
+          'near_margin=%r cap_prefix=%r -- the reset fired on a step that '
+          'specified nothing'
+          % (kw.get('near_margin', ABSENT), kw.get('cap_prefix', ABSENT)))
 
     # == 7. the SHARED Basic-tab knobs keep inheriting =======================
     # The scoped reset must touch the cap panel ONLY: clearance / grid_step /

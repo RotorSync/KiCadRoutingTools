@@ -132,15 +132,38 @@ class TestTheEdgeClearanceIsRehomed(unittest.TestCase):
     def test_clearance_is_NOT_skipped(self):
         """#768's GIVEN branch runs through the generic loop: setting Min
         Clearance and ticking its override IS the GUI's spelling of
-        `--clearance was given`, and it delivers netclass_ceiling too."""
-        skip = _literal(AI_PLAN, '_GENERIC_SKIP')
-        if skip is None:          # it is a local, not a module literal
-            src = _src(AI_PLAN)
-            i = src.index('"optimize_caps": {"board_edge_clearance"},')
-            self.assertNotIn('clearance"', src[i:i + 60].replace(
-                'board_edge_clearance', ''))
-        else:
-            self.assertNotIn('clearance', skip.get('optimize_caps', set()))
+        `--clearance was given`, and it delivers netclass_ceiling too.
+
+        `_GENERIC_SKIP` is a function LOCAL, so it cannot be read as a
+        module literal. The first version of this arm tried, fell into an
+        `if skip is None` branch that sliced 60 characters of source and
+        asserted a substring the slice could never contain, and was
+        therefore unfalsifiable -- an adversarial review killed it by
+        adding `clearance` to the skip through a second mechanism and
+        watching this file stay green.
+
+        Parsed properly instead: walk the AST for the assignment inside
+        apply_step_params and read the real value. The behavioural claim --
+        that clearance and netclass_ceiling reach the engine -- is arm 8 of
+        the real-dialog gate; this one pins the mechanism that makes it
+        possible."""
+        skip = None
+        for node in ast.walk(ast.parse(_src(AI_PLAN))):
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name == 'apply_step_params'):
+                for n in ast.walk(node):
+                    if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                            and isinstance(n.targets[0], ast.Name)
+                            and n.targets[0].id == '_GENERIC_SKIP'):
+                        skip = ast.literal_eval(n.value)
+        self.assertIsInstance(
+            skip, dict,
+            '_GENERIC_SKIP could not be read, so this arm proves nothing')
+        self.assertIn('optimize_caps', skip)
+        self.assertEqual(skip['optimize_caps'], {'board_edge_clearance'},
+                         'the cap skip changed; `clearance` in particular '
+                         'must NOT be there, or #768\'s GIVEN branch stops '
+                         'running and netclass_ceiling goes None')
 
     def test_the_drc_floor_harvest_excludes_a_cap_steps_edge_margin(self):
         """place_fanout_clearance's own writeback: "a placement margin, not a
@@ -176,14 +199,25 @@ class TestTheOneDefaultsTable(unittest.TestCase):
                              'two lists in two files is the shape #772 exists '
                              'to remove' % stale)
 
-    def test_the_scoped_reset_is_conditional_on_the_step_naming_a_knob(self):
-        """Unconditional, it would destroy the inheritance the reset exception
-        exists for -- which is the auto-inserted step's whole purpose."""
+    def test_the_scoped_reset_is_conditional_on_the_step_having_params(self):
+        """Unconditional, it would destroy the inheritance the reset
+        exception exists for -- the auto-inserted step's whole purpose.
+
+        THE CONDITION IS "the plan specified this step", not "the step
+        names a cap knob". An adversarial review measured the difference:
+        a manifest step converted from `--clearance 0.1 --grid-step 0.05`
+        carries params but names no CAP knob, so the name-based test
+        skipped the reset and that step ran at the PREVIOUS cap step's
+        knobs. `params` is exact, because _insert_cap_optimization emits
+        no params key at all."""
         src = _src(AI_PLAN)
         self.assertIn('reset_cap_params_to_defaults', src)
-        self.assertIn('_given = sorted(set(step.get("params") or {}) & _names)',
-                      src)
+        self.assertIn('_given = sorted(step.get("params") or {})', src)
         self.assertIn('if _given and hasattr(self.dialog,', src)
+        self.assertNotIn('& _names)', src,
+                         'the reset is gated on cap-knob NAMES again, so a '
+                         'step carrying only Basic-tab params inherits the '
+                         'previous cap step')
 
 
 class TestTheAutoInsertedStepCarriesNoDeadKey(unittest.TestCase):

@@ -1515,27 +1515,43 @@ class PlanExecutor:
             # the other nine flags their argparse defaults; inheriting nine
             # leftovers instead is not that run.
             #
-            # A step naming NO cap knob is the auto-inserted one
-            # (_insert_cap_optimization), whose documented purpose is to inherit
-            # the operator's live fanout state -- it keeps doing so.
+            # A step with NO params is the auto-inserted one
+            # (_insert_cap_optimization), which is left alone. WHAT IT THEN
+            # INHERITS IS NARROWER THAN THIS COMMENT USED TO CLAIM, and the
+            # same review measured that too: since the cap knobs joined
+            # reset_params_to_defaults, a PRECEDING fanout step's own
+            # per-step reset already returns them to the CLI defaults. So an
+            # operator's interactive cap tweak survives into a bare cap step
+            # only when nothing precedes it -- which in a real plan is
+            # rarely the case. That is the right answer for a REPLAY (the
+            # recorded run had no operator) and a real change to the
+            # interactive path, so it is disclosed rather than implied.
             #
             # SHARED knobs (clearance / grid_step / via_size) are NOT touched:
             # they come from the Basic tab, and the #768 inheritance rationale
             # above is about those.
+            # THE DISCRIMINATOR IS "DID THE PLAN SPECIFY THIS STEP", not
+            # "did it name a cap knob". An adversarial review measured the
+            # difference and it is a real leak, not a nicety: a manifest
+            # step converted from `place_fanout_clearance.py --clearance
+            # 0.1 --grid-step 0.05` carries params but names no CAP knob,
+            # so the name-based test skipped the reset and step B ran at
+            # step A's near_margin / cap_prefix / max_passes instead of the
+            # CLI defaults. The --grid-step row this branch adds makes that
+            # shape MORE reachable, not less.
+            #
+            # `params` is the exact signal, and it is exact because of the
+            # commit two along: _insert_cap_optimization emits
+            # {"action": "optimize_caps"} with NO params key at all, so
+            # "has params" distinguishes a plan-authored step from the
+            # auto-inserted one with no proxy in between.
             if step["action"] == "optimize_caps":
-                _capp = getattr(getattr(self.dialog, 'fanout_tab', None),
-                                'bga_options', None)
-                _defs = (getattr(type(_capp), 'CAP_PARAM_DEFAULTS', ())
-                         if _capp is not None else ())
-                # the LEGACY spelling counts as a cap knob too -- see the
-                # optimize_caps block in apply_step_params
-                _names = {n for n, _v in _defs} | {'board_edge_clearance'}
-                _given = sorted(set(step.get("params") or {}) & _names)
+                _given = sorted(step.get("params") or {})
                 if _given and hasattr(self.dialog,
                                       'reset_cap_params_to_defaults'):
                     try:
                         self.dialog.reset_cap_params_to_defaults()
-                        self.log("AI plan: optimize_caps names "
+                        self.log("AI plan: optimize_caps specifies "
                                  + ", ".join(_given)
                                  + " -- cap knobs reset to the CLI defaults "
                                    "first, so the ones it omits are defaults "

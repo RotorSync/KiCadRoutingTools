@@ -367,18 +367,17 @@ _MUST_RESOLVE_ON = {
     },
     'route_planes': {'stitch_pitch', 'gnd_via_net', 'zone_clearance'},
     'route_diff': {'diff_pair_width', 'diff_pair_gap'},
-    # #772: these four need `fanout` to search the option PANELS. They are
+    # #772: these two need `fanout` to search the option PANELS. They are
     # what the per-action block reaches BY HAND today, so the generic loop
     # could not. If the fanout widening is ever dropped, drop this row with
     # it -- the per-action block still delivers them.
-    'fanout': {'exit_margin', 'extension', 'qfn_track_width',
-               'qfn_clearance'},
-    # #772: these four need `fanout` to search the option PANELS. They are
-    # what the per-action block reaches BY HAND today, so the generic loop
-    # could not. If the fanout widening is ever dropped, drop this row with
-    # it -- the per-action block still delivers them.
-    'fanout': {'exit_margin', 'extension', 'qfn_track_width',
-               'qfn_clearance'},
+    #
+    # qfn_track_width / qfn_clearance are deliberately NOT here: they are in
+    # _GENERIC_SKIP['fanout'], so the generic loop never looks for them and
+    # 'unreachable' would be the wrong word. Listing them made this row a
+    # coupling gate for a commit marked SEPARABLE rather than a delivery
+    # gate, which an adversarial review called out.
+    'fanout': {'exit_margin', 'extension'},
 }
 
 
@@ -491,6 +490,24 @@ def check_owner_scoping():
                     % (ent,)))
     by_class = _class_control_attrs()
     aliases, special = _ai_plan_tables()
+    # The owner ATTRIBUTE must exist on its tab, not merely the class it
+    # names. Without this the gate FALSE-PASSES the exact defect it was
+    # written for: renaming `self.bga_options` makes _owners() fall back to
+    # [fanout_tab, dialog] -- #772 verbatim -- while this function still
+    # resolves every cap param through BGAOptionsPanel and reports OK.
+    # Measured by mutation before this check existed: exit 0.
+    _gui_src = {}
+    for _fn in ('swig_gui.py', 'differential_gui.py', 'fanout_gui.py',
+                'planes_gui.py'):
+        _gui_src[_fn] = (REPO / 'kicad_routing_plugin' / _fn).read_text(
+            encoding='utf-8')
+    _all_gui = '\n'.join(_gui_src.values())
+    for _owner in sorted({o for _t, _s in table.values() for o in _s}):
+        if ('self.%s = ' % _owner) not in _all_gui:
+            bad.append(('<owner>.%s' % _owner,
+                        'no GUI file assigns `self.%s`, so getattr on the '
+                        'tab returns None and every param that should '
+                        'resolve there is silently unreachable' % _owner))
     for action, params in sorted(_MUST_RESOLVE_ON.items()):
         tab_attr, subs = table.get(action, (None, ()))
         chain = list(subs) + ([tab_attr] if tab_attr else []) + ['<dialog>']
