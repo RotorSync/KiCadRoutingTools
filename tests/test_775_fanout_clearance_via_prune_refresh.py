@@ -355,6 +355,65 @@ class TestThePruneIsAnchoredOnTheSEEDPose(unittest.TestCase):
     # MUTATION: build geom from `cap.rect()` inside the refresh.
 
 
+class TestEveryTermOfTheBoundIsLoadBearing(unittest.TestCase):
+    """The predicate is `hypot(v - seed) <= max_disp + span + v[3] + slack`,
+    and each term has to be REACHABLE by a fixture or it is unfalsifiable.
+
+    THIS CLASS EXISTS BECAUSE THE BATTERY SAID SO. Its first run killed the
+    span and via_slack rows and left two SURVIVORS: dropping `v[3]` (the via's
+    radius plus its own keep-out) and swapping it for the flat scalar. Both
+    NARROW the disk, so they can only be seen by a via that sits in the band
+    the term covers -- and no fixture in this family had one, on any board.
+    The bound could have been narrowed by half a millimetre with every arm
+    green. Rather than record that as an expected survivor, the band gets a
+    via.
+
+    The geometry is COMPUTED from the live objects rather than hardcoded, so
+    the arm follows the rig instead of silently drifting out of the band the
+    day a pad size or the default displacement cap changes. Measured on this
+    rig: max_disp 3.0000 + span 0.8544 opens the band at 3.8544, and v[3]
+    (0.4 radius + 0.1 keep-out) closes it at 4.3544. The flat-scalar mutation
+    moves the edge to 3.9544, so a probe in the middle of the band separates
+    all three spellings.
+    """
+
+    def _probe(self, offset_frac):
+        """Place one via at `max_disp + span + offset_frac * v[3]` from C1's
+        seed centre and report whether the prune kept it."""
+        with _stub() as path:
+            pcb, _v = _board(VIA_CLEAR, 'F.Cu')
+            st = _repair(pcb, path)
+            ccx, ccy, span, _r = st._cap_geom['C1']
+            v3 = st.vias[0][3]
+            d = st._max_disp_cap + span + offset_frac * v3
+            pcb.vias.append(make_via(ccx + d, ccy, net_id=FAR_NET,
+                                     size=V_SIZE, drill=V_DRILL))
+            st2 = _repair(pcb, path)
+            probe = [t for t in st2.vias if abs(t[0] - (ccx + d)) < 1e-9]
+            self.assertEqual(len(probe), 1, 'the probe via was not graded')
+            return probe[0] in st2.cap_vias['C1'], d, v3
+
+    def test_a_via_inside_the_KEEPOUT_band_is_KEPT(self):
+        kept, d, v3 = self._probe(0.5)
+        self.assertTrue(kept,
+                        'a via %.4fmm from the seed centre was pruned away, '
+                        'but it sits INSIDE the reach by half of v[3] '
+                        '(%.4fmm). The keep-out term was dropped or replaced '
+                        'by a smaller one, and the prune is no longer exact.'
+                        % (d, v3))
+    # MUTATION: `+ v[3]` -> `+ 0.0`; `v[3]` -> `self.clearance`.
+
+    def test_a_via_BEYOND_the_full_reach_is_dropped(self):
+        """The other side of the bracket. Without it the arm above is
+        satisfied by a prune that keeps everything, which is the de-prune this
+        whole branch removes."""
+        kept, d, _v3 = self._probe(1.5)
+        self.assertFalse(kept,
+                         'a via %.4fmm away is kept, which is beyond the '
+                         'reachable disk -- the bound was widened' % d)
+    # MUTATION: drop the distance test; widen any term.
+
+
 class TestTheGeomlessCapFallsBackToTheWholeList(unittest.TestCase):
     """A cap this object never pruned for has no seed pose to measure a reach
     from. The track registrar may `continue` past it; the refresh may not (see
