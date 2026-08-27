@@ -38,6 +38,45 @@ WHAT THIS FILE HOLDS, class by class:
                                          actually relocates vias
   TestInertOnTheTrackedCorpus            the self-expiring bound
 
+WHAT `tests/mutate_747.py` MEASURES AGAINST IT -- 22 rows, 20 killed,
+2 survived (both expected), 0 broken, recorded from the run rather than
+predicted:
+
+     1 recompute the keep-out ................. 2 killers
+     2 the derive marker is None again ........ 1     <- only arm
+     3 file a radius for an unmapped tuple .... 1     <- only arm
+     4 map value drops the tuple ............ . 2
+     5 map value order swapped ............... 45
+     6 the no-information guard is dropped .... 1     <- only arm
+     7 drop the radius carry-over ............. 5
+     8 drop the keep-out carry-over ........... 3
+     9 match on coordinates only .............. 2
+    10 match on net only ...................... 3
+    11 single pass against the original list .. 3
+    12 skip the rebind when nothing matched ... 1     <- only arm
+    13 mutate the list in place ............... 3
+    14 count moves, not tuples ................ 4
+    15 skip the registrar call in the caller .. 2
+    16 call the registrar from the nudger ..... 9
+    17 re-inline the tuple in __init__ ........ 2
+    18 survivors rebuilt instead of carried ... 4
+    19 the nudger writes the graded view again  5
+    20 relocate AFTER the per-cap refresh ..... 8
+    21 a trailing comment names a literal ..... SURVIVED, and must
+    22 the match tolerance `<` -> `<=` ........ SURVIVED, honestly
+
+FOUR rows have exactly ONE killer -- 2, 3, 6 and 12 -- which is why those arms
+exist at all. Two of them cover a latent hazard an adversarial review measured
+(a keep-out slot that is itself None), and one covers a rebind whose only
+consequence is structural.
+
+ROW 20's EXPECTATION WAS WRONG, and the first run said so. It was recorded as
+an expected SURVIVOR on the reasoning that no fixture relocates a via -- wrong
+twice over, since this file's own real-board arm relocates nine and #736's and
+#746's rigs relocate one each. The wrong prediction is left in the battery with
+the correction beside it, because a battery whose expectations are edited to
+match its results measures nothing.
+
 THE HOUSE CONVENTIONS THIS FILE FOLLOWS, and why each earned its place:
 
   * REAL parser dataclasses and a REAL board. `_Repair.__init__` reads
