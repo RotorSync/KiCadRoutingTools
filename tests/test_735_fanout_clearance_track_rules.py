@@ -51,37 +51,52 @@ mis-measured and internally inconsistent -- that interval is 0.07 wide, not the
 the wrong ones were.)
 
 WHAT `tests/mutate_735.py` MEASURES AGAINST THIS FILE AND ITS `_e2e` SIBLING --
-18 rows, 17 killed, 1 survived (expected), 0 broken. Recorded FROM THE RUN:
+23 rows, 21 killed, 2 survived (both expected), 0 broken. FROM THE RUN:
 
-     1 revert the s2 arm ........................... 5 killers
+     1 revert the s2 arm ........................... 6 killers
      2 swap the pair's two nets .................... SURVIVED, and must
-     3 the via-vs-track arm acquires the rule ...... 1
-     4 track_required ignores the channel .......... 7
-     5 track_required drops the flat fallback ...... 1
-     6 the two handles are merged .................. 5
-     7 _floors widened to admit a track-only board . 2
-     8 the resolver is read without getattr ........ 2
-     9 the shim falls back to the flat scalar ...... 1
-    10 for_board never reads the track rules ....... 12
-    11 `active` absorbs the track channel .......... 2
-    12 the model forgets the memberships ........... 9
-    13 track_pair becomes a tier of pair ........... 8
-    14 the predicate stops being raise-only ........ 3
-    15 other_only stops exempting siblings ......... 2
-    16 the rule identity is not reported ........... 6
-    17 board_track_rules hands back no memberships . 9
-    18 check_drc stops delegating .................. 4
+     3 the ladder becomes an all-or-nothing gate ... 5
+     4 the relaxed rung runs FIRST ................. 4
+     5 the fallback is taken SILENTLY .............. 3
+     6 the second rung runs on every board ......... SURVIVED, honestly
+     7 the via-vs-track arm acquires the rule ...... 3
+     8 track_required ignores the channel .......... 7
+     9 track_required drops the flat fallback ...... 1
+    10 the two handles are merged .................. 5
+    11 _floors widened to admit a track-only board . 2
+    12 the resolver is read without getattr ........ 2
+    13 the shim falls back to the flat scalar ...... 1
+    14 for_board never reads the track rules ....... 16
+    15 `active` absorbs the track channel .......... 2
+    16 the model forgets the memberships ........... 10
+    17 track_pair is disabled ...................... 8
+    18 the rule LEAKS into the pad pair resolver ... 8
+    19 the predicate stops being raise-only ........ 3
+    20 other_only stops exempting siblings ......... 2
+    21 the rule identity is not reported ........... 6
+    22 board_track_rules hands back no memberships . 10
+    23 check_drc stops delegating .................. 4
 
 ROW 2 IS A DELIBERATE SURVIVOR: the binding predicate is symmetric in its two
-nets today, so swapping them at the call site cannot change an answer. It is
-kept as a change detector for the day it stops being symmetric.
+nets today, so swapping them at the call site cannot change an answer. Kept as
+the change detector for the day it stops being symmetric.
 
-ROW 9 IS WHY THIS BATTERY EXISTS. It SURVIVED the first run: every fixture
+ROW 6 IS AN HONEST SURVIVOR: dropping the `_trk_on` guard makes a board that
+declares nothing sweep twice for the same answer. That is a cost, not a
+different result, so no behavioural arm can catch it and none pretends to.
+
+ROW 13 IS WHY THIS BATTERY EXISTS. It SURVIVED the first run: every fixture
 here declared its net classes AT the run's clearance, so `req` and the flat
 scalar were the same number and "the shim falls back through `req`" was a
 claim no arm made. `test_an_st_that_predates_the_resolver_keeps_its_NETCLASS_
-answer` was written to close that, and the row now kills. The gap was real, and
-it was invisible from a green suite.
+answer` closes it, and the row now kills. The gap was real and invisible from
+a green suite.
+
+ROWS 3-5 AND 18 EXIST BECAUSE A REVIEW FOUND WHAT THEY GUARD. Rows 3-5 pin the
+ladder, which an earlier version of this change did not have -- it was a hard
+gate that abandoned the repair. Row 18 is the "did the rule leak into the PAD
+resolver" control, which had no row at all: the row that claimed to be it
+disabled `track_pair` instead, duplicating row 8 one layer down.
 
 CONVENTIONS FOLLOWED (the #725/#736/#747 family's):
 
