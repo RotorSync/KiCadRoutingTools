@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#549 rule-pair classification: a seg-seg violation that exists ONLY because
+"""Rule-pair classification (#735): a seg-seg violation that exists ONLY because
 a .kicad_dru track rule raised the pair clearance is emitted as its own type
 ('segment-segment-track-rule', tagged with the binding rule name), and
 board_score reports that population as ADVISORY -- outside `blocking`.

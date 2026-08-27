@@ -175,7 +175,7 @@ CRIT_NET, CRIT_NAME = 1, '/sheetHyperRAM/RAM_VDDQ'
 FOREIGN_NET, FOREIGN_NAME = 2, 'RAM_D13'
 
 # The rule text and the project shape are copied from
-# tests/test_549_track_clearance_e2e.py, so the two files cannot come to
+# tests/test_735_dru_track_clearance_e2e.py, so the two files cannot come to
 # disagree about what a track rule looks like.
 DRU_BOTH = ('(version 1)\n(rule crit_space (condition "A.Type==\'track\' && '
             'B.Type==\'track\' && A.NetClass==\'CRIT\'") '

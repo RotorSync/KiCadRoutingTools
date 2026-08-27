@@ -30,7 +30,7 @@ checkout round-trips byte-for-byte.
 FOUR TARGETS, because the fix spans four files and a row that can only reach
 one of them cannot test the other three.
 
-WHAT THIS MEASURES -- 18 rows. Counts are recorded FROM THE RUN, in the header
+WHAT THIS MEASURES -- 23 rows. Counts are recorded FROM THE RUN, in the header
 of `tests/test_735_fanout_clearance_track_rules.py`, not predicted here.
 
 (Both numbers above were stale in the first draft -- "three targets", "16
@@ -56,8 +56,8 @@ TARGETS = {'fc': FC, 'leg': LEG, 'dru': DRU, 'drc': DRC}
 
 T735 = os.path.join(_TESTS, 'test_735_fanout_clearance_track_rules.py')
 T735E = os.path.join(_TESTS, 'test_735_fanout_clearance_track_rules_e2e.py')
-T549 = os.path.join(_TESTS, 'test_549_track_clearance.py')
-T549C = os.path.join(_TESTS, 'test_549_rule_pair_classification.py')
+TDRU = os.path.join(_TESTS, 'test_735_dru_track_clearance.py')
+TDRUC = os.path.join(_TESTS, 'test_735_dru_rule_pair_classification.py')
 T747 = os.path.join(_TESTS, 'test_747_fanout_clearance_via_registrar.py')
 T725 = os.path.join(_TESTS, 'test_725_fanout_clearance_pad_floors.py')
 
@@ -183,7 +183,7 @@ ROWS = [
     ('the-predicate-stops-being-raise-only', 'dru',
      '        if binds and r.clearance_mm > eff:',
      '        if binds:',
-     (T735, T549), 'KILLED'),
+     (T735, TDRU), 'KILLED'),
 
     ('other_only-stops-exempting-siblings', 'dru',
      '        binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))',
@@ -193,7 +193,7 @@ ROWS = [
     ('the-rule-identity-is-not-reported', 'dru',
      '            eff = r.clearance_mm\n            rule = r',
      '            eff = r.clearance_mm',
-     (T735, T549C), 'KILLED'),
+     (T735, TDRUC), 'KILLED'),
 
     # The quiet reader hands back the memberships that are the rules' binding
     # KEY. Dropping them leaves a rule list nothing can ever match, which is
@@ -214,7 +214,7 @@ ROWS = [
      '        return track_pair_clearance(_track_rules, _cls_of.get(net_a, ()),\n'
      '                                    _cls_of.get(net_b, ()), eff)',
      '        return eff, None',
-     (T735, T549C), 'KILLED'),
+     (T735, TDRUC), 'KILLED'),
 ]
 
 

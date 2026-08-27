@@ -66,7 +66,7 @@ from test_735_fanout_clearance_track_rules import (  # noqa: E402
     _stage, _landing)
 
 # `[^\n]*` before the colon is load-bearing: check_drc appends a contact count
-# to the header. Same expression tests/test_549_rule_pair_classification.py
+# to the header. Same expression tests/test_735_dru_rule_pair_classification.py
 # uses, for the same reason.
 RULE_PAIRS = re.compile(
     r'^SEGMENT-SEGMENT-TRACK-RULE violations \((\d+)\)[^\n]*:', re.M)
