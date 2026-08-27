@@ -76,9 +76,17 @@ Conventions (from #725/#731/#732/#733/#737/#750/#756 and CLAUDE.md): REAL parser
 dataclasses; every assertion names the single-line MUTATION that must kill it,
 with the count the battery measured; assert you are ON the branch before
 asserting about it; every refusal paired with an acceptance that still happens.
-The battery ships as `tests/mutate_768.py`. Measured, 23 rows:
+The battery ships as `tests/mutate_768.py`. Measured, 28 rows:
 
-    22 KILLED, 1 SURVIVED (expected), 0 BROKEN
+    27 KILLED, 1 SURVIVED (expected), 0 BROKEN
+
+Seven of those rows exist because a CLI/GUI parity review found the GUI gate
+reading the WRONG control (`fix_drc_settings`, a box that clamps no net class at
+all) and, on the standalone call path, reading a key that config never carries.
+Two string-count assertions in this file passed it. The rows that now catch it
+name `tests/gui_parity/test_768_cap_ceiling_real_dialog.py`, which drives the
+real headless dialog and captures the kwargs the engine is handed -- the only
+thing that can decide a VALUE.
 
 The expected survivor is `writeback-spends-the-flag-not-the-priced-value`:
 `clearance=_priced` and `clearance=args.clearance` are provably equal on every
