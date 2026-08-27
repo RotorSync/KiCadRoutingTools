@@ -551,7 +551,7 @@ class TestLayerCountIsNotAnAxis(unittest.TestCase):
             self.assertEqual(fab_floor_min(2)[k], fab_floor_min(4)[k], k)
 
     def test_the_layer_count_degrades_exactly_as_check_drc_does(self):
-        """`len(copper_layers) if copper_layers else 2` (check_drc.py:2049):
+        """`len(copper_layers) if copper_layers else 2` (check_drc.py:2070):
         an unreadable layer list takes the CONSERVATIVE bucket, never bucket 0.
 
         MUTATIONS: drop the `or 2` -> battery row `layer-fallback-dropped`

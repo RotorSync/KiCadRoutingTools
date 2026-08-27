@@ -2004,7 +2004,7 @@ class FanoutTab(wx.Panel):
                 # clearance": the Basic tab's Min Clearance override, exported
                 # as `clamp_netclasses` (swig_gui.py, `self.clearance_check`)
                 # and consumed as `clamp_nondefault_netclasses` by every other
-                # step. ai_plan.py:1283 spells the same equivalence.
+                # step. ai_plan.py:1279-1282 spells the same equivalence.
                 #
                 # It is NOT `fix_drc_settings`, which an earlier cut of this
                 # change used, on the premise that a checked box means the

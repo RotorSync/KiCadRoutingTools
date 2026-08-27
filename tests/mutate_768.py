@@ -91,9 +91,7 @@ _DISCLOSE = """                    if _capped:
                                 for _v, _c in sorted(_capped.items()))))
 """
 
-_HOLE_KW = """                hole_clearance=board_constraint(args.input_file,
-                                                'min_hole_clearance'),
-"""
+_HOLE_KW = "                hole_clearance=_hc,\n"
 
 _GUI_CEILING = ("                netclass_ceiling="
                 "fanout_config.get('clearance_ceiling'),\n")

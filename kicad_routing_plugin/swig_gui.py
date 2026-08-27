@@ -1774,10 +1774,11 @@ class RoutingDialog(wx.Dialog):
                 'fix_drc_settings': self.fix_drc_check.GetValue(),
                 # #768: and the same tab was the ONE that never carried the
                 # Min-Clearance override either. That control is the GUI's
-                # counterpart of "--clearance was GIVEN" -- ai_plan.py:1283
-                # spells the equivalence where it clamps ("only when this plan
-                # routed with a --clearance ceiling (the Min-Clearance
-                # override)") -- and the cap pass needs it for exactly that:
+                # counterpart of "--clearance was GIVEN" -- ai_plan.py
+                # :1279-1282 spells the equivalence where it clamps ("only when
+                # this plan routed with a --clearance ceiling (the Min-Clearance
+                # override the executor checks when a step sets clearance)")
+                # -- and the cap pass needs it for exactly that:
                 # unchecked means the board's own classes stand, so they are
                 # what the pass must price at.
                 'clamp_netclasses': self.clearance_check.GetValue(),

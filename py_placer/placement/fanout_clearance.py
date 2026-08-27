@@ -257,9 +257,10 @@ def fab_pair_clearance_floor(pcb_data):
 
     NOT WRAPPED, and that is the checkable half. #756's rule for this function's
     two siblings is MATCH THE GRADER: raise a floor here iff `check_drc` raises
-    it. `check_drc` does NOT fab-floor copper clearance -- `_pair_cl`
-    (check_drc.py:2042-2047) is ``max(clearance, ncl_a, ncl_b)`` -> the dru
-    replace -> the pad override, with no `fab_floor_min` anywhere in the chain;
+    it. `check_drc` does NOT fab-floor copper clearance. Its chain is
+    `_pair_cl` (check_drc.py:2042-2047), ``max(clearance, ncl_a, ncl_b)``
+    then the dru replace, and then `_pad_pair_cl` (:2049-2056) for the pad
+    override -- with no `fab_floor_min` anywhere in either;
     `fab_floor_min` enters only the SIZE checks (track width / via diameter /
     via drill), and `_pin_up` covers board-edge, hole-to-hole and hole clearance
     but NOT clearance. Wrapping here would make this pass refuse cap landings
