@@ -72,6 +72,16 @@ _OFF_LAYER = -1.0e9
 # TestTheGradersStillReadTheBoard in tests/test_732_...py, which states the
 # geometry the experiment needs (perpendicular copper-to-barrel separation,
 # not stub endpoint offset) because the naive version shows nothing.
+#: `_register_via`'s "no keep-out supplied, derive one" marker (#747).
+#: A DISTINCT object rather than None, because a via 4-tuple's element 3 could
+#: itself be None -- nothing in this module builds one, but the tuples come
+#: from callers who assign the list wholesale, and `None` would then mean both
+#: "derive" and "the keep-out IS None" at the same slot. Overloaded, a
+#: relocated tuple carrying None either raised or had its keep-out silently
+#: re-derived, which is exactly what the builder's docstring forbids. A review
+#: measured both.
+_DERIVE_KEEPOUT = object()
+
 _UNREADABLE_VIA_SIZE = 0.5  # mm
 
 # The DRILL to assume for a via whose hole the board does not carry -- a literal
@@ -1882,7 +1892,8 @@ class _Repair:
     # radius-map invariant the first one owns -- the shape #725, #731, #732,
     # #733 and #736 have each fixed once already.
 
-    def _register_via(self, x, y, net_id, radius=None, keepout=None):
+    def _register_via(self, x, y, net_id, radius=None,
+                      keepout=_DERIVE_KEEPOUT):
         """Grade one via into the via view, and return its 4-tuple.
 
         THE only construction site for a via tuple, and the only writer of
@@ -1912,6 +1923,16 @@ class _Repair:
         re-price. Nothing equivalent arises on the track side, because the
         copper register_new_segments files never had a tuple before.
 
+        The marker is `_DERIVE_KEEPOUT`, not None, and the distinction is
+        not pedantry: element 3 of a tuple assigned wholesale by a caller can
+        itself be None. Spelled with None the two meanings collide at the same
+        slot, and a relocated tuple carrying None either raised or had its
+        keep-out silently re-derived -- the very thing the paragraph above
+        forbids. Nothing in this module builds such a tuple, so this is a
+        latent hazard rather than a live bug; it is spelled away instead of
+        documented, because the next caller is under no obligation to read
+        this.
+
         `radius=None` means THIS OBJECT DOES NOT KNOW this barrel's radius,
         so file nothing -- which is not the same as a radius of zero. A tuple
         absent from the map is graded at its own keep-out slot verbatim, i.e.
@@ -1920,10 +1941,9 @@ class _Repair:
         move starts pricing a via that _via_effs and via_penalty's flat path
         both agreed not to price.
 
-        Both None is a contract violation rather than a default, and is
-        unreachable today: the only caller that omits a radius is relocating
-        a 4-tuple, which always carries element 3. Named rather than left to
-        surface as an arithmetic error on a None.
+        Neither a radius nor a keep-out is a contract violation rather
+        than a default, and is unreachable from either caller. Named rather
+        than left to surface as an arithmetic error on a None.
 
         It files the map entry BEFORE returning, but -- unlike
         _register_segment -- it does NOT append, and that difference is safe
@@ -1935,11 +1955,11 @@ class _Repair:
         placement -- __init__ APPENDS, relocate_vias SUBSTITUTES in order --
         so an appending builder would be wrong for one of them.
         """
-        if radius is None and keepout is None:
+        if radius is None and keepout is _DERIVE_KEEPOUT:
             raise ValueError('a via tuple needs a radius or a keep-out')
         t = (x, y, net_id,
-             keepout if keepout is not None
-             else radius + self._item_reach(self._via_floor_for(net_id)))
+             (radius + self._item_reach(self._via_floor_for(net_id)))
+             if keepout is _DERIVE_KEEPOUT else keepout)
         if radius is not None:
             self._via_radius_by_id[id(t)] = (t, radius)
         return t
@@ -1973,10 +1993,19 @@ class _Repair:
         every tuple that did NOT move keeps its identity, and the radius map
         is keyed on exactly that.
 
-        The list is reassigned even for a move that matched nothing, because
-        that NEW IDENTITY is what makes _Repair's per-cap required-clearance
-        memos rebuild instead of going stale -- the property the inline
-        rebuild had, kept deliberately rather than by accident.
+        The list is reassigned even for a move that matched nothing, and
+        the reason needs stating carefully, because the obvious version of it
+        is not what happens on the real path. _via_effs revalidates its memo
+        on the identity of the list it is HANDED, which on the real path is
+        the per-cap pruned self.cap_vias[ref], not this one -- and the caller
+        refreshes that on the next line regardless. The rebind matters for a
+        holder that points cap_vias AT this list, which is the idiom every
+        test in this family uses and the state any second call would find. A
+        review measured the difference: mutating this in place leaves the
+        end-to-end result byte-identical, and only the mechanism arms in
+        tests/test_747_fanout_clearance_via_registrar.py go red. Kept
+        unconditional because it is cheap and because the alternative is a
+        rule about which callers are safe.
 
         The OLD map entry is left in place, on purpose. It is what keeps the
         old tuple alive, and dropping it would free an id the very next tuple
@@ -1985,9 +2014,13 @@ class _Repair:
         the same length as self.vias, which is a fact about a nudged board
         rather than a leak.
 
-        MATCHED ON POSITION AND NET, which is what the writer's own removal
-        pass already matches on (placement/writer.py's net_ids argument, and
-        the plugin's pcbnew twin beside it). Position alone relocates every
+        MATCHED ON POSITION AND NET, which is what the writer's own
+        removal already matches on (placement/writer.py's net_ids argument,
+        and the plugin's pcbnew twin beside it). Worded to keep the wrap off a
+        line that would otherwise begin with a bare statement keyword: this
+        module is grepped by a dozen source guards and by every mutate_*.py
+        anchor, and a line of prose that reads as code is how #756 lost four
+        battery rows. Position alone relocates every
         tuple at the vacated spot, including a coincident via of a DIFFERENT
         net that has not moved at all -- a phantom at the landing and a hole
         where it really is. What this still cannot separate is two coincident

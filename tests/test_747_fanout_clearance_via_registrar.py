@@ -29,7 +29,9 @@ WHAT THIS FILE HOLDS, class by class:
                                          first report's landing
   TestAnUnmatchedMoveIsANoOp             an injected barrel this object never
                                          graded, and a net that disagrees
-  TestOneViaRule                         the source guard
+  TestOneViaRule                         the source guard, plus a directory
+                                         sweep for a second construction site
+                                         in a module `inspect` cannot see
   TestTheOneRealBoardArmWhereTheRegistrarRUNS
                                          the whole pass, on orangecrab, at the
                                          one configuration in the repo that
@@ -305,6 +307,29 @@ class TestTheKeepOutIsCarriedNotRecomputed(unittest.TestCase):
         self.assertEqual(t[:3], (1.0, 2.0, 3))
     # MUTATION: change the over-reach spelling in `_register_via`.
 
+    def test_a_keep_out_that_IS_None_is_carried_rather_than_derived(self):
+        """The marker for "derive one" is `_DERIVE_KEEPOUT`, not None, and this
+        is the arm that makes the distinction pay. Element 3 of a tuple a
+        caller assigned wholesale can itself be None; spelled with None the two
+        meanings collide, and an adversarial review MEASURED both halves of the
+        collision -- an unmapped tuple raised, and a mapped one had its
+        keep-out silently re-derived to 0.35. Nothing in the module builds such
+        a tuple, so this pins a latent hazard rather than a live bug."""
+        for filed in (False, True):
+            st = _repair()
+            t = (10.0, 20.0, 7, None)
+            st.vias = [t]
+            st._via_radius_by_id = {id(t): (t, 0.25)} if filed else {}
+            self.assertEqual(
+                st.relocate_vias([_move(10.0, 20.0, 11.0, 21.0, 7)]), 1)
+            self.assertIsNone(
+                st.vias[0][3],
+                'a None keep-out was %s with the tuple %s the radius map'
+                % ('derived away', 'in' if filed else 'absent from'))
+    # MUTATION: spell the builder's default `keepout=None` again, and test
+    # both halves against it -- the unmapped case raises, the mapped one
+    # silently prices at 0.35.
+
     def test_neither_a_radius_nor_a_keepout_is_refused(self):
         """A contract violation rather than a default. Unreachable today -- the
         only caller that omits a radius is relocating a 4-tuple, which always
@@ -351,10 +376,21 @@ class TestAnInjectedTupleStaysUnpriced(unittest.TestCase):
 
 
 class TestTheListIdentityChanges(unittest.TestCase):
-    """`_via_effs` revalidates its per-cap memo on the SOURCE LIST's identity,
-    so a rebind is what makes the rows rebuild. Mutating in place would leave a
-    memo that still passes the identity test while describing the pre-move
-    positions."""
+    """`_via_effs` revalidates its per-cap memo on the identity of the list it
+    is HANDED, so a rebind is what makes those rows rebuild -- and the version
+    of that sentence which does NOT hold is worth stating, because an
+    adversarial review measured it.
+
+    On the REAL path the list `_via_effs` receives is the per-cap pruned
+    `cap_vias[ref]`, not the graded list this rebinds, and the caller refreshes
+    `cap_vias` on the next line regardless. Mutating in place there leaves the
+    end-to-end result byte-identical; only the arms below go red. The rebind is
+    load-bearing for a holder that points `cap_vias` AT the graded list, which
+    is the idiom every test in this family uses and the state any second call
+    would find.
+
+    So these are MECHANISM arms, and this docstring says so rather than
+    implying a numeric consequence the real path does not have."""
 
     def test_a_matched_move_rebinds_the_list(self):
         pcb, st, _t, _p = _rig()
@@ -584,17 +620,51 @@ class TestOneViaRule(unittest.TestCase):
         while the rebuild was inline. A registrar that also refreshed would be
         a second place deciding what a cap can see.
 
-        A WRITE-SHAPE regex, not `'cap_vias' not in ...`: the method's own
-        docstring names the attribute, and a docstring is a code line that no
-        comment-stripper removes. The first version of this arm failed on that
-        prose -- which is the trap this file's own header warns about, sprung
-        by the guard written to catch it."""
-        write = re.compile(r'self\.cap_vias\s*(?:[=\[]|\.\w+\()')
+        A WRITE-shape regex, not `'cap_vias' not in ...`, and not a
+        read-shape one either: the method's own docstring names the attribute
+        AND indexes it, and a docstring is a code line that no comment-stripper
+        removes. Two successive versions of this arm failed on that prose --
+        which is the trap this file's own header warns about, sprung twice by
+        the guard written to catch it. It now asserts what it always meant:
+        the registrar does not ASSIGN the per-cap view, by any spelling."""
+        write = re.compile(r'self\.cap_vias(?:\[[^\]]*\])?\s*=[^=]'
+                           r'|self\.cap_vias\s*\.\w+\(')
         bad = [i + 1 for i, l in enumerate(self.registrar) if write.search(l)]
         self.assertEqual(bad, [],
                          'the registrar writes the per-cap via view at '
                          'method-relative line(s) %s' % bad)
     # MUTATION: refresh the per-cap lists from inside the registrar.
+
+    def test_no_OTHER_module_builds_a_graded_via_tuple(self):
+        """A DIRECTORY sweep, not inspect: the arms above are scoped to this
+        one module, so a second construction site in a NEW file would fire
+        none of them.
+
+        `py_tools/animate_fanout_clearance.py` unpacks the 4-tuple to draw it
+        and is the known, allowed reader -- it never re-enters `_Repair` and
+        never writes the radius map. It is named here so the sweep stays a
+        change detector rather than a permanent red."""
+        allowed = {'py_placer/placement/fanout_clearance.py',
+                   'py_tools/animate_fanout_clearance.py'}
+        hits = set()
+        for sub in ('py_placer', 'py_router', 'py_tools',
+                    'kicad_routing_plugin'):
+            for dirpath, _dirs, files in os.walk(os.path.join(_ROOT, sub)):
+                if '__pycache__' in dirpath:
+                    continue
+                for fn in files:
+                    if not fn.endswith('.py'):
+                        continue
+                    p = os.path.join(dirpath, fn)
+                    with io.open(p, encoding='utf-8', errors='replace') as f:
+                        txt = f.read()
+                    if '_via_radius_by_id' in txt:
+                        hits.add(os.path.relpath(p, _ROOT)
+                                 .replace(os.sep, '/'))
+        self.assertEqual(hits, {'py_placer/placement/fanout_clearance.py'},
+                         'the radius map is reached from %s' % sorted(hits))
+        self.assertTrue(allowed)      # the docstring's list is not vestigial
+    # MUTATION: write the radius map from any other module under py_placer/.
 
     def test_the_count_arms_are_not_searching_for_dead_strings(self):
         """ANTI-ROT. Every count arm above passes after a rename. Assert the

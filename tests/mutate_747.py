@@ -87,11 +87,28 @@ ROWS = [
     # ---- the builder: what a via tuple IS ------------------------------
     ('recompute-the-keepout', 'fc',
      """        t = (x, y, net_id,
-             keepout if keepout is not None
-             else radius + self._item_reach(self._via_floor_for(net_id)))""",
+             (radius + self._item_reach(self._via_floor_for(net_id)))
+             if keepout is _DERIVE_KEEPOUT else keepout)""",
      """        t = (x, y, net_id,
-             radius + self._item_reach(self._via_floor_for(net_id))
+             (radius + self._item_reach(self._via_floor_for(net_id)))
              if radius is not None else keepout)""",
+     (T747,), 'KILLED'),
+
+    # The sentinel put back to None, which is the spelling an adversarial
+    # review measured as broken: a relocated tuple whose element 3 is itself
+    # None either RAISES (absent from the radius map) or has its keep-out
+    # silently re-derived (present in it). Nothing in the module builds such a
+    # tuple, so only the arm written for it can see this.
+    ('the-derive-marker-is-None-again', 'fc',
+     [("    def _register_via(self, x, y, net_id, radius=None,\n"
+       "                      keepout=_DERIVE_KEEPOUT):",
+       "    def _register_via(self, x, y, net_id, radius=None,\n"
+       "                      keepout=None):"),
+      ("        if radius is None and keepout is _DERIVE_KEEPOUT:",
+       "        if radius is None and keepout is None:"),
+      ("             if keepout is _DERIVE_KEEPOUT else keepout)",
+       "             if keepout is None else keepout)")],
+     None,
      (T747,), 'KILLED'),
 
     ('file-a-radius-for-an-unmapped-tuple', 'fc',
@@ -112,8 +129,8 @@ ROWS = [
      '            self._via_radius_by_id[id(t)] = (radius, t)',
      (T747, T725, T732), 'KILLED'),
 
-    ('both-none-is-accepted', 'fc',
-     """        if radius is None and keepout is None:
+    ('the-no-information-guard-is-dropped', 'fc',
+     """        if radius is None and keepout is _DERIVE_KEEPOUT:
             raise ValueError('a via tuple needs a radius or a keep-out')
 """,
      '',
@@ -264,15 +281,23 @@ ROWS = [
 
     # ---- ordering in the caller ----------------------------------------
     # The per-cap refresh reads the list this repairs, so relocating AFTER it
-    # leaves every cap holding the pre-move tuples. Nothing on the tracked
-    # corpus reaches this, which is exactly why it is here.
+    # leaves every cap holding the pre-move tuples.
+    #
+    # RECORDED EXPECTATION CORRECTED BY THE FIRST RUN. This row was written as
+    # an expected SURVIVOR on the reasoning that nothing on the tracked corpus
+    # relocates a via, so no fixture could reach it. That reasoning was wrong
+    # twice over: this file's own real-board arm drives orangecrab at a boxed
+    # configuration that relocates nine, and #736's and #746's rigs relocate
+    # one each on synthetic boards. Measured: 8 arms across three files, and
+    # the note is left here rather than quietly flipped, because a battery
+    # whose predictions are edited to match its results measures nothing.
     ('relocate-after-the-per-cap-refresh', 'fc',
      [('            st.relocate_vias(via_moves)\n', ''),
       ('            st.cap_vias = {r: st.vias for r in st.caps}\n',
        '            st.cap_vias = {r: st.vias for r in st.caps}\n'
        '            st.relocate_vias(via_moves)\n')],
      None,
-     (T747, T736, T746), 'SURVIVED'),
+     (T747, T736, T746), 'KILLED'),
 ]
 
 
