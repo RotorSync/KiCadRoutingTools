@@ -367,6 +367,18 @@ _MUST_RESOLVE_ON = {
     },
     'route_planes': {'stitch_pitch', 'gnd_via_net', 'zone_clearance'},
     'route_diff': {'diff_pair_width', 'diff_pair_gap'},
+    # #772: these four need `fanout` to search the option PANELS. They are
+    # what the per-action block reaches BY HAND today, so the generic loop
+    # could not. If the fanout widening is ever dropped, drop this row with
+    # it -- the per-action block still delivers them.
+    'fanout': {'exit_margin', 'extension', 'qfn_track_width',
+               'qfn_clearance'},
+    # #772: these four need `fanout` to search the option PANELS. They are
+    # what the per-action block reaches BY HAND today, so the generic loop
+    # could not. If the fanout widening is ever dropped, drop this row with
+    # it -- the per-action block still delivers them.
+    'fanout': {'exit_margin', 'extension', 'qfn_track_width',
+               'qfn_clearance'},
 }
 
 

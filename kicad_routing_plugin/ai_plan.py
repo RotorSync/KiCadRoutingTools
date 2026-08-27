@@ -361,7 +361,20 @@ def _enable_geometry_override(dialog, name):
 # files did not, and that disagreement IS #772.
 _ACTION_OWNERS = {
     'route_diff': ('differential_tab', ()),
-    'fanout': ('fanout_tab', ()),
+    # #772: the fanout action reaches its option PANELS too, which is what
+    # swig_gui.reset_params_to_defaults has always done (its `_fctl` holder
+    # search, whose comment names this exact bug class). Apply and reset now
+    # agree about what a fanout step can touch; before, the per-action block
+    # reached bga_options by hand for three params and the generic loop
+    # could reach neither panel.
+    #
+    # Measured on the real headless dialog before widening: the live
+    # control-name sets of RoutingDialog (96), FanoutTab (1),
+    # BGAOptionsPanel (20) and QFNOptionsPanel (5) are pairwise DISJOINT
+    # except `progress_bar`, a wx.Gauge on both the dialog and the tab that
+    # no plan param is named after and that the fanout action could already
+    # reach. So the panels shadow nothing.
+    'fanout': ('fanout_tab', ('bga_options', 'qfn_options')),
     'optimize_caps': ('fanout_tab', ('bga_options',)),
     'route_planes': ('planes_tab', ('create_options',)),
     'repair_planes': ('planes_tab', ('create_options',)),
