@@ -166,7 +166,7 @@ def _warn_no_kicad_cli() -> None:
     so its absence is an ENVIRONMENT DEFECT, not a supported mode. It is
     worth shouting about because of how it fails: every oracle leg returns
     available=False and becomes a NO-OP rather than degrading, so a run looks
-    successful while the finalize audit, the #589 re-audit and the #549 B-1
+    successful while the finalize audit, the #589 re-audit and the oracle-summary
     check all silently did nothing. A change that acts only through those legs
     then A/Bs as a PERFECT NULL -- the worst result shape, because it reads as
     a measurement (#650). Grades are affected too: check_drc's drc_real falls
@@ -181,7 +181,7 @@ def _warn_no_kicad_cli() -> None:
         RED = RESET = ''
     print(f"{RED}WARNING: kicad-cli NOT FOUND. This is not a supported mode "
           f"-- every KiCad-oracle leg becomes a NO-OP (not a degraded pass): "
-          f"the plane-finalize audit, the #589 re-audit and the #549 B-1 "
+          f"the plane-finalize audit, the #589 re-audit and the oracle-summary "
           f"check all silently do nothing, and check_drc's drc_real falls "
           f"back to raw DRC. A result measured here can be a perfect null "
           f"that looks like data (#650). Install KiCad, or set KICAD_CLI=/path/"

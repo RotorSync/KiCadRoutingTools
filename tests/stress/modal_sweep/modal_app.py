@@ -186,7 +186,7 @@ _PY_PINS = ("numpy==2.5.2", "scipy==1.18.0", "shapely==2.1.2")
 # WHY you would want it: without KiCad every oracle leg is DEAD, not degraded.
 # oracle_reconnect returns {'available': False} the moment find_kicad_cli()
 # comes back None, so the plane finalize's audit, its #589 re-audit and the
-# #549 B-1 oracle summary check all no-op -- and a change that only acts
+# the oracle summary check all no-op -- and a change that only acts
 # through them (e.g. #650's in-run floor sync) A/Bs as a perfect null that
 # looks like a measurement.
 KICAD_IMAGE = os.environ.get("KICAD_SWEEP_KICAD_IMAGE", "kicad/kicad:10.0.0")

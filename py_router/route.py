@@ -3305,7 +3305,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for (_x, _y) in _frag['fragment_anchors'][1:]],
         })
 
-    # ---- ORACLE SUMMARY CHECK (#549 B-1) -----------------------------------
+    # ---- ORACLE SUMMARY CHECK (KICAD_ORACLE_SUMMARY) ------------------------
     # KiCad's own connectivity over the AS-WRITTEN board, once per run.
     # Strictly ADDITIVE: it can only add failure disclosure (kicad-cli's
     # threaded connectivity is nondeterministic, so it never reclassifies a
@@ -3681,7 +3681,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         summary['stacked_copper'] = stacked_copper_findings
     summary['oracle_check'] = oracle_check
     if oracle_open:
-        # #549 B-1: KiCad's own open-link counts for this run's scope
+        # Oracle summary: KiCad's own open-link counts for this run's scope
         # (additive; nets not already flagged also gained failed_multipoint
         # entries marked oracle_only).
         summary['oracle_open'] = oracle_open

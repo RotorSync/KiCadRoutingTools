@@ -276,7 +276,7 @@ def refresh() -> None:
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
-    # #549 D: route.py's end-of-run oracle summary check (one staged
+    # route.py's end-of-run oracle summary check (one staged
     # kicad-cli DRC per run). Now OPT-IN (KICAD_ORACLE_SUMMARY=1), reverted
     # from default-on: it was billed as "strictly additive -- only ADDS
     # failure disclosure", but it also APPENDS to failed_multipoint, which

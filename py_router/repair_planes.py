@@ -1040,10 +1040,6 @@ def repair_planes(
     if corridor_ghosts is not None:
         print(f"  (#517 corridor ghosts armed: {_sb_mode} mode)")
 
-    # #549 B: SEPARATE seed registry from COMMITTED copper of path-critical
-    # nets (auto: the board's protected/impedance records). Soft via-site
-    # preference only; independent of KICAD_PLANE_RIP_SOFTBLOCK.
-
     # #517 instrumentation: which PASS placed each piece of this run's new
     # copper (pad-tap, region-join, partial-restore, reconnect, custody
     # restore), so a custody REFUSED-restore can name the occupier class
