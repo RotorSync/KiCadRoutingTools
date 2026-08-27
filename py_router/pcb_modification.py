@@ -3591,7 +3591,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
     from geometry_utils import segment_to_segment_closest_points, segments_intersect
     from single_ended_routing import (_seg_foreign_pad_dist, _seg_foreign_seg_dist,
                                       _seg_foreign_via_dist, _seg_foreign_hole_dist,
-                                      _scan_window)
+                                      _scan_window, _foreign_pad_arrays,
+                                      _foreign_seg_arrays, _foreign_via_arrays,
+                                      _foreign_hole_capsules)
     from routing_defaults import NPTH_TO_TRACK_CLEARANCE
     from check_drc import (board_edge_geometry, _point_on_board,
                            _segment_to_rings_distance, point_to_pad_distance)
@@ -3777,11 +3779,20 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                       f"w={w} cached_d={pd:.3f} fresh_d={pd_fresh:.3f}")
         return ok
 
-    def _clears_batch(layer, net_id, w, segs):
+    def _clears_batch(layer, net_id, w, segs, arrays=None):
         """Vectorized clears() over a set of legs (same net/layer/width). Returns
-        a numpy bool array of per-leg pass flags, bit-for-bit the same verdict as
-        calling clears() once per leg (pad/seg/via/hole exact kernels batched;
-        edge + keepout checks applied per leg)."""
+        a numpy bool array of per-leg pass flags -- bit-for-bit the same verdict
+        as calling clears() once per leg -- with edge + keepout checks applied
+        per leg.
+
+        C1 (#bulk-profile): when ``arrays`` is not None it carries PRE-WINDOWED
+        foreign-array subsets -- ``(pad_arrs_or_None_or_empty,
+        seg_arrs_or_empty_or_full...)`` -- computed once per CHAIN from its
+        bounding box (+ scan windows). Each subset provably contains every
+        obstacle whose bbox can reach within its scan window of ANY candidate
+        leg in that chain -- a superset of every per-leg ``near`` mask -- so
+        passing it into the batch kernels yields bit-for-bit identical verdicts
+        while shrinking the matrix ops from full-layer to chain-local."""
         import numpy as np
         eff = pair_base(net_id, layer)
         win = _scan_window(pcb_data, eff + w / 2.0, net_clearances, _trk_clr)
@@ -3789,16 +3800,76 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         x1s = np.array([s[0] for s in segs]); y1s = np.array([s[1] for s in segs])
         x2s = np.array([s[2] for s in segs]); y2s = np.array([s[3] for s in segs])
         nids = [net_id] * len(segs)
-        pd = _cf_pad_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
-                       base_clearance=eff, net_clearances=net_clearances,
-                       window=win)
-        sd = _cf_seg_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
-                       net_clearances=net_clearances, base_clearance=eff,
-                       track_clearances=_trk_clr, window=win)
-        vd = _cf_via_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
-                       net_clearances=net_clearances, base_clearance=eff,
-                       window=win)
-        hd = _cf_hole_b(pcb_data, nids, x1s, y1s, x2s, y2s, window=hwin)
+        if arrays is None:
+            pd = _cf_pad_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
+                           base_clearance=eff,
+                           net_clearances=net_clearances,
+                           window=win)
+            sd = _cf_seg_b(pcb_data, nids, x1s, y1s, x2s, y2s, layer,
+                           net_clearances=net_clearances,
+                           base_clearance=eff,
+                           track_clearances=_trk_clr,
+                           window=win)
+            vd = _cf_via_b(pcb_data, nids, x1s, y1s, x2s, y2s,
+                           layer,
+                           net_clearances=net_clearances,
+                           base_clearance=eff,
+                           window=win)
+            hd = _cf_hole_b(pcb_data,
+                            nids,
+                            x1s,
+                            y1s,
+                            x2s,
+                            y2s,
+                            window=hwin)
+        else:
+            pw_pad_, pw_seg_, pw_via_, pw_hole_ = arrays
+            pd = (_cf_pad_b(pcb_data,
+                            nids,
+                            x1s,
+                            y1s,
+                            x2s,
+                            y2s,
+                            layer,
+                            base_clearance=eff,
+                            net_clearances=net_clearances,
+                            window=win,
+                            arrays=pw_pad_) if pw_pad_
+                  else np.full(len(segs), 1e9))
+            sd = (_cf_seg_b(pcb_data,
+                            nids,
+                            x1s,
+                            y1s,
+                            x2s,
+                            y2s,
+                            layer,
+                            net_clearances=net_clearances,
+                            base_clearance=eff,
+                            track_clearances=_trk_clr,
+                            window=win,
+                            arrays=pw_seg_) if pw_seg_
+                  else np.full(len(segs), 1e9))
+            vd = (_cf_via_b(pcb_data,
+                            nids,
+                            x1s,
+                            y1s,
+                            x2s,
+                            y2s,
+                            layer,
+                            net_clearances=net_clearances,
+                            base_clearance=eff,
+                            window=win,
+                            arrays=pw_via_) if pw_via_
+                  else np.full(len(segs), 1e9))
+            hd = (_cf_hole_b(pcb_data,
+                             nids,
+                             x1s,
+                             y1s,
+                             x2s,
+                             y2s,
+                             window=hwin,
+                             arrays=pw_hole_) if pw_hole_
+                  else np.full(len(segs), 1e9))
         ok = ((pd >= eff + w / 2.0 - 1e-4) &
               (sd >= eff + w / 2.0 - 1e-4) &
               (vd >= eff + w / 2.0 - 1e-4) &
@@ -3808,6 +3879,101 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                keepout_clears(_x1, _y1, _x2, _y2, layer, w)):
                 ok[_k] = False
         return ok
+
+    # C1 (#bulk-profile): pre-window the foreign arrays once per CHAIN instead
+    # of scanning the full-layer arrays in every batch-kernel call. Every
+    # candidate leg of a chain lies inside the chain's bounding box (_bb), so an
+    # obstacle whose own bbox cannot reach within its scan window of _bb cannot
+    # reach within that window of ANY candidate leg -- dropping it is provably
+    # verdict-preserving (it is a superset of every per-leg ``near`` mask). The
+    # returned tuple is (pad_arrs, seg_arrs, via_arrs, hole_arrs) where each is
+    # either None (nothing on this layer / nothing to window) or the matching
+    # pre-windowed array tuple for the batch kernels. Gated by
+    # KICAD_SMOOTH_PREWINDOW (default ON; '0' restores the full-array scan for
+    # A/B equivalence testing).
+    import os as _pw_os
+    _pw_enabled = (_pw_os.environ.get('KICAD_SMOOTH_PREWINDOW', '1').strip().lower()
+                   not in ('0', 'false', 'off', 'no'))
+
+    def _prewindow_arrays(layer, net_id, w, bb):
+        """Return pre-windowed foreign-array subsets for one chain (its bbox
+        ``bb`` = (min_x, min_y, max_x, max_y)) or None when disabled. See the
+        C1 note above for the exactness argument."""
+        if not _pw_enabled:
+            return None
+        import numpy as np
+        eff = pair_base(net_id, layer)
+        win = _scan_window(pcb_data, eff + w / 2.0, net_clearances, _trk_clr)
+        hwin = _scan_window(pcb_data, npth_clr + w / 2.0)
+        bx0, by0, bx1, by1 = bb
+        out = []
+        # Pads: keep a pad when its global-axis bbox (centre +/- ext) can reach
+        # within ``win`` of the chain bbox.
+        nids_pad, cx, cy, hx, hy, crr_, rc_, rs_, ex_, ey_, plc_, custom = \
+            _foreign_pad_arrays(pcb_data, layer)
+        # CUSTOM (polygon) pads live in a separate list that the ``keep`` mask
+        # cannot filter; they must ALWAYS ride along (the batch kernel checks
+        # them per-segment via _custom_pad_min_dist). So when any custom pad
+        # exists we must return a pad tuple even if the regular-pad subset is
+        # empty -- returning None would skip the custom checks entirely.
+        if cx.size or custom:
+            keep = ((cx + ex_ >= bx0 - win) & (cx - ex_ <= bx1 + win) &
+                    (cy + ey_ >= by0 - win) & (cy - ey_ <= by1 + win))
+            if keep.any() or custom:
+                out.append((nids_pad[keep], cx[keep], cy[keep], hx[keep],
+                            hy[keep], crr_[keep], rc_[keep], rs_[keep],
+                            ex_[keep], ey_[keep], plc_[keep], custom))
+            else:
+                out.append(None)
+        else:
+            out.append(None)
+        # Segments (+ vias folded in): keep a seg when its bbox (min/max +/-
+        # half-width) can reach within ``win`` of the chain bbox.
+        nid_fs_, fax_, fay_, fbx_, fby_, fhw_ = _foreign_seg_arrays(pcb_data, layer)
+        if nid_fs_.size:
+            fminx = np.minimum(fax_, fbx_) - fhw_
+            fmaxx = np.maximum(fax_, fbx_) + fhw_
+            fminy = np.minimum(fay_, fby_) - fhw_
+            fmaxy = np.maximum(fay_, fby_) + fhw_
+            keep = ((fmaxx >= bx0 - win) & (fminx <= bx1 + win) &
+                    (fmaxy >= by0 - win) & (fminy <= by1 + win))
+            if keep.any():
+                out.append((nid_fs_[keep], fax_[keep], fay_[keep],
+                            fbx_[keep], fby_[keep], fhw_[keep]))
+            else:
+                out.append(None)
+        else:
+            out.append(None)
+        # Vias: keep a via when its centre can reach within ``win`` of the chain
+        # bbox (radius folded into the window).
+        nids_via_, cx_, cy_, rad_ = _foreign_via_arrays(pcb_data)
+        if cx_.size:
+            keep = ((cx_ >= bx0 - win - rad_) & (cx_ <= bx1 + win + rad_) &
+                    (cy_ >= by0 - win - rad_) & (cy_ <= by1 + win + rad_))
+            if keep.any():
+                out.append((nids_via_[keep], cx_[keep], cy_[keep], rad_[keep]))
+            else:
+                out.append(None)
+        else:
+            out.append(None)
+        # NPTH holes: keep a hole when its capsule bbox can reach within ``hwin``
+        # of the chain bbox.
+        nid_h_, hax_, hay_, hbx_, hby_, hr_ = _foreign_hole_capsules(pcb_data)
+        if nid_h_.size:
+            hminx = np.minimum(hax_, hbx_) - hr_
+            hmaxx = np.maximum(hax_, hbx_) + hr_
+            hminy = np.minimum(hay_, hby_) - hr_
+            hmaxy = np.maximum(hay_, hby_) + hr_
+            keep = ((hmaxx >= bx0 - hwin) & (hminx <= bx1 + hwin) &
+                    (hmaxy >= by0 - hwin) & (hminy <= by1 + hwin))
+            if keep.any():
+                out.append((nid_h_[keep], hax_[keep], hay_[keep],
+                            hbx_[keep], hby_[keep], hr_[keep]))
+            else:
+                out.append(None)
+        else:
+            out.append(None)
+        return tuple(out)
 
     def vk(x, y):
         return (round(x, 3), round(y, 3))
@@ -3981,6 +4147,10 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                     _cxs = [p[0] for p in vpts]
                     _cys = [p[1] for p in vpts]
                     _bb = (min(_cxs), min(_cys), max(_cxs), max(_cys))
+                    # C1: pre-window the foreign arrays once per chain (see
+                    # _prewindow_arrays). Passed into every _clears_batch call
+                    # below; None keeps the historical full-array scan.
+                    _pw = _prewindow_arrays(layer, net_id, w, _bb)
                     touches = []
                     for v in net_vias:
                         r = getattr(v, 'size', 0.0) / 2.0 + w / 2.0 + COINCIDENCE_TOL
@@ -4120,7 +4290,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                                         cand_idx.append(_ci)
                                 if not segs:
                                     break
-                                leg_pass = _clears_batch(layer, net_id, w, segs)
+                                leg_pass = _clears_batch(layer, net_id, w, segs,
+                                                          arrays=_pw)
                                 for _k, _ci in enumerate(cand_idx):
                                     if not leg_pass[_k]:
                                         alive[_ci] = False

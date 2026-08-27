@@ -63,12 +63,23 @@ def _capsule_batch_dist(x1s, y1s, x2s, y2s, ax, ay, bx, by):
 
 def _seg_foreign_pad_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s, layer,
                                 base_clearance=None, net_clearances=None,
-                                window=_FOREIGN_PAD_WINDOW):
-    """Batched _seg_foreign_pad_dist: per-segment min foreign-pad edge distance."""
+                                window=_FOREIGN_PAD_WINDOW, arrays=None):
+    """Batched _seg_foreign_pad_dist: per-segment min foreign-pad edge distance.
+
+    arrays optionally supplies a PRE-WINDOWED (nids_pad, cx, cy, hx, hy,
+    crr_, rc_, rs_, ex_, ey_, plc_, custom) tuple -- a subset of the full-layer
+    arrays that still contains every obstacle whose bbox can reach within
+    window of ANY query segment (a superset of each segment's own near mask).
+    The result is bit-for-bit identical to scanning the full arrays; the
+    subset only shrinks the matrix ops. When None, the full cached arrays are
+    used (the historical behaviour)."""
     nids_arr = np.asarray(net_ids)
     N = len(x1s)
-    nids_pad, cx, cy, hx, hy, crr_, rc_, rs_, ex_, ey_, plc_, custom = \
-        _foreign_pad_arrays(pcb_data, layer)
+    if arrays is None:
+        nids_pad, cx, cy, hx, hy, crr_, rc_, rs_, ex_, ey_, plc_, custom = \
+            _foreign_pad_arrays(pcb_data, layer)
+    else:
+        (nids_pad, cx, cy, hx, hy, crr_, rc_, rs_, ex_, ey_, plc_, custom) = arrays
     best_custom = np.full(N, 1e9)
     if custom:
         for i in range(N):
@@ -164,11 +175,19 @@ def _seg_foreign_pad_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s, layer,
 def _seg_foreign_seg_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s, layer,
                                 net_clearances=None, base_clearance=0.0,
                                 track_clearances=None,
-                                window=_FOREIGN_PAD_WINDOW):
-    """Batched _seg_foreign_seg_dist: per-segment min foreign seg/via edge distance."""
+                                window=_FOREIGN_PAD_WINDOW, arrays=None):
+    """Batched _seg_foreign_seg_dist: per-segment min foreign seg/via edge distance.
+
+    arrays optionally supplies a PRE-WINDOWED (nid_fs_, fax_, fay_, fbx_,
+    fby_, fhw_) tuple -- a superset of every segment's own near mask (see
+    _seg_foreign_pad_dist_batch). Bit-for-bit identical result; only the matrix
+    size shrinks."""
     nids_arr = np.asarray(net_ids)
     N = len(x1s)
-    nid_fs_, fax_, fay_, fbx_, fby_, fhw_ = _foreign_seg_arrays(pcb_data, layer)
+    if arrays is None:
+        nid_fs_, fax_, fay_, fbx_, fby_, fhw_ = _foreign_seg_arrays(pcb_data, layer)
+    else:
+        (nid_fs_, fax_, fay_, fbx_, fby_, fhw_) = arrays
     if nid_fs_.size == 0:
         return np.full(N, 1e9)
     R = window
@@ -199,11 +218,19 @@ def _seg_foreign_seg_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s, layer,
 
 def _seg_foreign_via_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s, layer,
                                 net_clearances=None, base_clearance=0.0,
-                                window=_FOREIGN_PAD_WINDOW):
-    """Batched _seg_foreign_via_dist: per-segment min foreign-via edge distance."""
+                                window=_FOREIGN_PAD_WINDOW, arrays=None):
+    """Batched _seg_foreign_via_dist: per-segment min foreign-via edge distance.
+
+    arrays optionally supplies a PRE-WINDOWED (nids_via_, cx_, cy_, rad_)
+    tuple -- a superset of every segment's own near mask (see
+    _seg_foreign_pad_dist_batch). Bit-for-bit identical result; only the matrix
+    size shrinks."""
     nids_arr = np.asarray(net_ids)
     N = len(x1s)
-    nids_via_, cx_, cy_, rad_ = _foreign_via_arrays(pcb_data)
+    if arrays is None:
+        nids_via_, cx_, cy_, rad_ = _foreign_via_arrays(pcb_data)
+    else:
+        (nids_via_, cx_, cy_, rad_) = arrays
     if cx_.size == 0:
         return np.full(N, 1e9)
     R = window
@@ -235,11 +262,19 @@ def _seg_foreign_via_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s, layer,
 
 
 def _seg_foreign_hole_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s,
-                                 window=_FOREIGN_PAD_WINDOW):
-    """Batched _seg_foreign_hole_dist: per-segment min foreign NPTH-hole distance."""
+                                 window=_FOREIGN_PAD_WINDOW, arrays=None):
+    """Batched _seg_foreign_hole_dist: per-segment min foreign NPTH-hole distance.
+
+    arrays optionally supplies a PRE-WINDOWED (nid_h_, hax_, hay_, hbx_,
+    hby_, hr_) tuple -- a superset of every segment's own near mask (see
+    _seg_foreign_pad_dist_batch). Bit-for-bit identical result; only the matrix
+    size shrinks."""
     nids_arr = np.asarray(net_ids)
     N = len(x1s)
-    nid_h_, hax_, hay_, hbx_, hby_, hr_ = _foreign_hole_capsules(pcb_data)
+    if arrays is None:
+        nid_h_, hax_, hay_, hbx_, hby_, hr_ = _foreign_hole_capsules(pcb_data)
+    else:
+        (nid_h_, hax_, hay_, hbx_, hby_, hr_) = arrays
     if nid_h_.size == 0:
         return np.full(N, 1e9)
     R = window
