@@ -72,9 +72,15 @@ def refresh() -> None:
     # SI Phase 2: victim-net routing enforcement (aggressor-proximity
     # costs). Default ON; KICAD_SI_ENFORCE=0 turns it off. Radius/cost
     # knobs tune the proximity band (mm) and its peak cost (mm-equivalent).
+    # Defaults tuned 1.5/0.44 -> 0.8/0.1 on the carrier timing A/B: the
+    # 1.5mm band steered victims away from aggressors beyond the metric's
+    # own 1.0mm coupling window (wasted steering), and 0.44 over-priced the
+    # remaining band. 0.8/0.1 keeps most of the si_coupling win (+6.6 vs
+    # OFF, default's +11.5) at +0.8% step6 user time (default +12.8%),
+    # within the +5% budget; see carrier_lab/si_corpus_findings.md.
     g['SI_ENFORCE'] = _on_default('KICAD_SI_ENFORCE')
-    g['SI_ENFORCE_RADIUS'] = _f('KICAD_SI_ENFORCE_RADIUS', 1.5)
-    g['SI_ENFORCE_COST'] = _f('KICAD_SI_ENFORCE_COST', 0.44)
+    g['SI_ENFORCE_RADIUS'] = _f('KICAD_SI_ENFORCE_RADIUS', 0.8)
+    g['SI_ENFORCE_COST'] = _f('KICAD_SI_ENFORCE_COST', 0.1)
     g['SI_ENFORCE_DEBUG'] = _s('KICAD_SI_ENFORCE_DEBUG', '') == '1'
     # Phase B Task 2: plan-informed net ordering (most-congested corridors
     # first). Default OFF; KICAD_PLANNER_ORDERING=1 turns it on. No CLI flag
