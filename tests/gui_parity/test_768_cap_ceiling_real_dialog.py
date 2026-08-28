@@ -98,10 +98,14 @@ def main():
     failures = []
 
     def check(name, cond, detail=""):
+        # `detail` is the FAILURE explanation, so print it only on
+        # failure -- a PASS line carrying "so the cap pass runs the
+        # OMITTED branch" reads as a contradiction. The same note is on
+        # test_733_cap_edge_clearance_gui's check, for the same reason.
         if not cond:
             failures.append(name)
         print(("  PASS " if cond else "  FAIL ") + name
-              + (f"  {detail}" if detail else ""))
+              + (f"  {detail}" if detail and not cond else ""))
 
     # -- capture the kwargs, run nothing ------------------------------------
     seen = {}
@@ -135,6 +139,51 @@ def main():
         return 0
 
     ABSENT = '<<absent>>'
+
+    def _inline_cfg():
+        """The fanout_config `_run_bga_fanout` ACTUALLY builds (#780).
+
+        The arms below used to assemble one by hand from
+        `get_shared_params()` and inject `clearance_ceiling` into it. That
+        proved `_optimize_decoupling_caps` READS the key -- which it does --
+        and never that the inline path SUPPLIES it, which it did not: the
+        dict `_run_bga_fanout` constructs had no such key, so the inline cap
+        pass ran #768's OMITTED branch whatever the operator ticked. The
+        section was labelled `the INLINE path` throughout.
+
+        So: drive the real method, with the worker thread and the poll
+        stubbed, and read the dict it hands on. Nothing is routed.
+        """
+        import threading
+        captured = {}
+        real_poll = tab._poll_operation
+        real_thread = threading.Thread
+
+        class _NoThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                pass
+
+        tab._poll_operation = lambda apply_kw, kind: captured.update(apply_kw)
+        threading.Thread = _NoThread
+        try:
+            cfg = tab.bga_options.get_config()
+            cfg['optimize_caps'] = True
+            fp = sorted(parse_kicad_pcb(board).footprints)[0]
+            try:
+                tab._run_bga_fanout(fp, ['*'], cfg)
+            except Exception:                              # noqa: BLE001
+                pass    # the engine half is stubbed; we want the dict only
+        finally:
+            tab._poll_operation = real_poll
+            threading.Thread = real_thread
+        if 'fanout_config' not in captured:
+            raise AssertionError(
+                '_run_bga_fanout never reached _poll_operation, so there is '
+                'no config to read and every check below would be vacuous')
+        return captured['fanout_config']
 
     def _drive(cfg):
         """Call the tab's cap step with `cfg` and return the engine kwargs.
@@ -170,13 +219,22 @@ def main():
           "keys=%d" % len(shared))
 
     # -- 2. the INLINE path, both positions of the override -----------------
+    # #780: the config comes from `_run_bga_fanout` itself now, not from a
+    # dict assembled here. Injecting the key was what let this section read
+    # green while the inline path never carried it.
     for ticked in (False, True):
-        cfg = dict(shared)
-        cfg['clearance_ceiling'] = 0.2 if ticked else None
-        cfg['clearance'] = 0.2
+        dlg.clearance_check.SetValue(ticked)
+        dlg.clearance.SetValue(0.2)
+        cfg = _inline_cfg()
+        want = 0.2 if ticked else None
+        got_cfg = cfg.get('clearance_ceiling', ABSENT)
+        check("inline: _run_bga_fanout CARRIES the ceiling, override %s"
+              % ('CHECKED' if ticked else 'unchecked'),
+              got_cfg == want,
+              "the dict the inline path builds has clearance_ceiling=%r, "
+              "so the cap pass runs #768's OMITTED branch" % (got_cfg,))
         kw = _drive(cfg)
         got = kw.get('netclass_ceiling', ABSENT)
-        want = 0.2 if ticked else None
         check("inline: override %s -> ceiling %r"
               % ('CHECKED' if ticked else 'unchecked', want),
               got == want, "got %r" % (got,))
