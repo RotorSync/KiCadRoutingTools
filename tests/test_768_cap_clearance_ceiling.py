@@ -985,11 +985,39 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         rather than passing them through, so a key it does not list reads as
         its `.get` default however correct the gate is. That is how the first
         cut of this change was inert on the plan-executor path while looking
-        right inline -- the #693 shape the parity ledger records."""
+        right inline -- the #693 shape the parity ledger records.
+
+        THE INDENT IS PART OF THE ASSERTION (#780). This arm used to strip
+        it, and when the INLINE config gained the same two lines one block
+        deeper, the inline copy satisfied an arm named for the standalone
+        path -- deleting the standalone pair outright left it green. A
+        source grep that cannot tell two call sites apart is not a guard on
+        either of them.
+        """
         src = self._src(self.GUI)
-        for key in ("'clamp_netclasses': shared.get('clamp_netclasses', False),",
-                    "'clearance_ceiling': shared.get('clearance_ceiling'),"):
-            self.assertIn(key, src)
+        for key in ("\n            'clamp_netclasses': "
+                    "shared.get('clamp_netclasses', False),",
+                    "\n            'clearance_ceiling': "
+                    "shared.get('clearance_ceiling'),"):
+            self.assertIn(key, src,
+                          'the STANDALONE cfg (run_cap_optimization, one '
+                          'indent shallower than the inline one) must '
+                          'carry it')
+
+    def test_the_inline_path_carries_it_too(self):
+        """#780: `_run_bga_fanout` builds its own dict as well, and did not.
+
+        Named separately from the arm above rather than folded into it,
+        because one assertion covering two call sites is what let the
+        standalone one go dark. Neither of these can see a WRONG value --
+        that is the real-dialog gate's job, and both call sites are driven
+        there now."""
+        src = self._src(self.GUI)
+        self.assertIn("\n                'clearance_ceiling': "
+                      "shared.get('clearance_ceiling'),", src,
+                      'the INLINE cap config must carry the ceiling; '
+                      'without it the checkbox path runs the OMITTED '
+                      'branch whatever the operator ticked')
 
     def test_the_real_dialog_gate_exists_and_is_registered(self):
         """A behavioural claim this file cannot make must be made SOMEWHERE."""
