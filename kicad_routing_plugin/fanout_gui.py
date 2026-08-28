@@ -1717,6 +1717,23 @@ class FanoutTab(wx.Panel):
                 # Advanced cap-placement knobs (#130) so the inline checkbox
                 # path honours them too, not just defaults.
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
+                # #780: ...and the #768 netclass CEILING, which is NOT a
+                # cap_* key and so is not swept up by the line above.
+                # _optimize_decoupling_caps reads `clearance_ceiling` off
+                # THIS dict, and the standalone path
+                # (run_cap_optimization) has always supplied it from
+                # `shared` -- this one did not, so the INLINE cap pass ran
+                # #768's OMITTED branch whatever the operator typed and
+                # ticked. Measured on the real headless dialog before this
+                # existed: Min Clearance override CHECKED at 0.2 ->
+                # get_shared_params carried clearance_ceiling=0.2 and the
+                # engine still received netclass_ceiling=None.
+                #
+                # `clamp_netclasses` rides along because the two are one
+                # decision on the standalone path and reading them from
+                # different places is how they came apart here.
+                'clamp_netclasses': shared.get('clamp_netclasses', False),
+                'clearance_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
