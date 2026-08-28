@@ -56,8 +56,20 @@ def close(a, b, tol=1e-9):
 
 
 def t_self_test():
-    """The kernel's own arms, run from here so run_all sees them."""
-    n = rs._self_test(force=True)
+    """The kernel's own arms, run from here so run_all sees them.
+
+    It CATCHES rather than propagates, and it runs LAST. The first version ran
+    first and let the AssertionError escape, so every mutation in
+    `mutate_703.py` was killed by this one function and the sixty-odd checks
+    below it never executed -- the battery reported 16 kills for a file whose
+    external coverage was entirely unmeasured. A self-test that aborts the
+    suite it leads is indistinguishable from a suite with nothing else in it.
+    """
+    try:
+        n = rs._self_test(force=True)
+    except AssertionError as e:
+        check(False, f'kernel self-test raised: {e}')
+        return
     check(n >= 40, f'kernel self-test ran {n} assertions (expected >= 40)')
 
 
@@ -272,13 +284,23 @@ def t_board_rho_drops_nulls_and_says_so():
 
 
 def main():
-    for fn in (t_self_test, t_values_not_shapes, t_nan_never_zero, t_loo_span,
+    # The kernel's own self-test runs LAST, and every check below is written to
+    # stand without it. If it led, a mutation that trips it would abort the file
+    # and the external coverage would never be exercised -- which is precisely
+    # what the first run of `mutate_703.py` reported.
+    for fn in (t_values_not_shapes, t_nan_never_zero, t_loo_span,
                t_formatter_cannot_emit_a_bare_rho, t_named_refusals_not_typeerrors,
                t_anti_pooling_is_a_type_contract,
                t_saturation_is_reported_never_dropped, t_sign_test_arithmetic,
-               t_board_rho_drops_nulls_and_says_so):
+               t_board_rho_drops_nulls_and_says_so, t_self_test):
         print(f'{fn.__name__}:')
-        fn()
+        try:
+            fn()
+        except Exception as e:                                  # noqa: BLE001
+            # One case raising must not hide the ones after it. A mutation that
+            # makes a refusal fire in an unexpected place would otherwise
+            # silence every later check and still read as a clean kill.
+            check(False, f'{fn.__name__} raised {type(e).__name__}: {e}')
     if FAILURES:
         print(f'\nFAILED {len(FAILURES)}:')
         for f in FAILURES:
