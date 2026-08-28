@@ -9,8 +9,15 @@ inert. So the edits live here, as data, next to the numbers they produced.
 
 Every row carries an EXPECTATION. Some mutations are deliberately inert, and an
 inert row recorded as an expected survivor is a finding, while an inert row
-quietly deleted is a hole. `writeback-spends-the-flag-not-the-priced-value` is
-the one here, and its reasoning is written beside it.
+quietly deleted is a hole.
+
+THERE IS NO EXPECTED SURVIVOR IN THIS TABLE TODAY, and saying so is the
+point of the paragraph. It named `writeback-spends-the-flag-not-the-priced-
+value` -- a row that is not in ROWS and was already absent at the #768
+branch tip that shipped this prose. So the file described a hole it did not
+have, which is the same failure as an inert row deleted, one level up:
+prose about the table rotting instead of the table. If a row here ever does
+go inert, record it as SURVIVED with its reason and name it here again.
 
 SEVEN targets, four more than any previous copy: the change spans the model
 (`legality.py`), the engine (`fanout_clearance.py`), the CLI main

@@ -76,9 +76,19 @@ Conventions (from #725/#731/#732/#733/#737/#750/#756 and CLAUDE.md): REAL parser
 dataclasses; every assertion names the single-line MUTATION that must kill it,
 with the count the battery measured; assert you are ON the branch before
 asserting about it; every refusal paired with an acceptance that still happens.
-The battery ships as `tests/mutate_768.py`. Measured, 28 rows:
+The battery ships as `tests/mutate_768.py`. Measured, 31 rows:
 
-    27 KILLED, 1 SURVIVED (expected), 0 BROKEN
+    31 KILLED, 0 SURVIVED, 0 BROKEN
+
+RE-MEASURED AT #780, AND THE PREVIOUS NUMBER WAS ALREADY WRONG. It said
+28 rows / 27 KILLED / 1 expected SURVIVOR; the branch that shipped it had
+30 rows and no survivor -- the row it named
+(`writeback-spends-the-flag-not-the-priced-value`) is not in ROWS and was
+not in ROWS then either. #780 adds one row, takes the total to 31, and
+re-derives the whole line from a run rather than editing the old one to
+agree. Two rows in that run reported BROKEN before being re-anchored, both
+because #780 moved text a row quoted; a BROKEN row exits the battery
+non-zero, which is how they were found rather than assumed.
 
 Seven of those rows exist because a CLI/GUI parity review found the GUI gate
 reading the WRONG control (`fix_drc_settings`, a box that clamps no net class at
