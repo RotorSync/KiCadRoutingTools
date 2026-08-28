@@ -246,12 +246,27 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _nc = getattr(config, 'net_clearances', None) or None
     _bec = getattr(config, 'board_edge_clearance', 0.0) or 0.0
 
+    # C3 (#bulk-profile): per-pass wall timing for the graze window, gated by
+    # KICAD_CLEANUP_TIMING=1 (measurement only -- never changes behavior).
+    import time as _ct_time
+    _ct_on = (os.environ.get('KICAD_CLEANUP_TIMING', '0').strip().lower()
+              not in ('0', 'false', 'off', 'no'))
+    def _ct(name):
+        if not _ct_on:
+            return None
+        return (_ct_time.monotonic(), name)
+    def _ct_end(t):
+        if t is not None:
+            print(f"[CLEANUP_TIMING]{label}{t[1]}: {_ct_time.monotonic()-t[0]:.2f}s")
+
     if graze:
         _prog("graze prune")
+        _t = _ct("graze_prune")
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             check_foreign_segments=True, keep_input_copper=keep_input_copper,
             net_clearances=_nc)
+        _ct_end(_t)
         counts['graze_pruned'] = _gz_segs
         _trace('graze')
         strip.extend(_gz_strip)
@@ -262,9 +277,11 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # and that prune_grazing_segments' strict gate refused (the surviving A~C
         # overlap is non-coincident), by welding the solidly-overlapping neighbours
         # coincident (picodvi DVI_CK terminal-leg jog).
+        _t = _ct("weld_detour")
         _wd_segs, _wd_nets, _wd_strip = weld_redundant_grazing_detours(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             keep_input_copper=keep_input_copper, net_clearances=_nc)
+        _ct_end(_t)
         counts['detours_welded'] = _wd_segs
         _trace('weld_detour')
         strip.extend(_wd_strip)
@@ -274,10 +291,12 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     if octolinear:
         _prog("octolinear graze re-bend")
+        _t = _ct("octolinear")
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             keep_input_copper=keep_input_copper,
             net_clearances=_nc, board_edge_clearance=_bec)
+        _ct_end(_t)
         counts['octolinear_nudged'] = _nz_segs
         _trace('octolinear')
         strip.extend(_nz_strip)
@@ -286,6 +305,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"on {_nz_nets} net(s)")
 
     _prog("graze micro-shift")
+    _t = _ct("microshift")
     _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
         results, pcb_data, scope_net_ids, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
@@ -299,6 +319,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # `config.hole_clearance` override reaches resolve_hole_clearance
         # rather than being silently dropped. Both fronts call this pipeline.
         config=config)
+    _ct_end(_t)
     counts['microshifted'] = _ms_segs
     _trace('microshift')
     strip.extend(_ms_strip)
@@ -308,6 +329,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     if via_nudge:
         _prog("via nudge")
+        _t = _ct("via_nudge")
         _vn_moved, _vn_nets, _ = nudge_grazing_vias(
             results, pcb_data, scope_net_ids, clearance=config.clearance,
             hole_to_hole=config.hole_to_hole_clearance,
@@ -320,6 +342,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             net_clearances=_nc, board_edge_clearance=_bec,
             same_net_pad_clearance=getattr(config, 'same_net_pad_clearance',
                                            -1.0))  # #581
+        _ct_end(_t)
         counts['vias_nudged'] = _vn_moved
         _trace('via_nudge')
         if _vn_moved:
