@@ -318,6 +318,19 @@ def t_saturation_is_reported_never_dropped():
           'the printed form names the saturated board')
     check('NOT over the planned count' in lines,
           'the printed p states its own denominator')
+    # The zero COUNT must not collide with its own marker. This rendered as
+    # "30" for three zero boards -- in a module whose thesis is that a number
+    # must not be misreadable, that is on topic. Found by an adversarial review.
+    z = rs.format_sign_test('z', rs.sign_test(
+        {f'b{i}': rs.BoardRho(0.0, 4) for i in range(3)}))[0]
+    check('3 zero' in z, f'three zero boards render as "3 zero", not "30": {z!r}')
+    check('0 pos' in z and '0 neg' in z,
+          f'and each count carries its own word: {z!r}')
+    # An empty mapping must print no p-value line at all rather than one whose
+    # value is None.
+    empty = rs.format_sign_test('empty', rs.sign_test({}))
+    check(all('p(two-sided)' not in ln for ln in empty),
+          f'an empty mapping prints no p line: {empty}')
 
 
 def t_sign_test_arithmetic():
@@ -371,6 +384,32 @@ def t_board_rho_drops_nulls_and_says_so():
     br = rs.board_rho(rows, 'x', 'headline')
     check(br.n == 3 and 'dropped' in (br.reason or ''),
           'a null TRUTH (board_score could not run) drops the row too')
+    # A NaN VALUE and an absent one are different facts, and the reason string
+    # is the only thing a reader has to go on. A null is "never computed here";
+    # a NaN is "computed, came back undefined". Reporting both as "null"
+    # misnames the cause -- found by an adversarial review.
+    rows = _rows([0, 1, 2, 3])
+    rows[0]['predictors']['x'] = rs.NAN
+    br = rs.board_rho(rows, 'x', 'headline')
+    check('NaN value' in (br.reason or ''),
+          f'a dropped NaN says NaN: {br.reason!r}')
+    check('null' not in (br.reason or ''),
+          f'and does NOT call it a null: {br.reason!r}')
+    # Both at once must report both counts, not one merged number.
+    rows = _rows([0, 1, 2, 3, 4])
+    rows[0]['predictors']['x'] = None
+    rows[1]['predictors']['x'] = rs.NAN
+    br = rs.board_rho(rows, 'x', 'headline')
+    check('null value' in (br.reason or '') and 'NaN value' in (br.reason or ''),
+          f'a null and a NaN are counted separately: {br.reason!r}')
+    # The remaining board_rho arms, which no external check reached before.
+    check(rs.board_rho(_rows([0, 1]), 'x', 'headline').reason == 'n=2 < 3',
+          'n below MIN_N names the number')
+    flat = [{'board_key': 'b', 'predictors': {'x': 1}, 'truth': {'headline': 1}}
+            for _ in range(4)]
+    check('predictor AND truth constant' in
+          (rs.board_rho(flat, 'x', 'headline').reason or ''),
+          'both-constant is its own reason, not one of the two singles')
     d = rs.board_rho(_rows([0, 1, 2, 3]), 'x', 'headline').as_dict()
     check(set(d) >= {'rho', 'n', 'reason', 'loo_lo', 'loo_hi', 'display'},
           'as_dict carries the scope fields a document needs')
