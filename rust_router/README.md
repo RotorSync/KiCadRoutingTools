@@ -312,6 +312,25 @@ src/
 ## Version History
 
 
+### 0.25.0 (2026-08-28)
+
+- Lane A adaptive fruitless cap: RATE-OF-IMPROVEMENT rule on the #529 dynamic
+  iteration extension. `rate_window` / `rate_cells` / `rate_pct` parameters on
+  `route_multi` / `route_with_frontier` (defaults 0 / 0.0 / 0.0 = disabled,
+  byte-identical to prior behavior). Once `rate_window` tranches have been
+  granted, extension is denied unless `best_h` has dropped by at least
+  max(`rate_cells` grid cells, `rate_pct`% of `initial_h`) over that window
+  -- sustained meaningful progress, not minimal per-tranche creep. A
+  wall-contouring search whose `best_h` decays at ~1-2%/tranche (the C2
+  carrier grinders) stops earning and falls back to the rip-up ladder sooner;
+  a genuine long detour whose `best_h` drops ~7-15%/tranche (the C2 kitdev
+  completers that a hard CEILING=600000 wrongly cut, burning +5.1M iters in
+  premature rip-up fallback) keeps riding. Pure iteration-count accounting on
+  deterministic values: identical across threads and runs. The C2
+  `fruitless_pct` fixed-fraction cap remains available for A/B.
+  Calibration-only trace: `GRID_ROUTER_TRACE=1` emits one line per tranche
+  grant/denial to stderr (never affects search state).
+
 ### 0.24.0 (2026-08-27)
 
 - C2 fruitless-iteration cap: `fruitless_pct` parameter on `route_multi` /

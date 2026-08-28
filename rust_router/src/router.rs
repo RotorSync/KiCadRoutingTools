@@ -450,15 +450,41 @@ pub(crate) struct GridSearch {
     grace_used: u32,
     /// Extension tranches granted (RouteStats.iteration_tranches).
     pub(crate) tranches_granted: u32,
-    /// C2 fruitless cap: fraction of initial_h below which best_h must have
-    /// dropped for the search to keep earning tranches. 0.0 = disabled (the
-    /// default). A search contouring a wall keeps improving best_h by tiny
-    /// per-tranche quanta (2 cells / 2%) and can ride to the ceiling without
-    /// ever approaching the target; this cumulative check stops extension
-    /// once best_h is still above `fruitless_pct * initial_h` after the
-    /// first tranche -- the search is not genuinely approaching, so it falls
-    /// back to the caller's rip-up ladder sooner. Deterministic.
+    /// Adaptive fruitless rule (lane A): RATE-OF-IMPROVEMENT check on top
+    /// of the #529 per-tranche quantum. A wall-contouring search can keep
+    /// passing the tiny per-tranche quantum (max(2 cells, 2%)) forever while
+    /// creeping around an obstacle -- best_h drops by exactly one quantum each
+    /// tranche and never approaches the target, so it rides to the ceiling.
+    /// The C2 fixed-fraction cap (`fruitless_pct`) tried to catch this but was
+    /// too blunt: it cut genuine long detours whose best_h legitimately stays
+    /// high for many tranches (kitdev CEILING=600000 A/B burned +5.1M iters
+    /// from premature rip-up-ladder fallback).
+    ///
+    /// This rule measures the RATE of improvement over a window of granted
+    /// tranches: once `rate_window` tranches have been granted, extension is
+    /// denied unless best_h has dropped by at least
+    /// max(`rate_cells` * cell_h_unit, `rate_pct`% of initial_h) over that
+    /// window -- i.e. sustained meaningful progress, not minimal creep.
+    /// A search still approaching keeps earning; one whose improvement has
+    /// decayed to creep stops and falls back to the caller's rip-up ladder
+    /// sooner. Pure iteration-count accounting on deterministic values:
+    /// identical across threads and runs.
+    ///
+    /// `rate_window` = 0 disables (the default).
+    rate_window: u32,
+    /// C2 fixed-fraction fruitless cap (retained for A/B; default 0.0 = off).
     fruitless_pct: f32,
+    /// Minimum cumulative best_h improvement over `rate_window` granted
+    /// tranches required to keep earning -- grid-cell floor.
+    rate_cells: f64,
+    /// ... and relative floor (% of initial_h).
+    rate_pct: f64,
+    /// Ring buffer of best_h at each grant point (len = rate_window).
+    rate_history: Vec<i32>,
+    /// GRID_ROUTER_TRACE=1: emit one line per tranche grant/denial to stderr
+    /// (iterations, best_h, initial_h, tranches, reason). Calibration-only;
+    /// off by default and never affects search state.
+    trace: bool,
 }
 
 impl GridSearch {
@@ -544,7 +570,12 @@ impl GridSearch {
             grace_tranches: 0,
             grace_used: 0,
             tranches_granted: 0,
+            rate_window: 0,
+            rate_cells: 0.0,
+            rate_pct: 0.0,
+            rate_history: Vec::new(),
             fruitless_pct: 0.0,
+            trace: std::env::var("GRID_ROUTER_TRACE").map(|v| v == "1").unwrap_or(false),
         }
     }
 
@@ -560,12 +591,25 @@ impl GridSearch {
     pub(crate) fn set_iteration_ceiling(&mut self, ceiling: u32,
                                         quantum_cells: f64, quantum_pct: f64,
                                         grace_tranches: u32,
-                                        fruitless_pct: f32) {
+                                        fruitless_pct: f32,
+                                        rate_window: u32,
+                                        rate_cells: f64,
+                                        rate_pct: f64) {
         self.iteration_ceiling = ceiling.max(self.max_iterations);
         self.quantum_h = ((self.cell_h_unit as f64 * quantum_cells).max(1.0)) as i32;
         self.quantum_frac = (quantum_pct / 100.0) as f32;
         self.grace_tranches = grace_tranches;
+        // C2 fixed-fraction fruitless cap retained (env-gated, default 0.0 =
+        // off) for A/B comparison; the lane-A adaptive rate rule below is the
+        // replacement the gates exercise.
         self.fruitless_pct = fruitless_pct;
+        self.rate_window = rate_window;
+        self.rate_cells = rate_cells;
+        self.rate_pct = rate_pct;
+        if rate_window > 0 {
+            self.rate_history.clear();
+            self.rate_history.reserve(rate_window as usize);
+        }
     }
 
     /// #529 tranche grant, called with the iteration cap reached: returns true
@@ -574,8 +618,31 @@ impl GridSearch {
     /// at the tranche start). Each tranche must pay for the next, so a
     /// slow-creep flood cannot ride to the ceiling without genuinely
     /// approaching the targets. Pure search-internal state: deterministic.
+    ///
+    /// Lane A adaptive fruitless rule: on top of the per-tranche quantum, once
+    /// `rate_window` tranches have been granted, extension is denied unless
+    /// best_h has dropped by at least max(`rate_cells` * cell_h_unit,
+    /// `rate_pct`% of initial_h) over that window -- sustained meaningful
+    /// progress, not minimal creep. The window is a ring of best_h at each
+    /// GRANT point, so a search that improved early and then decayed to creep
+    /// is denied once its window no longer shows net progress.
+    ///
+    /// MEASURED (lane A): this rule is board-fragile -- carrier's grinders and
+    /// genuine long detours have overlapping best_h decay rates (serpentine
+    /// ~4%/tranche, carrier grinders ~1.6%, kitdev completers ~7-15%), so no
+    /// threshold separates them cleanly. A grant-point-only check is inert on
+    /// both corpus boards (searches that complete plunge before the next grant
+    /// decision; searches that stall are already handled by grace). A
+    /// mid-tranche check (window at every cap hit) cuts genuine detours AND,
+    /// at a threshold that saves iterations on carrier (w2 p2: -1.6M iters),
+    /// ships RTL_RXN broken (open_single) -- the rip-up ladder cannot recover
+    /// the cut searches. Default OFF.
     fn extend_budget(&mut self) -> bool {
         if self.max_iterations >= self.iteration_ceiling || self.tranche_ref_h == i32::MAX {
+            if self.trace {
+                eprintln!("GRID_TRACE it={} best_h={} initial_h={} tranches={} reason=ceiling",
+                          self.iterations, self.best_h, self.initial_h, self.tranches_granted);
+            }
             return false;
         }
         // C2 cumulative fruitless check: once the first tranche has been
@@ -587,6 +654,10 @@ impl GridSearch {
         if self.fruitless_pct > 0.0 && self.tranches_granted >= 1 {
             let floor = (self.initial_h as f32 * self.fruitless_pct) as i32;
             if self.best_h > floor {
+                if self.trace {
+                    eprintln!("GRID_TRACE it={} best_h={} initial_h={} tranches={} reason=fruitless_pct floor={}",
+                              self.iterations, self.best_h, self.initial_h, self.tranches_granted, floor);
+                }
                 return false;
             }
         }
@@ -597,17 +668,50 @@ impl GridSearch {
             // tranches, keeping the reference where real progress last stood
             // so the eventual grant is judged against the pre-plateau mark.
             if self.grace_used >= self.grace_tranches {
+                if self.trace {
+                    eprintln!("GRID_TRACE it={} best_h={} initial_h={} tranches={} reason=grace_exhausted",
+                              self.iterations, self.best_h, self.initial_h, self.tranches_granted);
+                }
                 return false;
             }
             self.grace_used += 1;
         } else {
             self.tranche_ref_h = self.best_h;
             self.grace_used = 0;
+            // Lane A rate-of-improvement gate: evaluated only on genuine
+            // progress tranches. Once `rate_window` grants have been
+            // recorded, extension is denied unless best_h has dropped by at
+            // least max(rate_cells * cell_h_unit, rate_pct% of initial_h)
+            // over that window -- sustained meaningful progress, not minimal
+            // creep. The window is a ring of best_h at each grant point.
+            if self.rate_window > 0 && self.tranches_granted >= self.rate_window {
+                let window_start = self.rate_history[0];
+                let min_drop = (self.cell_h_unit as f64 * self.rate_cells)
+                    .max(self.initial_h as f64 * self.rate_pct / 100.0) as i32;
+                if window_start.saturating_sub(self.best_h) < min_drop {
+                    if self.trace {
+                        eprintln!("GRID_TRACE it={} best_h={} initial_h={} tranches={} reason=rate window_start={} min_drop={}",
+                                  self.iterations, self.best_h, self.initial_h,
+                                  self.tranches_granted, window_start, min_drop);
+                    }
+                    return false;
+                }
+            }
         }
         self.max_iterations = self.max_iterations
             .saturating_add(self.base_iterations)
             .min(self.iteration_ceiling);
         self.tranches_granted += 1;
+        if self.trace {
+            eprintln!("GRID_TRACE it={} best_h={} initial_h={} tranches={} reason=grant",
+                      self.iterations, self.best_h, self.initial_h, self.tranches_granted);
+        }
+        if self.rate_window > 0 {
+            if self.rate_history.len() >= self.rate_window as usize {
+                self.rate_history.remove(0);
+            }
+            self.rate_history.push(self.best_h);
+        }
         true
     }
 
@@ -1169,7 +1273,7 @@ impl GridRouter {
     /// ceiling. 0 (the default) disables: existing callers are unchanged.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, fruitless_pct=0.0, via_rung=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, fruitless_pct=0.0, rate_window=0, rate_cells=0.0, rate_pct=0.0, via_rung=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
@@ -1188,6 +1292,9 @@ impl GridRouter {
         quantum_pct: f64,
         grace_tranches: u32,
         fruitless_pct: f32,
+        rate_window: u32,
+        rate_cells: f64,
+        rate_pct: f64,
         via_rung: usize,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
         let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
@@ -1196,7 +1303,7 @@ impl GridRouter {
         opts.via_rung = via_rung;
         let mut sink = StatsSink::default();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
-        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches, fruitless_pct);
+        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches, fruitless_pct, rate_window, rate_cells, rate_pct);
         sink.stats.initial_h = search.initial_h;
 
         loop {
@@ -1248,7 +1355,7 @@ impl GridRouter {
     /// 0 (the default) disables.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, fruitless_pct=0.0, via_rung=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, fruitless_pct=0.0, rate_window=0, rate_cells=0.0, rate_pct=0.0, via_rung=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
@@ -1267,6 +1374,9 @@ impl GridRouter {
         quantum_pct: f64,
         grace_tranches: u32,
         fruitless_pct: f32,
+        rate_window: u32,
+        rate_cells: f64,
+        rate_pct: f64,
         via_rung: usize,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
         let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
@@ -1275,7 +1385,7 @@ impl GridRouter {
         opts.via_rung = via_rung;
         let mut sink = FrontierSink::new();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
-        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches, fruitless_pct);
+        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches, fruitless_pct, rate_window, rate_cells, rate_pct);
 
         loop {
             match search.step(self, obstacles, &mut sink) {
@@ -1738,45 +1848,125 @@ mod tests {
         (router, obs)
     }
 
+    /// Build a one-layer serpentine corridor (genuine long detour): the
+    /// search must snake through every row to reach the target. best_h drops
+    /// ~7%/tranche -- a rate rule must NOT cut it.
+    fn serpentine_scenario(width: i32, walls: i32) -> (GridRouter, GridObstacleMap,
+                                                       Vec<(i32, i32, u8)>, Vec<(i32, i32, u8)>) {
+        let router = GridRouter::new(
+            500, 1.9, None, None, 0, 0, None, None, None, 0, 0, 0, 0, 0);
+        let mut obs = GridObstacleMap::new(1);
+        let height = walls * 2 + 1;
+        let mut blocked = Vec::new();
+        for x in 0..width + 2 {
+            blocked.push((x, 0, 0));
+            blocked.push((x, height + 1, 0));
+        }
+        for y in 0..height + 2 {
+            blocked.push((0, y, 0));
+            blocked.push((width + 1, y, 0));
+        }
+        let mut wall_i = 0;
+        let mut y = 2;
+        while y < height + 1 {
+            let gap_x = if wall_i % 2 == 0 { width } else { 1 };
+            for x in 1..width + 1 {
+                if x != gap_x {
+                    blocked.push((x, y, 0));
+                }
+            }
+            wall_i += 1;
+            y += 2;
+        }
+        for (gx, gy, l) in blocked {
+            obs.add_blocked_cell(gx, gy, l);
+        }
+        let source = (1, 1, 0);
+        let target = if wall_i % 2 == 0 { (1, height, 0) } else { (width, height, 0) };
+        (router, obs, vec![source], vec![target])
+    }
+
+    /// Build a double-wall scenario (fruitless creep): the flood creeps along
+    /// the first wall to its far gap, then hits a solid second wall -- best_h
+    /// decays slowly forever without completing. A rate rule should cut it.
+    fn double_wall_scenario(size: i32) -> (GridRouter, GridObstacleMap,
+                                           Vec<(i32, i32, u8)>, Vec<(i32, i32, u8)>) {
+        let router = GridRouter::new(
+            500, 1.9, None, None, 0, 0, None, None, None, 0, 0, 0, 0, 0);
+        let mut obs = GridObstacleMap::new(1);
+        for x in 0..size + 1 {
+            obs.add_blocked_cell(x, 0, 0);
+            obs.add_blocked_cell(x, size, 0);
+        }
+        for y in 0..size + 1 {
+            obs.add_blocked_cell(0, y, 0);
+            obs.add_blocked_cell(size, y, 0);
+        }
+        for x in 1..size {
+            if x != size - 10 {
+                obs.add_blocked_cell(x, size / 2, 0);
+            }
+        }
+        for x in 1..size {
+            obs.add_blocked_cell(x, size * 3 / 4, 0);
+        }
+        (router, obs, vec![(10, 10, 0)], vec![(size - 10, size - 10, 0)])
+    }
+
+    /// The rate rule must NOT cut a genuine long detour: the serpentine maze
+    /// completes at the same iteration count with and without the rule.
     #[test]
-    fn fruitless_cap_stops_earlier() {
-        let (router, obs) = blocked_scenario();
-        let sources = vec![(5, 5, 0)];
-        let targets = vec![(35, 35, 0)];
-
-        // Without the cap: the search may extend (dynamic iterations).
-        let (_, iters_no_cap, _) = router.route_with_frontier(
-            &obs, sources.clone(), targets.clone(), 200000,
+    fn rate_rule_spares_genuine_detour() {
+        let (router, obs, src, tgt) = serpentine_scenario(60, 100);
+        let (_, iters_no_rate, _) = router.route_with_frontier(
+            &obs, src.clone(), tgt.clone(), 300,
             false, 0, None, None, 2,
-            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0, 0.0, 0);
-
-        // With the cap at 50%: best_h stays above 50% of initial_h (the wall
-        // blocks approach), so extension is denied after the first tranche.
-        let (_, iters_cap, _) = router.route_with_frontier(
-            &obs, sources.clone(), targets.clone(), 200000,
+            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0,
+            0.0, 0, 0.0, 0.0, 0);
+        let (_, iters_rate, _) = router.route_with_frontier(
+            &obs, src.clone(), tgt.clone(), 300,
             false, 0, None, None, 2,
-            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0, 0.5, 0);
+            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0,
+            0.0, 3, 4.0, 10.0, 0);
+        assert_eq!(iters_rate, iters_no_rate,
+                   "rate rule cut a genuine detour: {} vs {}", iters_rate, iters_no_rate);
+    }
 
-        // The capped search must not burn more than the uncapped one.
-        assert!(iters_cap <= iters_no_cap,
-                "capped {} > uncapped {}", iters_cap, iters_no_cap);
+    /// The rate rule MUST cut a fruitless creep: the double-wall search stops
+    /// well short of the ungated iteration count.
+    #[test]
+    fn rate_rule_stops_fruitless_creep() {
+        let (router, obs, src, tgt) = double_wall_scenario(800);
+        let (_, iters_no_rate, _) = router.route_with_frontier(
+            &obs, src.clone(), tgt.clone(), 3000,
+            false, 0, None, None, 2,
+            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0,
+            0.0, 0, 0.0, 0.0, 0);
+        let (_, iters_rate, _) = router.route_with_frontier(
+            &obs, src.clone(), tgt.clone(), 3000,
+            false, 0, None, None, 2,
+            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0,
+            0.0, 3, 4.0, 10.0, 0);
+        assert!(iters_rate < iters_no_rate,
+                "rate rule did not cut fruitless creep: {} vs {}", iters_rate, iters_no_rate);
     }
 
     #[test]
-    fn fruitless_cap_deterministic() {
+    fn rate_rule_deterministic() {
         let (router, obs) = blocked_scenario();
         let sources = vec![(5, 5, 0)];
         let targets = vec![(35, 35, 0)];
 
-        let run = |pct: f32| -> u32 {
+        let run = |window: u32| -> u32 {
             router.route_with_frontier(
                 &obs, sources.clone(), targets.clone(), 200000,
                 false, 0, None, None, 2,
-                TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0, pct, 0).1
+                TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0,
+                0.0, window, 4.0, 10.0, 0).1
         };
 
         // Same params -> identical iteration counts (determinism).
-        assert_eq!(run(0.5), run(0.5));
-        assert_eq!(run(0.0), run(0.0));
+        assert_eq!(run(3), run(3));
+        assert_eq!(run(0), run(0));
     }
 }

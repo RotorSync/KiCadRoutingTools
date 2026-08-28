@@ -170,6 +170,20 @@ def refresh() -> None:
     # best_h is still above fruitless_pct * initial_h after the first
     # tranche, falling back to the rip-up ladder sooner.
     g['DYNAMIC_ITERATIONS_FRUITLESS_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_FRUITLESS_PCT', 0.0)
+    # Lane A adaptive fruitless cap (RATE-OF-IMPROVEMENT rule): once
+    # DYNAMIC_ITERATIONS_RATE_WINDOW tranches have been granted, a search keeps
+    # earning only while best_h has dropped by at least
+    # max(RATE_CELLS grid cells, RATE_PCT% of initial_h) over that window --
+    # sustained meaningful progress, not minimal per-tranche creep. A
+    # wall-contouring search whose best_h stalls (creeping one quantum per
+    # tranche forever) stops earning and falls back to the rip-up ladder
+    # sooner; a search still genuinely approaching keeps riding. Pure
+    # iteration-count accounting (deterministic). WINDOW=0 = disabled (the
+    # default). This replaces the C2 fixed-fraction fruitless_pct as the
+    # default lever; fruitless_pct stays available for A/B.
+    g['DYNAMIC_ITERATIONS_RATE_WINDOW'] = _i('KICAD_DYNAMIC_ITERATIONS_RATE_WINDOW', 0)
+    g['DYNAMIC_ITERATIONS_RATE_CELLS'] = _f('KICAD_DYNAMIC_ITERATIONS_RATE_CELLS', 4.0)
+    g['DYNAMIC_ITERATIONS_RATE_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_RATE_PCT', 10.0)
 
     # --- opt-in experiments (env turns ON) ----------------------------------
     g['COLLINEAR_VIAS'] = _opt_in('KICAD_COLLINEAR_VIAS')  # #487: on-axis vias

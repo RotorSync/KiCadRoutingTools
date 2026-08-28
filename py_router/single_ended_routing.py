@@ -1332,6 +1332,13 @@ def _dynamic_iterations(config: 'GridRouteConfig') -> Tuple[int, dict]:
     # kwarg; older binaries lack it).
     if env_knobs.DYNAMIC_ITERATIONS_FRUITLESS_PCT > 0.0:
         kwargs['fruitless_pct'] = env_knobs.DYNAMIC_ITERATIONS_FRUITLESS_PCT
+    # Lane A adaptive fruitless cap (rate-of-improvement rule): only pass when
+    # the window is non-zero (postdates the fruitless kwarg; older binaries
+    # lack it). Default OFF -- the gates decide whether it becomes the default.
+    if env_knobs.DYNAMIC_ITERATIONS_RATE_WINDOW > 0:
+        kwargs['rate_window'] = env_knobs.DYNAMIC_ITERATIONS_RATE_WINDOW
+        kwargs['rate_cells'] = env_knobs.DYNAMIC_ITERATIONS_RATE_CELLS
+        kwargs['rate_pct'] = env_knobs.DYNAMIC_ITERATIONS_RATE_PCT
     return base, kwargs
 
 
