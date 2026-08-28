@@ -2,7 +2,8 @@
 
 **Status: MEASURED, on 4 boards of a declared 6. No predictor here is "validated"
 in a strong sense; the acceptance rule's own false-positive rate at N=4 is
-13–17%, measured, and that number belongs beside every PASSES below.**
+**9.0%–18.0%** (median 11.5%) over the 21 predictors defined on all four
+boards, measured, and that number belongs beside every PASSES below.**
 
 Every correlation number this repo quoted before #703 was measured against
 *distance-to-the-correct-placement* or against *the gap a human left*.
@@ -124,24 +125,38 @@ Permuting the truth **within each board** and re-running the whole aggregation
 false-positive rate:
 
 ```
-cross_side_stacks   100.0%      <- defined on ONE board
-halo                 16.5%
-pad_copper           14.5%
-...                  13-17%
+halo                          18.0%
+courtyard_overlap_mm2         17.0%
+hpwl                          15.5%
+length                        15.0%
+crossings                     14.5%
+...
+cross_side_stacks              0.0%   <- defined on ONE board; see below
 ```
+
+Full sweep over the 21 predictors defined on all four boards: **min 9.0%, max
+18.0%, median 11.5%**.
 
 Two consequences, both load-bearing:
 
-- **A predictor defined on one board passed the rule every single time.**
+- **A predictor defined on one board used to pass the rule every single time.**
+  Before the fix below, `cross_side_stacks` — constant on three of four boards,
+  so defined on one — passed **100%** of these shuffles, because
   `consistent >= max(1, N-1)` is `1 >= 1` at N=1. `rank_stats.MIN_SIGN_BOARDS`
-  is now 3 — the same value and the same reason as
-  `test_placement_ab.MIN_TRIAL_BOARDS` — and such a predictor reports **NO
-  VERDICT** rather than a rule nobody should read. That guard exists because
-  this control found it, not because it seemed wise.
-- **At N=4 the rule's empirical false-positive rate is 13–17%**, not the 0.125
+  is now 3, the same value and the same reason as
+  `test_placement_ab.MIN_TRIAL_BOARDS`, and such a predictor reports **NO
+  VERDICT** instead. Its rate in the block above is 0.0% *because that guard is
+  in place* — the 100% is what the control measured before it existed, and it
+  is why it exists.
+- **At N=4 the rule's empirical false-positive rate is 9–18%**, not the 0.125
   the two-sided p-value suggests. Ten predictors passing is therefore *evidence*
   and not proof; the six that share a median of +0.724 are also plainly
   measuring one underlying quantity, so they are not ten independent findings.
+
+The control permutes truth over the same deduplicated sample the ρ values use.
+It did not at first — watchy entered the null with its six duplicate placements
+still in, at K=19 against the K=13 its ρ was computed on — and correcting that
+moved individual rates by up to 5.5 points in both directions.
 
 ---
 
@@ -208,5 +223,7 @@ discharging, not a number chosen afterwards.*
   drivers' existing prohibition on gating `crossings` is untouched.
 - Not that the legality family is ten findings. Six of them share a median to
   three decimals; they are one quantity seen through six counters.
-- Not a corpus-wide result. Four boards, one machine, one router version
-  (`rust_router` 0.21.1), recorded in every row.
+- Not a corpus-wide result. Four boards, one machine, one router build. Each
+  row records `provenance.measured_git` (`v0.21.3-199-g3b8edc19`), from which
+  the router version follows; there is no explicit router-version or machine
+  field on a row, and this document previously claimed there was.

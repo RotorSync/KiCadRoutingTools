@@ -728,6 +728,13 @@ def shuffle_control(rows, n=200, seed=12345):
     """
     import random
     rows = [r for r in rows if r.get('source') == 'study']
+    # DEDUPE FIRST, exactly as `aggregate` does. An adversarial review caught
+    # this running on a different sample than the verdicts it is supposed to
+    # calibrate: watchy entered the null at K=19 with six tied duplicates while
+    # its real rho used K=13, and the resulting rates moved by up to 5.5 points
+    # in both directions. A control measured on a sample the study did not use
+    # is not a control.
+    rows, _dropped = drop_duplicate_placements(rows)
     groups = rs.per_board(rows)
     rng = random.Random(seed)
     passes = {p: 0 for p in PREDICTOR_KEYS}

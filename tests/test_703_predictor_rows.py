@@ -226,11 +226,25 @@ def t_doc_matches_the_rows(d):
     # 2. the headline table's sign counts and medians.
     preds = agg['predictors']['blocking']
     checked = 0
+    # `\*{0,2}` on every cell, and U+2212 accepted as a minus.
+    #
+    # An adversarial review falsified `crossings` to **1 / 3, +0.996**, `hpwl`
+    # to **4 / 0, +9.158** and `edge` to **9 / 9, MINUS 9.999** and this test
+    # printed "all checks passed". The first version could not match a leading
+    # `**`, and the rows the doc BOLDS are exactly the rows it leads with -- so
+    # the guard was blind to the three numbers a reader would quote first. It
+    # also could not match the typographic minus the markdown uses.
+    #
+    # The commit that "fixed" this claimed both patterns tolerated the bold
+    # markers. Only the verdict pattern did; this one was left behind by an
+    # edit that failed silently, and the claim went into a commit message
+    # unchecked. `checked >= 8` passed at 13, so the count never noticed either.
     for m in re.finditer(
-            r'^\| `?([a-z_0-9]+)`?[^|]*\| (\d+) / (\d+) \| ([+-][\d.]+) \|',
+            r'^\| \*{0,2}`?([a-z_0-9]+)`?\*{0,2}[^|]*\| \*{0,2}(\d+) / (\d+)'
+            r'\*{0,2} *\| \*{0,2}([+−-][\d.]+)\*{0,2} *\|',
             doc, re.M):
-        name, pos, neg, med = m.group(1), int(m.group(2)), int(m.group(3)), \
-            float(m.group(4))
+        name, pos, neg = m.group(1), int(m.group(2)), int(m.group(3))
+        med = float(m.group(4).replace('−', '-'))
         if name not in preds:
             continue
         st = preds[name]['sign_test']
@@ -277,6 +291,51 @@ def t_doc_matches_the_rows(d):
           'and PASSES with them excluded -- the disagreement the doc reports')
 
 
+def t_doc_matches_the_shuffle_control(d):
+    """The stated false-positive rate must be the MEASURED one.
+
+    This exists because the first version of the doc said "13-17%, measured"
+    and ordered that number printed beside every PASSES, while the command it
+    cites produced 9.0-18.0%. It also quoted a block containing
+    `cross_side_stacks 100.0%`, which was a PRE-`MIN_SIGN_BOARDS` number the
+    command no longer emits. Two stale "measured" numbers, in a document whose
+    entire thesis is that quoted numbers rot -- and nothing could catch them,
+    because the shuffle result lived only in a terminal.
+
+    It lives in `predictor_rows.json` now, next to the rows, with its seed and
+    trial count. Re-deriving it costs one command; drifting from it costs a
+    red test.
+    """
+    sc = d.get('shuffle_control')
+    check(isinstance(sc, dict) and sc.get('rate'),
+          'the committed rows carry the shuffle-control measurement')
+    if not isinstance(sc, dict):
+        return
+    check(sc.get('deduplicated') is True,
+          'and it was measured over the DEDUPLICATED sample -- the same one '
+          'the rho values use')
+    check(isinstance(sc.get('trials'), int) and sc['trials'] >= 100,
+          f'over enough trials to mean something ({sc.get("trials")})')
+    doc = _doc()
+    lo = f'{sc["four_board_min"] * 100:.1f}%'
+    hi = f'{sc["four_board_max"] * 100:.1f}%'
+    med = f'{sc["four_board_median"] * 100:.1f}%'
+    check(lo.rstrip('%') in doc and hi.rstrip('%') in doc,
+          f'the doc states the measured range {lo}-{hi}')
+    check(med.rstrip('%') in doc, f'and the measured median {med}')
+    # Every rate the doc quotes in its shuffle block must be the measured one.
+    quoted = re.findall(r'^\s*([a-z_0-9]+)\s+(\d+\.\d)%\s*$', doc, re.M)
+    check(quoted, 'the doc quotes a per-predictor shuffle block')
+    for name, pct in quoted:
+        if name not in sc['rate']:
+            check(False, f'the doc quotes a shuffle rate for {name}, which the '
+                         f'measurement does not carry')
+            continue
+        check(abs(sc['rate'][name] * 100 - float(pct)) < 0.05,
+              f'doc says {name} shuffles at {pct}%; the measurement says '
+              f'{sc["rate"][name] * 100:.1f}%')
+
+
 def t_doc_states_what_was_not_run(d):
     doc = _doc()
     declared = {b['key'] for b in PS.STUDY_BOARDS}
@@ -296,7 +355,8 @@ def main():
                t_harvest_rows_carry_no_verdict,
                t_study_rows_still_describe_the_tracked_boards,
                t_one_argv_per_board, t_no_pooled_statistic_is_reachable,
-               t_doc_matches_the_rows, t_doc_states_what_was_not_run):
+               t_doc_matches_the_rows, t_doc_matches_the_shuffle_control,
+               t_doc_states_what_was_not_run):
         print(f'{fn.__name__}:')
         try:
             fn(d)
