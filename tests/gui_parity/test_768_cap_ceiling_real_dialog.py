@@ -27,12 +27,21 @@ An adversarial review measured 22 cap clearance violations against main's 2 at
 the default dialog configuration when the resolved base was passed as a ceiling.
 
 WHY NOT `fix_drc_settings`, which the first cut of #768 used: measured, that box
-does not clamp a net class at all. `update_live_drc_floors` writes
-`m_MinClearance` and the DEFAULT class only, carries no
-`clamp_nondefault_netclasses`, and this tab never calls
-`apply_targets_to_board`. Gated there, the GUI priced every pair at the ceiling
-and clamped nothing -- the GIVEN branch's pricing with the OMITTED branch's
-writeback, which is #768 pointing the other way.
+did not clamp a net class at all. `update_live_drc_floors` wrote `m_MinClearance`
+and the DEFAULT class only, carried no non-Default clamp, and this tab never
+called `apply_targets_to_board`. Gated there, the GUI priced every pair at the
+ceiling and clamped nothing -- the GIVEN branch's pricing with the OMITTED
+branch's writeback, which is #768 pointing the other way.
+
+PAST TENSE SINCE #782, and the reasoning above is preserved rather than deleted
+because it is still why `clearance_ceiling` is the right gate and
+`fix_drc_settings` is not. What changed is only the second clause: the tab now
+DOES clamp its non-Default classes, through
+`update_live_drc_floors(nondefault_clamp_mm=...)` on the inline path and
+`clamp_nondefault_netclasses_on_board` on the standalone one, both switched on
+the presence of the same `clearance_ceiling` this file grades. That half is
+`tests/gui_parity/test_782_fanout_netclass_clamp.py`; this file still owns the
+PRICING half, which is the question "what value does the engine receive".
 
 TWO PATHS, and the first cut was correct on one and inert on the other:
   inline      `_apply_fanout_results` -> `_optimize_decoupling_caps(fanout_config)`

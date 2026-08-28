@@ -1973,14 +1973,37 @@ class FanoutTab(wx.Panel):
         if _fcfg.get('fix_drc_settings', True):
             try:
                 from .gui_utils import update_live_drc_floors
-                update_live_drc_floors(
+                _nd_changes = update_live_drc_floors(
                     board,
                     clearance=_fcfg.get('clearance'),
                     track_width=_fcfg.get('track_width'),
                     via_size=_fcfg.get('via_size'),
                     via_drill=_fcfg.get('via_drill'),
                     hole_to_hole=_fcfg.get('hole_to_hole_clearance'),
-                    edge_clearance=_fcfg.get('board_edge_clearance'))
+                    edge_clearance=_fcfg.get('board_edge_clearance'),
+                    # #782: the writeback half of #768's GIVEN branch. This tab
+                    # priced every class at min(class, ceiling) and then lowered
+                    # NONE of them, so a Wide-class pair priced at 0.2 was graded
+                    # by KiCad at the still-0.4 class -- violations on copper the
+                    # pass considered legal. The CEILING is the value to clamp to
+                    # (see the helper's docstring for why not `clearance`), and
+                    # it is None exactly when the Min-Clearance override is
+                    # unticked, which is #768's OMITTED branch: classes preserved.
+                    #
+                    # Gated on `clearance_ceiling` ALONE, not on the
+                    # `clamp_netclasses` bool beside it in this dict. They are the
+                    # same switch read twice (swig_gui sets both off
+                    # self.clearance_check), and two values from two places coming
+                    # apart is exactly how #780 happened. `_optimize_decoupling_caps`
+                    # already gates its pricing on this one value; the writeback
+                    # must gate on the same one or the halves can disagree again.
+                    nondefault_clamp_mm=_fcfg.get('clearance_ceiling'))
+                # Disclosed, because it CHANGES THE BOARD'S DECLARED SPEC and
+                # an operator reading the log must see that. Printed only when
+                # something actually moved: no ceiling -> empty list -> silence,
+                # so an ordinary fanout gains no new output from this fix.
+                for _line in (_nd_changes or []):
+                    print(f"  {_line}")
             except Exception as _e:
                 print(f"(live DRC floor update skipped: {_e})")
 
@@ -2276,6 +2299,44 @@ class FanoutTab(wx.Panel):
         from .gui_utils import redirect_prints_to_log, refill_all_zones
         with redirect_prints_to_log(self.append_log):
             summary = self._optimize_decoupling_caps(board, pcbnew, cfg)
+            # #782: the STANDALONE button is the second interactive path into
+            # the cap pass, and it wrote no DRC settings at all. It prices at the
+            # ceiling exactly like the inline path (both read `clearance_ceiling`
+            # off their cfg), so it owes the same class writeback -- otherwise
+            # which button the operator pressed decides whether the board ships
+            # a class the run honoured.
+            #
+            # The NON-Default clamp only, deliberately, and not the whole
+            # `update_live_drc_floors`: this button places parts and draws
+            # connectors, it lays no escape copper, and the inline path's floor
+            # update exists because the FANOUT wrote tracks and vias. Widening
+            # this to the Default class and the size minima is a real change to
+            # what the button does and belongs to whoever wants it, not to #782.
+            # The Default class is untouched here, so a ceiling BELOW it stays a
+            # pricing decision rather than silently retightening the board.
+            if cfg.get('clearance_ceiling') is not None:
+                try:
+                    from fix_kicad_drc_settings import (
+                        clamp_nondefault_netclasses_on_board)
+                    _nd = clamp_nondefault_netclasses_on_board(
+                        board,
+                        {'min_clearance': float(cfg['clearance_ceiling'])})
+                    if _nd:
+                        # The only SetModified on this tab, and it earns the
+                        # asymmetry: a net-class edit is a design-SETTINGS
+                        # change, and this path can move nothing else at all
+                        # (zero caps is a legitimate outcome), so without it a
+                        # run whose only effect was the clamp would let the
+                        # operator close without being offered the save. The
+                        # inline path needs no equivalent -- it has just added
+                        # fanout tracks and vias, which mark the board itself.
+                        if hasattr(board, 'SetModified'):
+                            board.SetModified()
+                        print("Non-Default net classes clamped to the "
+                              f"{float(cfg['clearance_ceiling']):g}mm ceiling: "
+                              + ", ".join(_nd))
+                except Exception as _nde:                      # noqa: BLE001
+                    print(f"(non-Default net-class clamp skipped: {_nde})")
             refill_all_zones(board)   # never bare BuildConnectivity: net flips
         pcbnew.Refresh()
         if summary:
