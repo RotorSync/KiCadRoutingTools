@@ -138,11 +138,33 @@ CALIBRATION_CANDIDATES = STUDY_BOARDS + [
 #: zero; at K=12 only |rho| >= 0.6, which is why it is not 12. The split spans
 #: the range on purpose -- an all-realistic slate has no headroom and an
 #: all-damaged one has no ceiling.
-PERTURB_KINDS = ('translate', 'wrong_side', 'swap', 'scatter', 'pile')
-#: Doses as a FRACTION of the board diagonal, so a 30 mm board and a 200 mm one
-#: receive comparable damage rather than comparable millimetres.
-DOSE_FRACTIONS = (0.05, 0.15, 0.30)
-PORTFOLIO_INDICES = (1, 2, 3, 4)
+#: Kinds whose damage SCALES with the requested dose, so three doses give three
+#: placements.
+DOSED_KINDS = ('translate', 'wrong_side', 'scatter')
+#: Kinds that ignore the dose entirely, so they contribute exactly ONE variant.
+#: `swap` trades the two highest-ranked disjoint blocks -- a deterministic
+#: choice with no dose and no rng in it -- and `pile` collapses every free part
+#: to one coordinate. Asking either for three doses produces three
+#: byte-identical boards.
+UNDOSED_KINDS = ('swap', 'pile')
+
+#: Doses as a fraction of the MAXIMUM FEASIBLE travel for this board and block,
+#: not of the board diagonal.
+#:
+#: The diagonal version was wrong and the first study run proved it in nine
+#: rows: on esp_prog every requested dose exceeded the feasible travel, so
+#: `perturb` clipped all three to the same value and translate-d0/d1/d2 came
+#: back with ONE poses_sha256 between them. Nine rows, four distinct
+#: placements -- n-inflation dressed as a sample.
+#:
+#: So the dose is probed first (one `perturb` call with a huge cap, which
+#: reports `max_feasible_dose_mm` even when it clips) and the three doses are
+#: fractions of THAT. Every one is achievable by construction, and the fractions
+#: are spread far enough apart that a grid snap cannot merge them.
+DOSE_FRACTIONS = (0.25, 0.55, 0.90)
+#: Eight portfolio candidates rather than four, because the undosed kinds
+#: contribute two variants instead of six. K stays 20.
+PORTFOLIO_INDICES = (1, 2, 3, 4, 5, 6, 7, 8)
 #: `swap` is excluded from portfolio strategies: it is barren without resolved
 #: blocks, and `perturb.py`'s swap re-picks the pair itself, so the damage end
 #: covers it properly.
@@ -152,9 +174,10 @@ PORTFOLIO_STRATEGIES = ('jitter', 'poses')
 def variant_names():
     """The K=20 variant list, in a fixed order, identical for every board."""
     out = ['authored']
-    for k in PERTURB_KINDS:
+    for k in DOSED_KINDS:
         for i, _f in enumerate(DOSE_FRACTIONS):
             out.append(f'perturb-{k}-d{i}')
+    out += [f'perturb-{k}' for k in UNDOSED_KINDS]
     out += [f'portfolio-{i}' for i in PORTFOLIO_INDICES]
     return out
 
@@ -239,10 +262,31 @@ def generate_variant(board_file, variant, work_dir, seed=0):
 
     if variant.startswith('perturb-'):
         from placement import perturb as P
-        _, kind, dose_tag = variant.split('-', 2)
-        di = int(dose_tag[1:])
-        frac = DOSE_FRACTIONS[di]
-        dose = frac * _board_diagonal(board_file)
+        parts = variant.split('-')
+        kind = parts[1]
+        di = int(parts[2][1:]) if len(parts) > 2 else None
+        frac = DOSE_FRACTIONS[di] if di is not None else None
+        if frac is None:
+            # An undosed kind. Its damage is a function of the board alone, so
+            # asking for a dose would only invite three identical boards.
+            dose = _board_diagonal(board_file)
+        else:
+            # PROBE the feasible travel first. `perturb` reports
+            # `max_feasible_dose_mm` even when it clips, so one throwaway call
+            # at a huge cap says how far this block can actually go -- and the
+            # three doses are fractions of THAT rather than of the diagonal.
+            # Without this every dose on a small board clips to the same value
+            # and the three variants are one variant, which is what the first
+            # study run measured.
+            probe_out = os.path.join(work_dir, '_probe.kicad_pcb')
+            probe = P.perturb(board_file, probe_out, kind=kind,
+                              dose_mm=10.0 * _board_diagonal(board_file),
+                              seed=seed, write_record=False,
+                              control_out=os.path.join(work_dir, '_probe.ctl'))
+            feasible = probe.get('max_feasible_dose_mm') or 0.0
+            if feasible <= 0:
+                feasible = probe.get('dose_mm_applied') or 0.0
+            dose = frac * feasible
         out = os.path.join(work_dir, f'{variant}.kicad_pcb')
         truth = os.path.join(work_dir, '_truth')
         os.makedirs(truth, exist_ok=True)
@@ -254,6 +298,8 @@ def generate_variant(board_file, variant, work_dir, seed=0):
                           'dose_fraction': frac,
                           'status': rec.get('status')}, rec.get('reason', '')
         recipe = {'generator': 'perturb', 'kind': kind, 'dose_fraction': frac,
+                  'dose_basis': ('fraction of max feasible travel'
+                                 if frac is not None else 'undosed kind'),
                   'dose_mm_requested': rec.get('dose_mm_requested'),
                   'dose_mm_applied': rec.get('dose_mm_applied'),
                   'clipped': rec.get('clipped'),
@@ -494,11 +540,43 @@ def _truth_col(row, dep):
     return (row['truth'].get('quality') or {}).get('vias')
 
 
+def drop_duplicate_placements(rows):
+    """(kept, dropped) -- two variants with one poses_sha256 are ONE sample.
+
+    This is n-inflation, and it is not hypothetical: the first study run
+    produced nine esp_prog rows carrying four distinct placements, because
+    `perturb` clips a requested dose to the feasible travel and three doses
+    clipped to the same value. Ranking those nine would have counted one
+    placement three times and manufactured ties that no board has.
+
+    The generator side is fixed (doses are fractions of the FEASIBLE travel
+    now, and the dose-independent kinds contribute one variant each), but the
+    guard stays: a sampler that silently produces a duplicate must not be able
+    to inflate a correlation, whatever the reason. The FIRST variant in the
+    declared order wins, so the choice does not depend on completion order.
+    """
+    order = {v: i for i, v in enumerate(VARIANTS)}
+    kept, dropped, seen = [], [], {}
+    for r in sorted(rows, key=lambda r: (r.get('board_key', ''),
+                                         order.get(r.get('variant'), 999))):
+        ps = (r.get('provenance') or {}).get('poses_sha256')
+        key = (r.get('board_key'), ps)
+        if ps and key in seen:
+            dropped.append({'row_id': r['row_id'], 'same_as': seen[key],
+                            'poses_sha256': ps})
+            continue
+        if ps:
+            seen[key] = r['row_id']
+        kept.append(r)
+    return kept, dropped
+
+
 def aggregate(rows, include_quench=True):
     """Per-board rho for every predictor, then a sign test across boards."""
     rows = [r for r in rows if r.get('source') == 'study']
     if not include_quench:
         rows = [r for r in rows if r.get('generator') != 'portfolio_quench']
+    rows, duplicates = drop_duplicate_placements(rows)
     groups = rs.per_board(rows)
 
     # The frozen-argv control, checked on the DATA and not only at write time.
@@ -507,7 +585,7 @@ def aggregate(rows, include_quench=True):
                 if len({r['route'].get('argv_sha') for r in rr}) > 1}
 
     out = {'boards': {}, 'predictors': {}, 'argv_disagreement': argv_bad,
-           'include_quench': include_quench}
+           'include_quench': include_quench, 'duplicates': duplicates}
     for b, rr in sorted(groups.items()):
         out['boards'][b] = {
             'k': len(rr),
@@ -552,6 +630,11 @@ def report(agg, dep='blocking', top=None):
         return lines
     lines.append(f"portfolio_quench rows "
                  f"{'INCLUDED' if agg['include_quench'] else 'EXCLUDED'}")
+    if agg.get('duplicates'):
+        lines.append(f"{len(agg['duplicates'])} DUPLICATE placement(s) dropped "
+                     f"-- two variants that produced one board are one sample:")
+        for d in agg['duplicates'][:8]:
+            lines.append(f"    {d['row_id']} == {d['same_as']}")
     lines.append('')
     lines.append('boards:')
     for b, info in agg['boards'].items():
