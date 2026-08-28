@@ -93,6 +93,8 @@ REGISTERED = {
     'docs/placement-optimization.md',
     # The measurement apparatus itself, which quotes the numbers in order to
     # say what is wrong with how they were quoted.
+    'py_placer/placement/portfolio.py',
+    'docs/placement-predictors.md',
     'tests/stress/rank_stats.py',
     'tests/stress/predictor_study.py',
     'tests/test_703_rank_stats.py',
@@ -141,8 +143,12 @@ def hits_in(path):
     for m in NUMERAL.finditer(s):
         lo = max(0, m.start() - WINDOW)
         hi = min(len(s), m.end() + WINDOW)
-        ctx = s[lo:hi]
-        scoped = any(k in ctx for k in SCOPES)
+        # CASE-INSENSITIVE. These sites shout when they mean it -- one of them
+        # writes "against DISTANCE-TO-TRUTH" in capitals -- and a gate that
+        # reads a correctly-scoped citation as a violation because the author
+        # emphasised it is a gate people learn to route around.
+        ctx = s[lo:hi].lower()
+        scoped = any(k.lower() in ctx for k in SCOPES)
         line = s.count('\n', 0, m.start()) + 1
         out.append({'text': m.group(0), 'line': line, 'scoped': scoped})
     return out
