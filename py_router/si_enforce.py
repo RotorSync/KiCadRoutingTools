@@ -52,6 +52,101 @@ def _cost_mm() -> float:
     return env_knobs.SI_ENFORCE_COST
 
 
+# Adaptive per-net enforcement radius (KICAD_SI_ADAPTIVE). Read INLINE from the
+# environment (like KICAD_SMOOTH_PREWINDOW in pcb_modification.py) rather than
+# through env_knobs, so this lane owns its knob entirely inside si_enforce.py
+# and env_knobs.py stays clean for concurrent lanes. Default OFF during
+# development; flipped ON at commit after the gate validation passes.
+# KICAD_SI_ADAPTIVE=0 always restores the fixed R0.8/C0.1 behaviour exactly.
+import os as _si_os
+
+
+def _adaptive_enabled() -> bool:
+    return (_si_os.environ.get('KICAD_SI_ADAPTIVE', '0').strip().lower()
+            not in ('0', 'false', 'off', 'no'))
+
+
+def _adaptive_force_radius() -> float:
+    """Debug: force every victim's adaptive radius to a fixed mm value (sweep
+    testing only -- lets a harness probe radius points without editing the
+    heuristic). Unset/0 = normal adaptive behaviour."""
+    try:
+        return float(_si_os.environ.get('KICAD_SI_ADAPTIVE_FORCE_RADIUS', '0') or 0)
+    except ValueError:
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Adaptive per-net enforcement radius (KICAD_SI_ADAPTIVE)
+# ---------------------------------------------------------------------------
+#
+# The fixed radius/cost knobs (default R0.8/C0.1) were tuned on the carrier
+# board, whose victims sit >2mm from aggressor copper -- but the corpus probe
+# (carrier_lab/si_corpus_findings.md "Middle-point probe") proved the knob is
+# board-dependent: dense boards whose victims hug aggressors (watchy,
+# haasoscope) need a WIDE band to recover their si_coupling win, while sparse
+# boards (carrier, ulx3s) need a NARROW band to avoid wasted steering and
+# DRC/connectivity regressions. No single fixed radius/cost pair dominates.
+#
+# Adaptive rule: at stamp time the only victim geometry available is the
+# victim net's PADS (the chain routes aggressors first, then victims, so a
+# victim has no own copper yet). We measure the distance from every victim
+# pad to the nearest AGGRESSOR copper on the pad's own layer(s), and size
+# the enforcement band from that distribution:
+#
+#   board_median = median over ALL victim pads of distance to nearest
+#                  aggressor copper
+#   if board_median >= 2.5mm (SPARSE board -- ulx3s, carrier, tigard,
+#       kitdev, glasgow): every victim gets the narrow floor (0.5mm). Wide
+#       bands on a dense BGA board over-steer victims into blocking GND and
+#       cascade into mass connectivity failures (ulx3s adaptive probe).
+#   else (DENSE board -- watchy, haasoscope): victims get a moderate base
+#       band (1.0mm), and exposed multi-pad nets (>=4 pads, frac_close >
+#       0.30) are widened toward 1.2mm.
+#
+#   frac_close = fraction of the net's pads within the metric's own 1.0mm
+#                coupling window of aggressor copper
+#
+# A dense board whose victims hug aggressors gets real steering (SI win);
+# a sparse board whose victims sit far away gets no wasted steering and no
+# timing cost. Cost scales gently with radius so a wide band does not
+# over-price.
+#
+# KICAD_SI_ADAPTIVE=0 restores the fixed R0.8/C0.1 behaviour exactly.
+_ADAPTIVE_MIN_R = 0.5
+_ADAPTIVE_MAX_R = 1.2
+_ADAPTIVE_WINDOW = 1.0   # the metric's own coupling window (mm)
+_ADAPTIVE_SPARSE_MED = 2.5   # board median pad-dist (mm) above which = sparse
+_ADAPTIVE_DENSE_BASE_R = 1.0   # moderate band for dense boards
+_ADAPTIVE_DENSE_FRAC = 0.30   # frac of pads within window that means "exposed"
+_ADAPTIVE_MIN_PADS = 4   # a net needs >= this many pads to earn a wide band
+
+
+def _adaptive_radius_for(frac_close: float) -> float:
+    """Per-net enforcement radius from the fraction of the net's pads within
+    the metric's coupling window of aggressor copper.
+
+    Only meaningful on DENSE boards (see _adaptive_radius_for_net); on sparse
+    boards every net gets the narrow floor.
+    """
+    f = max(0.0, min(1.0, frac_close))
+    r = _ADAPTIVE_DENSE_BASE_R + (_ADAPTIVE_MAX_R - _ADAPTIVE_DENSE_BASE_R) * min(
+        1.0, f / _ADAPTIVE_DENSE_FRAC)
+    return r
+
+
+def _adaptive_cost_for(radius: float) -> float:
+    """Per-net cost scaled gently with radius.
+
+    A wide band must not over-price every cell inside it (the R1.0/C0.2 probe
+    showed wide+expensive over-steers into connectivity regressions), so the
+    cost grows only ~linearly from 0.5x at the narrow floor to ~1.4x at the
+    wide ceiling -- the steering comes from the band WIDTH, not from a cost
+    spike.
+    """
+    return env_knobs.SI_ENFORCE_COST * (0.5 + 0.5 * radius / 0.8)
+
+
 # ---------------------------------------------------------------------------
 # Small self-contained geometry helpers (mirror quality/geometry.py semantics)
 # ---------------------------------------------------------------------------
@@ -151,7 +246,164 @@ def _aggressor_fingerprint(pcb_data, classes) -> str:
     return '|'.join(sorted(parts))
 
 
-def _build_aggressor_geometry(pcb_data, config, classes):
+def _aggressor_point_trees(pcb_data, classes, fp=None):
+    """Per-layer cKDTree of sampled AGGRESSOR copper points, cached on the
+    board's aggressor fingerprint so N victim nets pay one tree build."""
+    if fp is None:
+        fp = _aggressor_fingerprint(pcb_data, classes)
+    cache = getattr(pcb_data, '_si_aggr_pt_cache', None)
+    if cache is not None and cache[0] == fp:
+        return cache[1]
+    from collections import defaultdict as _dd
+    aggr_pts = _dd(list)
+    for s in pcb_data.segments:
+        if s.net_id in classes and classes[s.net_id]['class'] == 'AGGRESSOR':
+            dx = s.end_x - s.start_x
+            dy = s.end_y - s.start_y
+            L = (dx * dx + dy * dy) ** 0.5
+            if L < 1e-9:
+                aggr_pts[s.layer].append((s.start_x, s.start_y))
+                continue
+            n = max(1, int(L / 0.2))
+            for i in range(n + 1):
+                t = i / n
+                aggr_pts[s.layer].append((s.start_x + dx * t,
+                                          s.start_y + dy * t))
+    trees = {}
+    if aggr_pts:
+        try:
+            from scipy.spatial import cKDTree
+        except ImportError:
+            trees = {}
+        else:
+            for layer, pts in aggr_pts.items():
+                trees[layer] = cKDTree(pts)
+    try:
+        pcb_data._si_aggr_pt_cache = (fp, trees)
+    except Exception:
+        pass
+    return trees
+
+
+def _pad_to_aggressor_distances(pcb_data, classes, net_id,
+                              fp=None):
+    """Distances (mm) from a victim net's pads to the nearest AGGRESSOR copper
+    on the pad's own layer(s). Empty list when no aggressor copper exists.
+
+    This is the stamp-time signal: the chain routes aggressors first, so when
+    a victim net is being routed its pads are the only victim geometry, and
+    the aggressor copper is already on the board.
+    """
+    trees = _aggressor_point_trees(pcb_data, classes, fp=fp)
+    if not trees:
+        return []
+    out = []
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        best = None
+        for pl in p.layers:
+            t = trees.get(pl)
+            if t is None:
+                continue
+            d, _ = t.query([[p.global_x, p.global_y]])
+            d0 = float(d[0])
+            if best is None or d0 < best:
+                best = d0
+        if best is not None:
+            out.append(best)
+    return out
+
+
+def _board_median_pad_dist(pcb_data, classes, fp=None):
+    """Median distance (mm) over ALL victim pads to nearest aggressor copper.
+
+    The board-level density signal: sparse boards (high median) get narrow
+    bands everywhere; dense boards (low median) get moderate/wide bands.
+    Cached on the aggressor fingerprint.
+    """
+    fp2 = fp if fp is not None else _aggressor_fingerprint(pcb_data, classes)
+    cache = getattr(pcb_data, '_si_board_med_cache', None)
+    if cache is not None and cache[0] == fp2:
+        return cache[1]
+    all_dists = []
+    for nid, inf in classes.items():
+        if nid == -1 or inf['class'] != 'VICTIM':
+            continue
+        all_dists.extend(_pad_to_aggressor_distances(pcb_data, classes, nid,
+                                                     fp=fp2))
+    if not all_dists:
+        med = None
+    else:
+        all_dists.sort()
+        med = all_dists[len(all_dists) // 2]
+    try:
+        pcb_data._si_board_med_cache = (fp2, med)
+    except Exception:
+        pass
+    return med
+
+
+def _adaptive_radius_for_net(pcb_data, classes, net_id,
+                              fp=None):
+    """Per-net adaptive radius (mm) for a victim net.
+
+    Board-level density gate first: sparse boards (victim pads sit far from
+    aggressors -- ulx3s, carrier, tigard, kitdev, glasgow) get the narrow
+    floor for EVERY net, because wide bands on a dense BGA board over-steer
+    victims into blocking GND and cascade into mass connectivity failures
+    (ulx3s adaptive probe). Dense boards (watchy, haasoscope) get a moderate
+    base band, with exposed multi-pad nets widened further.
+
+    Cached per (board fingerprint, net_id). Falls back to the fixed knob
+    radius when adaptive is off or no aggressor copper exists.
+    """
+    if not _adaptive_enabled():
+        return _radius_mm()
+    _force = _adaptive_force_radius()
+    if _force > 0:
+        return _force
+    cache = getattr(pcb_data, '_si_adaptive_radius_cache', None)
+    if cache is None:
+        cache = {}
+        try:
+            pcb_data._si_adaptive_radius_cache = cache
+        except Exception:
+            pass
+    if net_id in cache:
+        return cache[net_id]
+    med = _board_median_pad_dist(pcb_data, classes, fp=fp)
+    if med is None:
+        r = _radius_mm()
+    elif med >= _ADAPTIVE_SPARSE_MED:
+        # Sparse board: narrow floor everywhere -- no wasted steering.
+        r = _ADAPTIVE_MIN_R
+    else:
+        # Dense board: moderate base, widen exposed multi-pad nets.
+        dists = _pad_to_aggressor_distances(pcb_data, classes, net_id,
+                                            fp=fp)
+        if len(dists) >= _ADAPTIVE_MIN_PADS:
+            frac_close = sum(1 for d in dists if d <= _ADAPTIVE_WINDOW) / len(dists)
+            r = _adaptive_radius_for(frac_close)
+        else:
+            r = _ADAPTIVE_DENSE_BASE_R
+    cache[net_id] = r
+    return r
+
+
+def _adaptive_cost_for_net(pcb_data, classes, net_id, fp=None):
+    """Per-net adaptive cost (mm-equivalent).
+
+    fp: optional pre-computed aggressor fingerprint (C4) -- threaded through so
+    the O(all-segments) string build happens once per victim instead of once
+    here AND once in _adaptive_radius_for_net.
+    """
+    if not _adaptive_enabled():
+        return _cost_mm()
+    r = _adaptive_radius_for_net(pcb_data, classes, net_id, fp=fp)
+    return _adaptive_cost_for(r)
+
+
+def _build_aggressor_geometry(pcb_data, config, classes,
+                     radius_mm=None, cost_mm=None):
     """Build per-layer aggressor segment geometry + offset tables.
 
     Returns dict layer_idx -> list of (pts_arr, off_cells, off_cost) tuples,
@@ -183,7 +435,7 @@ def _build_aggressor_geometry(pcb_data, config, classes):
                                  'copper_layers', []) or [])
     layer_map = {name: i for i, name in enumerate(config.layers)}
 
-    radius_mm = _radius_mm()
+    radius_mm = _radius_mm() if radius_mm is None else radius_mm
     grid_step = config.grid_step or 0.1
 
     # Which routing layers receive fields from which aggressor layers.
@@ -208,7 +460,7 @@ def _build_aggressor_geometry(pcb_data, config, classes):
             layer_sources[layer_map[vlayer]].extend(by_layer[alayer])
 
     radius_grid = max(1, int(round(radius_mm / grid_step)))
-    cost_grid = config.cell_cost(_cost_mm())
+    cost_grid = config.cell_cost(_cost_mm() if cost_mm is None else cost_mm)
     sample_every = max(1, int(round(0.5 / grid_step)))
 
     from obstacle_costs import _get_proximity_offsets_np   # cached offset tables
@@ -244,8 +496,10 @@ def _build_aggressor_geometry(pcb_data, config, classes):
     return dict(geo)
 
 
-def _get_aggressor_geometry(pcb_data, config, classes, fp=None):
-    """Cached aggressor geometry keyed on the board's aggressor fingerprint.
+def _get_aggressor_geometry(pcb_data, config, classes, fp=None,
+                     radius_mm=None, cost_mm=None):
+    """Cached aggressor geometry keyed on the board's aggressor fingerprint
+    AND the radius/cost pair (adaptive per-net bands differ per victim).
 
     fp: optional pre-computed fingerprint (C4: compute_victim_si_field computes
     it once and threads it through, so the O(all-segments) string build happens
@@ -254,11 +508,13 @@ def _get_aggressor_geometry(pcb_data, config, classes, fp=None):
     """
     if fp is None:
         fp = _aggressor_fingerprint(pcb_data, classes)
+    key = (fp, radius_mm, cost_mm)
     cache = getattr(pcb_data, '_si_aggr_geo_cache', None)
-    if cache is None or cache[0] != fp:
-        geo = _build_aggressor_geometry(pcb_data, config, classes)
+    if cache is None or cache[0] != key:
+        geo = _build_aggressor_geometry(pcb_data, config, classes,
+                                        radius_mm=radius_mm, cost_mm=cost_mm)
         try:
-            pcb_data._si_aggr_geo_cache = (fp, geo)
+            pcb_data._si_aggr_geo_cache = (key, geo)
         except Exception:
             pass
         return geo
@@ -307,22 +563,26 @@ def _accumulate_field(geo, classes, exclude_nids=None):
                           axis=1).astype(np.int32)
 
 
-def _get_union_field(pcb_data, config, classes, fp=None):
+def _get_union_field(pcb_data, config, classes, fp=None,
+                     radius_mm=None, cost_mm=None):
     """Cached union field (ALL aggressors, no same-interface filter).
 
-    Keyed on the aggressor fingerprint. Victims with no same-interface aggressor
-    reuse this directly -- a huge win on boards with extensive aggressor copper.
+    Keyed on the aggressor fingerprint + radius/cost. Victims with no
+    same-interface aggressor reuse this directly -- a huge win on boards with
+    extensive aggressor copper.
 
     fp: optional pre-computed fingerprint (C4) -- see _get_aggressor_geometry.
     """
     if fp is None:
         fp = _aggressor_fingerprint(pcb_data, classes)
+    key = (fp, radius_mm, cost_mm)
     cache = getattr(pcb_data, '_si_union_field_cache', None)
-    if cache is None or cache[0] != fp:
-        geo = _get_aggressor_geometry(pcb_data, config, classes, fp=fp)
+    if cache is None or cache[0] != key:
+        geo = _get_aggressor_geometry(pcb_data, config, classes, fp=fp,
+                                      radius_mm=radius_mm, cost_mm=cost_mm)
         arr = _accumulate_field(geo, classes) if geo else np.empty((0, 4), dtype=np.int32)
         try:
-            pcb_data._si_union_field_cache = (fp, arr)
+            pcb_data._si_union_field_cache = (key, arr)
         except Exception:
             pass
         return arr
@@ -332,6 +592,31 @@ def _get_union_field(pcb_data, config, classes, fp=None):
 # ---------------------------------------------------------------------------
 # Field computation + stamping entry points
 # ---------------------------------------------------------------------------
+
+def _own_pad_exempt_cells(pcb_data, config, net_id):
+    """Grid cells (N,2) within a small radius of the victim net's own pads.
+
+    The enforcement field must never block a victim's mandatory pad approach,
+    even when aggressor copper hugs the pad (watchy mid probe: the +3V3 U4 pad
+    sits 0.01mm from +3V3 aggressor copper; the wide band blocked its approach
+    -> conn 1). Radius = pad half-diagonal + 0.2mm margin, so the pad's own
+    landing zone stays free of SI cost.
+    """
+    grid_step = config.grid_step or 0.1
+    cells = []
+    for p in pcb_data.pads_by_net.get(net_id, []):
+        r = (max(p.size_x, p.size_y) / 2.0) + 0.2
+        rg = max(1, int(round(r / grid_step)))
+        gx = round(p.global_x / grid_step)
+        gy = round(p.global_y / grid_step)
+        for ex in range(-rg, rg + 1):
+            for ey in range(-rg, rg + 1):
+                if ex * ex + ey * ey <= rg * rg:
+                    cells.append((gx + ex, gy + ey))
+    if not cells:
+        return np.empty((0, 2), dtype=np.int32)
+    return np.asarray(cells, dtype=np.int32)
+
 
 def compute_victim_si_field(pcb_data,
                             config,
@@ -359,7 +644,12 @@ def compute_victim_si_field(pcb_data,
     # so results are bit-for-bit identical.
     import env_knobs as _ek
     _fp = (_aggressor_fingerprint(pcb_data, classes) if _ek.CACHE_BY_NET else None)
-    geo = _get_aggressor_geometry(pcb_data, config, classes, fp=_fp)
+    # Adaptive per-net radius/cost (KICAD_SI_ADAPTIVE=0 -> fixed knobs).
+    _r = _adaptive_radius_for_net(pcb_data, classes, net_id,
+                                  fp=_fp)
+    _c = _adaptive_cost_for_net(pcb_data, classes, net_id, fp=_fp)
+    geo = _get_aggressor_geometry(pcb_data, config, classes, fp=_fp,
+                                  radius_mm=_r, cost_mm=_c)
     if not geo:
         return np.empty((0, 4), dtype=np.int32)
 
@@ -373,11 +663,32 @@ def compute_victim_si_field(pcb_data,
 
     if not exclude_nids:
         # No same-interface aggressor: reuse the cached union field directly.
-        return _get_union_field(pcb_data, config, classes, fp=_fp)
+        arr = _get_union_field(pcb_data, config, classes, fp=_fp,
+                               radius_mm=_r, cost_mm=_c)
+    else:
+        # Rare path: this victim shares an interface with an aggressor --
+        # compute its field with that aggressor excluded.
+        arr = _accumulate_field(geo, classes, exclude_nids=exclude_nids)
 
-    # Rare path: this victim shares an interface with an aggressor -- compute
-    # its field with that aggressor excluded.
-    return _accumulate_field(geo, classes, exclude_nids=exclude_nids)
+    # Own-pad exemption (adaptive only): a victim must ALWAYS be able to
+    # reach its own pads, even when aggressor copper hugs them (watchy mid
+    # probe: the +3V3 U4 pad at (82.68,85.31) sits 0.01mm from +3V3 aggressor
+    # copper and the wide band blocked its approach -> conn 1). Drop
+    # enforcement cells within a small radius of the victim's own pads so the
+    # mandatory pad approach is never priced. Gated behind adaptive so
+    # KICAD_SI_ADAPTIVE=0 restores the fixed R0.8/C0.1 behaviour exactly.
+    if len(arr) and _adaptive_enabled():
+        _own_pad_cells = _own_pad_exempt_cells(pcb_data, config, net_id)
+        if len(_own_pad_cells):
+            # Key on (gx, gy) only -- the exemption is layer-agnostic (a pad
+            # approach can come from any layer, and the field may price the
+            # same cell on several layers).
+            _key = arr[:, 1].astype(np.int64) * 100000 + arr[:, 2].astype(np.int64)
+            _ex = (_own_pad_cells[:, 0].astype(np.int64) * 100000
+                   + _own_pad_cells[:, 1].astype(np.int64))
+            _mask = ~np.isin(_key, _ex)
+            arr = arr[_mask]
+    return arr
 
 
 def stamp_victim_si_field(obstacles,
