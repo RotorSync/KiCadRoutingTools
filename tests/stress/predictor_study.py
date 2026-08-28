@@ -173,10 +173,22 @@ DOSE_FRACTIONS = (0.25, 0.55, 0.90)
 #: Ten portfolio candidates rather than four, because the three undosed kinds
 #: contribute three variants instead of nine. K stays 20.
 PORTFOLIO_INDICES = tuple(range(1, 11))
-#: `swap` is excluded from portfolio strategies: it is barren without resolved
-#: blocks, and `perturb.py`'s swap re-picks the pair itself, so the damage end
-#: covers it properly.
-PORTFOLIO_STRATEGIES = ('jitter', 'poses')
+#: JITTER ONLY, and both exclusions are measured.
+#:
+#: `swap` is barren without resolved blocks, and `perturb.py`'s swap re-picks
+#: the pair itself, so the damage end covers that shape properly.
+#:
+#: `poses` was in this tuple for one run and produced NO BOARD on any even
+#: index: "poses: no rotation variant left at round 0", again at rounds 1-4.
+#: It enumerates discrete rotation variants and a board whose parts have few
+#: legal orientations exhausts them immediately -- so five of esp_prog's twenty
+#: slots came back empty and the effective K was 15, not 20. Losing a quarter of
+#: the sample to a strategy that cannot run on the board is not a null result,
+#: it is a smaller study.
+#:
+#: `jitter` is continuous in its rng, so `only=i` gives a distinct candidate for
+#: every i. Ten of them.
+PORTFOLIO_STRATEGIES = ('jitter',)
 
 
 def variant_names():
