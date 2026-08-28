@@ -281,7 +281,9 @@ def _guard_congestion(a):
                        '`metrics.hpwl`. Re-render it with --json-out.')
     # hpwl, NOT crossings. The placement skill's non-negotiable 4 is explicit:
     # report crossings, never gate on it, because it correlates POSITIVELY with
-    # distance-to-truth (r = +0.780 over 29 candidates; one candidate beat the
+    # distance-to-truth -- DISTANCE, never routed blocking, which nothing has
+    # correlated it against (docs/placement-predictors.md)
+    # (r = +0.780 over 29 candidates; one candidate beat the
     # human original's crossings while sitting 18.7 mm out of position). A gate
     # on crossings is pressure toward a worse board. hpwl's minimum is at the
     # truth, so it is the one that can carry a gate.
@@ -2474,7 +2476,8 @@ def _self_test():
         # A placement that closed most of its HPWL gap: `parameter` is then a
         # believable verdict and L4 emits its body. hpwl and not crossings --
         # the placement skill's non-negotiable 4, r(crossings) = +0.780 against
-        # distance-to-truth.
+        # distance-to-truth -- not against routed blocking
+        # (docs/placement-predictors.md).
         _cbase, _cgood = _cong('cb.json', 1000.0), _cong('cg.json', 600.0)
         _cbad = _cong('cn.json', 980.0)          # neo6502's shape: 2% closed
         _cong_ok = ['--congestion-json', _cgood, '--congestion-baseline', _cbase]

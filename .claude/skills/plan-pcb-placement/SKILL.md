@@ -146,7 +146,9 @@ re-emit if in doubt.
    intent says.
 4. Gate on hpwl, PAD-PAD conflicts and the assembly channel's blocking pairs.
    REPORT `crossings` and aggregate courtyard overlap; never gate on them --
-   both correlate POSITIVELY with distance-to-truth.
+   both correlate POSITIVELY with **distance-to-truth**. That is the measured
+   dependent variable; neither has been correlated with routed `blocking`
+   (`docs/placement-predictors.md`).
 5. Every proposal is decided by a MEASUREMENT on the board in front of you, not
    by what a pattern suggests. If no instrument confirms it, do not apply it.
 6. Placement invalidates every downstream routed board. Never run it mid-chain.
@@ -276,7 +278,9 @@ and AABB currencies.
 
 **Do not gate on the AGGREGATE `overlap_area`** — it has a legitimate nonzero floor on
 human boards (one human-routed 2-layer board in the corpus carries 5.375 mm2 of
-mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2 measured it positively correlated with distance-to-truth. The
+mount-hole-under-shell courtyard kisses in its own shipped layout) and run 2 measured it positively correlated with **distance-to-truth** — a
+different question from routed `blocking`, which nothing here has measured it
+against (`docs/placement-predictors.md`). The
 per-pair blocking COUNT is the gateable quantity; courtyard/fab pairs are ADVISORY
 (`check_assembly` labels each with its waiver class), fix targets for the placement
 loop below, never a gate alone.
@@ -418,11 +422,16 @@ actually left are 2.9–9.8 mm — 2 to 6× more. **The corridor is for the PART
 against the gap a human chose, per board (gaps scale with board size, so the comparison
 is within a board, never pooled across them):
 
-| predictor | what it is | correlation with the human's gap |
+| predictor | what it is | correlation with the human's gap (NOT with routed `blocking`) |
 |---|---|---|
 | **small parts in the corridor** | count, or summed extent | **positive on 8 of 8 distinct boards, r = +0.41 … +0.90** |
 | routing cut | nets crossing ÷ layers | ~0, and often negative (−0.48 … +0.08) |
 | **the quench's own whitespace term** | `halo_base + halo_coef·sqrt(pin_count)` | **no consistent sign — 5 boards negative, 3 positive** |
+
+The dependent variable in that table is **the gap a human left**, not routed
+`blocking`. The corridor law has never been correlated with a routed outcome,
+and the A/B recorded below found that widening the two deficit corridors bought
+no completion benefit at all — see `docs/placement-predictors.md`.
 
 So **do not expect `--halo-coef` to reserve the corridor**: it is a function of pin count,
 which is not the quantity that decides. The assignment you need already exists — `route.py
@@ -900,7 +909,12 @@ three parts are required:
    built entirely out of the quench's own cost function, so it can only measure whether
    the quench succeeded at being a quench. Measured across 29 candidates on one board,
    against distance-to-the-correct-placement: **r(crossings) = +0.780** and
-   **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*. One
+   **r(overlap_area) = +0.723** — *lower crossings goes with a WORSE placement*.
+   **Both are measured against distance-to-the-correct-placement, NOT against
+   routed `blocking`** (29 candidates, ONE board, run 6). See
+   `docs/placement-predictors.md` for what has and has not been correlated with a
+   routed outcome. The decision this supports — gate `hpwl`, never `crossings`
+   — is unchanged by that correction: it never rested on a routability claim. One
    candidate reached **233 crossings, better than the human original's 276**, while
    sitting 18.7 mm out of position. `hpwl` behaves (its minimum is at the truth) and is
    what actually does the work in this rule. **Gate on `hpwl`, on PAD-PAD DRC, and on
