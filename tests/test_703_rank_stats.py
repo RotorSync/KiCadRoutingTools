@@ -418,6 +418,20 @@ def t_board_rho_drops_nulls_and_says_so():
           f'a dropped NaN says NaN: {br.reason!r}')
     check('null' not in (br.reason or ''),
           f'and does NOT call it a null: {br.reason!r}')
+    # The SAME rule on the TRUTH column. This arm was reached by neither
+    # grader: the predictor-side check above killed the shipped battery row on
+    # its own, so mutating only the truth-side arm survived both this file and
+    # the kernel self-test. Found by an adversarial review of the fix for the
+    # predictor half.
+    rows = _rows([0, 1, 2, 3])
+    rows[0]['truth']['headline'] = rs.NAN
+    br = rs.board_rho(rows, 'x', 'headline')
+    check(br.n == 3, f'a NaN TRUTH drops its row: n={br.n}')
+    check('NaN value' in (br.reason or ''),
+          f'and is named as a NaN, not a null: {br.reason!r}')
+    check('null' not in (br.reason or ''),
+          f'the truth-side arm does not misreport the cause either: '
+          f'{br.reason!r}')
     # Both at once must report both counts, not one merged number.
     rows = _rows([0, 1, 2, 3, 4])
     rows[0]['predictors']['x'] = None

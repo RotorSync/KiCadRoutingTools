@@ -308,9 +308,16 @@ def _one_board(rows: Sequence[Mapping], fn: str) -> Optional[str]:
     """
     keys = {r.get('board_key') for r in rows if r.get('board_key')}
     if len(keys) > 1:
+        # str() and sort BY str: a board_key is typed str, but a caller with
+        # int or mixed keys would otherwise get `TypeError: sequence item 0:
+        # expected str instance` out of the join -- the precise failure shape
+        # StatsRefusal exists to replace. A guard that crashes instead of
+        # refusing is the defect this module keeps finding in other people's
+        # code. (Found by an adversarial review of this very fix.)
         raise StatsRefusal(
             f'{fn}() was given rows from {len(keys)} boards '
-            f'({", ".join(sorted(keys)[:6])}). Every correlation here is '
+            f'({", ".join(str(k) for k in sorted(keys, key=str)[:6])}). '
+            f'Every correlation here is '
             f'computed WITHIN one board: pooling across boards measures board '
             f'size, and on this repo\'s own corpus it flips the sign of '
             f'rho(crossings, vias) from -0.400 to +0.714. Use per_board() '

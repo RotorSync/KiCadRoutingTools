@@ -259,6 +259,32 @@ ROWS = [
      "            dropped += 1\n",
      (T703,), 'KILLED'),
 
+    # The TRUTH-side half of the same arm, anchored ALONE. The row above
+    # rewrites both halves and is killed by the predictor-side check, so it
+    # attacked the truth-side arm not at all -- an adversarial review mutated
+    # this line by itself and both graders stayed green. A battery row whose
+    # kill is entirely due to a sibling line is a row that covers nothing.
+    ('a-NaN-TRUTH-is-reported-as-a-null-one', 'rs',
+     "        if isinstance(d, float) and d != d:
+"
+     "            dropped_nan += 1
+",
+     "        if isinstance(d, float) and d != d:
+"
+     "            dropped += 1
+",
+     (T703,), 'KILLED'),
+
+    ('the-NaN-TRUTH-arm-is-deleted', 'rs',
+     "        if isinstance(d, float) and d != d:
+"
+     "            dropped_nan += 1
+"
+     "            continue
+",
+     '',
+     (T703,), 'KILLED'),
+
     # ---- INERT PROBES, which must change nothing ---------------------------
     # A battery with no expected survivors cannot distinguish "my tests are
     # thorough" from "my tests fail on any edit at all". These two are real
