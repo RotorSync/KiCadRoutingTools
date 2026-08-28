@@ -140,13 +140,21 @@ CALIBRATION_CANDIDATES = STUDY_BOARDS + [
 #: all-damaged one has no ceiling.
 #: Kinds whose damage SCALES with the requested dose, so three doses give three
 #: placements.
-DOSED_KINDS = ('translate', 'wrong_side', 'scatter')
+DOSED_KINDS = ('translate', 'scatter')
 #: Kinds that ignore the dose entirely, so they contribute exactly ONE variant.
+#:
 #: `swap` trades the two highest-ranked disjoint blocks -- a deterministic
-#: choice with no dose and no rng in it -- and `pile` collapses every free part
-#: to one coordinate. Asking either for three doses produces three
-#: byte-identical boards.
-UNDOSED_KINDS = ('swap', 'pile')
+#: choice with no dose and no rng in it. `pile` collapses every free part to one
+#: coordinate. And `wrong_side` REFLECTS the block through the board centre:
+#: `perturb.py`'s translate branch computes `t = (2*(bx-cx), 2*(by-cy))` for
+#: that kind and never reads the dose at all.
+#:
+#: `wrong_side` was in DOSED_KINDS for one run, and the study measured it out:
+#: three variants, `dose_mm_applied` 11.352973 on all three, one poses_sha256
+#: between them. The duplicate guard caught it -- which is what the guard is
+#: for -- but it cost two routes per board to learn something the source says
+#: in one line. Asking any of these three for a dose produces identical boards.
+UNDOSED_KINDS = ('wrong_side', 'swap', 'pile')
 
 #: Doses as a fraction of the MAXIMUM FEASIBLE travel for this board and block,
 #: not of the board diagonal.
@@ -162,9 +170,9 @@ UNDOSED_KINDS = ('swap', 'pile')
 #: fractions of THAT. Every one is achievable by construction, and the fractions
 #: are spread far enough apart that a grid snap cannot merge them.
 DOSE_FRACTIONS = (0.25, 0.55, 0.90)
-#: Eight portfolio candidates rather than four, because the undosed kinds
-#: contribute two variants instead of six. K stays 20.
-PORTFOLIO_INDICES = (1, 2, 3, 4, 5, 6, 7, 8)
+#: Ten portfolio candidates rather than four, because the three undosed kinds
+#: contribute three variants instead of nine. K stays 20.
+PORTFOLIO_INDICES = tuple(range(1, 11))
 #: `swap` is excluded from portfolio strategies: it is barren without resolved
 #: blocks, and `perturb.py`'s swap re-picks the pair itself, so the damage end
 #: covers it properly.
