@@ -58,6 +58,8 @@ TARGETS = {'fc': FC}
 
 T747 = os.path.join(_TESTS, 'test_747_fanout_clearance_via_registrar.py')
 T725 = os.path.join(_TESTS, 'test_725_fanout_clearance_pad_floors.py')
+T775 = os.path.join(_TESTS,
+                    'test_775_fanout_clearance_via_prune_refresh.py')
 T732 = os.path.join(_TESTS, 'test_732_fanout_clearance_via_radius.py')
 T736 = os.path.join(_TESTS, 'test_736_fanout_clearance_regrade_view.py')
 T746 = os.path.join(_TESTS, 'test_746_fanout_clearance_resolved_credit.py')
@@ -304,13 +306,22 @@ ROWS = [
     # one each on synthetic boards. Measured: 8 arms across three files, and
     # the note is left here rather than quietly flipped, because a battery
     # whose predictions are edited to match its results measures nothing.
+    #
+    # RE-ANCHORED BY #775, which replaced the inline per-cap comprehension
+    # this row used to move around with a method on _Repair. It is the SAME
+    # mutation -- relocate AFTER the refresh -- and it keeps the note above
+    # rather than being rewritten as though it had always looked like this.
+    # T775 joins the graders: TestTheRefreshSeesTheMOVEDBarrel asserts
+    # directly that no cap holds a pre-move tuple, which is exactly what
+    # this ordering breaks, and #746's ordering arm now checks it
+    # structurally as well as behaviourally.
     ('relocate-after-the-per-cap-refresh', 'fc',
      [('            st.relocate_vias(via_moves)\n', ''),
-      ('            st.cap_vias = {r: st.vias for r in st.caps}\n',
-       '            st.cap_vias = {r: st.vias for r in st.caps}\n'
+      ('            st.refresh_cap_vias()\n',
+       '            st.refresh_cap_vias()\n'
        '            st.relocate_vias(via_moves)\n')],
      None,
-     (T747, T736, T746), 'KILLED'),
+     (T747, T736, T746, T775), 'KILLED'),
 ]
 
 

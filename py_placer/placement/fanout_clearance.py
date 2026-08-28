@@ -1246,10 +1246,10 @@ class _Repair:
         # the first fill for a pair does happen inside cost() -- measured on a
         # 0.5-class board: 572 of 62,565 pair_with_source calls, against
         # 251,477 cost() calls. Each memo is (source_list, rows) and is
-        # rebuilt when the source list identity changes -- which makes
-        # repair_fanout_clearance's wholesale `st.cap_vias = {...}` reassignment
-        # self-heal, and makes a test that injects into cap_foreign_pads grade
-        # flat rather than mis-index.
+        # rebuilt when the source list identity changes -- which is what
+        # lets refresh_cap_vias hand every cap a NEW list per key without
+        # clearing a memo (#775), and makes a test that injects into
+        # cap_foreign_pads grade flat rather than mis-index.
         self._cap_pad_eff: Dict[str, Tuple[list, list]] = {}
         self._cap_seg_eff: Dict[str, Tuple[list, list]] = {}
         self._cap_via_eff: Dict[str, Tuple[list, list]] = {}
@@ -1341,16 +1341,13 @@ class _Repair:
             # lists have different lengths.
             self._seed_seg_n[ref] = len(self.cap_segs[ref])
 
-            near_vias = []
-            # v[3] = via_radius + its own keep-out; a via that can reach a pad
-            # must be within (move + span + keep-out) of the seed. #725: plus
-            # this cap's excess over the flat scalar, which bounds the pair.
-            via_slack = max(0.0, cap_mf - clearance)
-            for v in self.vias:
-                if math.hypot(v[0] - ccx, v[1] - ccy) <= (
-                        max_displacement_cap + span + v[3] + via_slack):
-                    near_vias.append(v)
-            self.cap_vias[ref] = near_vias
+            # #775: through _prune_vias, the ONE spelling of this predicate.
+            # It carries the comment block that used to live here -- why v[3]
+            # is the via's own over-reach, why #725's cap-side slack bounds
+            # the pair, and how thin the exactness margin on this channel
+            # really is.
+            self.cap_vias[ref] = self._prune_vias(cap, cap_geom[ref],
+                                                  self.vias)
 
         # Baseline same-side overlaps at the seed placement. Collisions are
         # scored RELATIVE to these: the repair must not introduce or worsen a
@@ -2005,6 +2002,74 @@ class _Repair:
             self._via_radius_by_id[id(t)] = (t, radius)
         return t
 
+    def _prune_vias(self, cap, geom, source):
+        """The vias in `source` this cap could EVER be charged against --
+        THE one spelling of the per-cap via prune.
+
+        `geom` is the cap's SEED-pose (cx, cy, span, rect) from self._cap_geom,
+        never its current rect, for the reason the track twin gives at length:
+        the bound is the reachable-DISK argument -- a cap moves at most
+        max_displacement_cap from its SEED, so anything whose seed gap already
+        exceeds that can never constrain it -- and that is what makes this
+        prune EXACT rather than an approximation. A MOVED pose silently
+        redefines what "exact" means, and required_rows grades the via
+        shortfalls at the SEED pose as well as the final one, so a moved-pose
+        radius is a superset for neither.
+
+        v[3] is the via's radius PLUS its own keep-out, so a via that can reach
+        a pad must be within (move + span + that) of the seed centre. #725's
+        slack adds this cap's excess over the flat scalar, which bounds the
+        pair from the other side: the two terms together are `radius +
+        max(clearance, the via's floor) + max(0, the cap's floor - clearance)`,
+        which is at least `radius + the pair's requirement` for every pair the
+        resolver can return, because a .kicad_dru rule REPLACES a pair value
+        but max_floor is each item's own upper bound over all of them.
+
+        THE MARGIN IS THINNER THAN THE TRACK CHANNEL'S, and is stated rather
+        than left to be rediscovered. The residual slack is
+        `span - grid_overshoot - R_max`, where R_max is the largest
+        seed-centre-to-pad-corner distance over the reachable rotations AND
+        the cap's own seed pose -- which is not among the four when a
+        footprint sits at a non-orthogonal angle, inert on today's corpus
+        where every seed_rot is a multiple of 90, and swept by the arm
+        regardless -- and the overshoot is real and pre-existing (_candidate_positions snaps
+        AFTER its radius test, so a final pose can sit up to
+        grid_step*sqrt(2)/2 past max_displacement_cap). Measured over
+        every cap of every tracked board that offers one -- 115 caps on
+        5 of the 22 -- the minimum is +0.1267mm (orangecrab_ext_pll R14,
+        span 0.7826, R_max 0.5852), the maximum +0.2716mm, and it is
+        never negative. The track pruner records +1.009mm for the same
+        quantity, because its bound carries `2*span + clearance` where this one
+        carries `span`. That is a fact about the bound __init__ has always
+        used, not an exposure #775 opens -- but this method now applies it at
+        the post-nudge refresh as well, so the number lives with the predicate.
+
+        NO LAYER GATE, unlike the track twin, and the reason is worth stating
+        accurately rather than flatteringly. Every via in this list is priced
+        AS THOUGH it spanned every copper layer -- self.vias is built from
+        pcb_data.vias with no span filter and the 4-tuple does not carry
+        via.layers -- so a blind or buried barrel is over-blocked here. That
+        is the safe direction and it predates #775, but it is an
+        approximation, not a geometric necessity: on a through-via there is
+        genuinely no per-pad copper scope to intersect, and on the others
+        there is one this channel does not model. Either way nothing a
+        #731-style union could exclude.
+
+        Returns a NEW list. A caller must ASSIGN it and must never extend a
+        cap's existing list in place: _via_effs memoises on the source list's
+        IDENTITY, so an in-place append leaves a memo that still passes the
+        identity test while being one column short, and _via_shortfalls then
+        indexes past the end of its row.
+        """
+        ccx, ccy, span, _crect = geom
+        via_slack = max(0.0, cap.max_floor - self.clearance)
+        near_vias = []
+        for v in source:
+            if math.hypot(v[0] - ccx, v[1] - ccy) <= (
+                    self._max_disp_cap + span + v[3] + via_slack):
+                near_vias.append(v)
+        return near_vias
+
     def relocate_vias(self, via_moves) -> int:
         """Take the vias nudge_vias_for_unresolved just MOVED into the graded
         via view; return how many TUPLES were replaced (#747).
@@ -2038,10 +2103,11 @@ class _Repair:
         the reason needs stating carefully, because the obvious version of it
         is not what happens on the real path. _via_effs revalidates its memo
         on the identity of the list it is HANDED, which on the real path is
-        the per-cap pruned self.cap_vias[ref], not this one -- and the caller
-        refreshes that on the next line regardless. The rebind matters for a
-        holder that points cap_vias AT this list, which is the idiom every
-        test in this family uses and the state any second call would find. A
+        the per-cap pruned view, not this one -- and refresh_cap_vias
+        rebuilds that on the next line regardless. The rebind matters for a
+        holder that points cap_vias AT this list, which since #775 is a TEST
+        idiom only -- the engine never points it here -- and the state any
+        second call would find. A
         review measured the difference: mutating this in place leaves the
         end-to-end result byte-identical, and only the mechanism arms in
         tests/test_747_fanout_clearance_via_registrar.py go red. Kept
@@ -2075,8 +2141,9 @@ class _Repair:
         The returned count is what tells the two apart -- it counts TUPLES
         replaced, not moves handed in.
 
-        Leaves self.cap_vias alone. The caller refreshes the per-cap view on
-        the line below, exactly as it did while this rebuild was inline.
+        Leaves the per-cap view alone -- refresh_cap_vias owns it, and the
+        caller calls that on the line below. A registrar that also
+        refreshed would be a second place deciding what a cap can see.
 
         Not idempotent, and does not need to be: one caller, one call.
         """
@@ -2100,6 +2167,91 @@ class _Repair:
                 else:
                     rebuilt.append(t)
             self.vias = rebuilt
+        return n
+
+    def refresh_cap_vias(self) -> int:
+        """Re-prune the per-cap via view after the registrar moved barrels;
+        return how many caps were reassigned (#775).
+
+        The one caller is repair_fanout_clearance, on the line below the via
+        registrar and under the same `if via_moves:` guard, exactly where an
+        inline dict comprehension over the whole-board list used to sit. Same
+        idiom as the two registrars beside it: the nudger reports, and a real
+        _Repair applies the report.
+
+        RE-PRUNES rather than de-prunes, which is the whole of #775. The old
+        line pointed every cap at the whole-board list, and that is
+        NUMERICALLY IDENTICAL rather than approximately so: the prune is
+        exact, so a via it drops fails its keep-out test outright and
+        contributes no addend at all -- not a small one -- and the kept vias
+        stay in their original order, so even the float summation order is
+        unchanged. Measured on kicad_files/orangecrab_ext_pll.kicad_pcb at
+        --clearance 0.1, in both in-repo configurations that relocate
+        barrels: graze_penalty, the via shortfalls and required_rows all
+        compare EQUAL, not merely close, with 10 caps carrying a
+        non-zero penalty as the positive control.
+
+        What the de-prune cost is the eff matrix _via_effs then rebuilds per
+        cap, over n_pads x n_ALL_vias instead of n_pads x n_in_reach, plus
+        the same widening of via_penalty's and the shortfall loops' own
+        inner passes. On that board (65 caps, 2 pads each, 136 vias) the
+        matrix is 1,914 cells pruned against 17,680 de-pruned at the
+        SHIPPED max_displacement_cap of 3.0, and 144 against 17,680 at
+        0.0 -- and the re-grade plus the disclosure that read them took
+        17.7ms against 49.5ms, and 2.8ms against 35.9ms (best of 7).
+        The smaller reach makes the ratio LARGER, so the shipped default
+        is the conservative figure and the forcing config is the
+        flattering one.
+
+        EVERY cap in self.caps is reassigned, and this is where the track
+        registrar's freedom to SKIP does not carry over. That one may leave a
+        cap it has no seed pose for exactly as the caller built it, because
+        every tuple already in that cap's list still describes real copper at
+        the same coordinates. Here it does not: the registrar SUBSTITUTED the
+        tuples it moved, so a cap left alone keeps the PRE-move tuple -- a
+        phantom via at the landing and a hole where the barrel really is,
+        which is the exact failure the registrar's own docstring names about
+        matching on position alone. A cap with no seed pose therefore falls
+        back to a COPY of the whole list rather than being skipped:
+        over-blocking is the only direction that can never ship a violation,
+        and a copy rather than the list itself so that "every value in this
+        view is a list this method made" holds for every cap, with no
+        exception a caller has to know about.
+
+        Does NOT touch _cap_via_eff. That memo revalidates on the identity of
+        the list it is HANDED and every list here is new, so the rows rebuild
+        on their own. Clearing it as well would be a second mechanism doing
+        one job, and the one that goes stale first.
+
+        Assigns PER KEY, where the line this replaced rebound the whole dict.
+        That is strictly more conservative for every reader -- all of them
+        index by a ref taken from self.caps -- with one consequence worth
+        naming: a key left in this view for a ref that is NO LONGER in
+        self.caps would keep its pre-move list rather than being dropped.
+        Unreachable as the module stands, because self.caps is written once
+        in __init__ and never narrowed.
+
+        Exactly idempotent in VALUE and not in COST: a second call builds
+        another set of equal lists and discards every memo again. One caller,
+        one call.
+        """
+        n = 0
+        for ref, cap in self.caps.items():
+            # `.get` rather than a bare index, matching what the track
+            # registrar and the eff builders already do: st.caps is assignable
+            # from a test on a REAL _Repair -- test_775's own geomless-cap arm
+            # does exactly that -- and a cap this object never pruned for has
+            # no seed pose to measure a reach from.
+            #
+            # The track registrar's twin of this comment cites test_725 and
+            # test_732 for the same claim. A fact-check of #775 measured that
+            # those two assign cap_vias / cap_segs / segments on a real
+            # _Repair but never `caps`, so this one does not repeat the
+            # citation. The defensive `.get` is right either way.
+            geom = self._cap_geom.get(ref)
+            self.cap_vias[ref] = (list(self.vias) if geom is None
+                                  else self._prune_vias(cap, geom, self.vias))
+            n += 1
         return n
 
     def _pad_effs(self, ref, cap):
@@ -3150,8 +3302,14 @@ def repair_fanout_clearance(pcb_data: PCBData, pcb_file: str,
             # the report here. Must precede the refresh below, which reads
             # the view this repairs.
             st.relocate_vias(via_moves)
-            # refresh the per-cap pruned via lists before re-grading
-            st.cap_vias = {r: st.vias for r in st.caps}
+            # #775: ...and re-prune the per-cap via view against the
+            # list the line above just repaired, before anything
+            # re-grades it. This was a wholesale reassignment onto the
+            # whole-board list -- a safe SUPERSET of the pruned view (it
+            # is the PRUNE that is exact), which therefore graded the same
+            # and paid an eff-matrix rebuild of n_pads x n_ALL_vias per
+            # cap. Must FOLLOW the relocation, which is what it reads.
+            st.refresh_cap_vias()
             # base_seg / base_pad / base_via are deliberately NOT re-seeded --
             # exactly as base_via is left alone by the line above, though via
             # positions changed there too. They are read only by cost() /

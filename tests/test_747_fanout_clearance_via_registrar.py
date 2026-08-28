@@ -421,12 +421,12 @@ class TestTheListIdentityChanges(unittest.TestCase):
     adversarial review measured it.
 
     On the REAL path the list `_via_effs` receives is the per-cap pruned
-    `cap_vias[ref]`, not the graded list this rebinds, and the caller refreshes
-    `cap_vias` on the next line regardless. Mutating in place there leaves the
-    end-to-end result byte-identical; only the arms below go red. The rebind is
-    load-bearing for a holder that points `cap_vias` AT the graded list, which
-    is the idiom every test in this family uses and the state any second call
-    would find.
+    view, not the graded list this rebinds, and `refresh_cap_vias` rebuilds
+    that on the next line regardless. Mutating in place there leaves the
+    end-to-end result byte-identical; only the arms below go red. The rebind
+    is load-bearing for a holder that points `cap_vias` AT the graded list --
+    which since #775 is a TEST idiom only, because the engine no longer points
+    it there -- and for the state any second call would find.
 
     So these are MECHANISM arms, and this docstring says so rather than
     implying a numeric consequence the real path does not have."""
@@ -655,9 +655,10 @@ class TestOneViaRule(unittest.TestCase):
     # AttributeError on their stand-in.
 
     def test_the_registrar_does_not_touch_the_per_cap_view(self):
-        """The caller refreshes `cap_vias` on the line below, exactly as it did
-        while the rebuild was inline. A registrar that also refreshed would be
-        a second place deciding what a cap can see.
+        """`refresh_cap_vias` owns the per-cap view (#775), and the caller
+        calls it on the line below -- exactly where the rebuild was inline. A
+        registrar that also refreshed would be a second place deciding what a
+        cap can see.
 
         A WRITE-shape regex, not `'cap_vias' not in ...`, and not a
         read-shape one either: the method's own docstring names the attribute
