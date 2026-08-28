@@ -183,7 +183,7 @@ ROWS = [
     # ---- the formatter that cannot emit a bare rho -------------------------
     ('fmt-rho-drops-the-LOO-span', 'rs',
      "    span = (f'LOO {fmt(lo, 0)}..{fmt(hi, 0)}' if lo == lo and hi == hi\n"
-     "            else 'LOO n/a')\n",
+     "            else 'LOO not computed')\n",
      "    span = ''\n",
      (T703,), 'KILLED'),
 
