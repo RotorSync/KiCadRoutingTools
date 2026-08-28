@@ -1489,14 +1489,30 @@ class PlanExecutor:
             # ticks the override for it two lines below. That case exists now
             # because manifest_to_plan carries the flag into the step (#768);
             # before it did not, which is why this exception was blanket.
-            if step["action"] == "optimize_caps" and not (
-                    step.get("params") or {}).get("clearance"):
+            #
+            # #780: and a FANOUT step that switches the inline cap pass on
+            # runs the same pass, so it needs the same rule. Until #780 it
+            # did not matter -- the inline path dropped the ceiling on the
+            # floor, so the semantic bit could not reach the engine that
+            # way. Now it can, and `reset_params_to_defaults` does NOT
+            # reset `clearance_check` (it resets edge_ and zone_), so a
+            # fanout step following one that set `clearance` inherits a
+            # ticked override. `manifest_to_plan` never emits that shape --
+            # it converts the cap step separately -- but a Claude-authored
+            # plan may, and this is the executor's rule, not the
+            # converter's.
+            _p = step.get("params") or {}
+            _runs_caps = (step["action"] == "optimize_caps"
+                          or (step["action"] == "fanout"
+                              and _p.get("optimize_caps")))
+            if _runs_caps and not _p.get("clearance"):
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 if _cc is not None and _cc.GetValue():
                     _cc.SetValue(False)
-                    self.log("AI plan: optimize_caps has no --clearance; "
-                             "cleared the Min-Clearance override so it runs at "
-                             "the board's own class, as the CLI does")
+                    self.log("AI plan: %s has no --clearance; "
+                             "cleared the Min-Clearance override so the cap "
+                             "pass runs at the board's own class, as the CLI "
+                             "does" % step["action"])
             # #772: the per-step reset below is skipped for optimize_caps, so a
             # cap knob an earlier cap step set carries into the next one --
             # there is no fanout step in between to reset it. A BLANKET reset

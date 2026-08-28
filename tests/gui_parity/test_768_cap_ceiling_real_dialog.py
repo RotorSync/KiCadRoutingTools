@@ -399,8 +399,11 @@ def main():
     # no `clearance` param must also clear the override, or an omitted flag
     # arrives at the engine as a ceiling. Replays the executor's own rule.
     def _executor_rule(step):
-        if step["action"] == "optimize_caps" and not (
-                step.get("params") or {}).get("clearance"):
+        _p = step.get("params") or {}
+        _runs_caps = (step["action"] == "optimize_caps"
+                      or (step["action"] == "fanout"
+                          and _p.get("optimize_caps")))
+        if _runs_caps and not _p.get("clearance"):
             cc = getattr(dlg, 'clearance_check', None)
             if cc is not None and cc.GetValue():
                 cc.SetValue(False)
@@ -413,13 +416,40 @@ def main():
     check("plan: optimize_caps WITH a clearance param keeps it",
           _executor_rule({"action": "optimize_caps",
                           "params": {"clearance": 0.1}}) is True)
-    # and the rule as SHIPPED, read off the executor rather than re-implemented
+    # #780: a FANOUT step that switches the inline cap pass on runs the same
+    # pass, so the same rule applies. Reachable only since the inline path
+    # started carrying the ceiling at all.
+    dlg.clearance_check.SetValue(True)
+    check("plan: fanout+optimize_caps with NO clearance clears the override",
+          _executor_rule({"action": "fanout",
+                          "params": {"optimize_caps": True}}) is False)
+    dlg.clearance_check.SetValue(True)
+    check("plan: fanout+optimize_caps WITH a clearance param keeps it",
+          _executor_rule({"action": "fanout",
+                          "params": {"optimize_caps": True,
+                                     "clearance": 0.1}}) is True)
+    dlg.clearance_check.SetValue(True)
+    check("plan: a plain fanout step does NOT clear it",
+          _executor_rule({"action": "fanout", "params": {}}) is True)
+
+    # and the rule as SHIPPED. The four arms above run a MIRROR of the
+    # executor's predicate, which is only worth anything while the two
+    # agree -- so assert the shipped text of the predicate itself, not a
+    # bag of loose substrings. The old spelling here was satisfied by
+    # 'clearance_check' and 'optimize_caps' appearing ANYWHERE in a
+    # 1500-line file, which is true of a file that dropped the rule.
     _plan_src = open(os.path.join(REPO, 'kicad_routing_plugin', 'ai_plan.py'),
                      encoding='utf-8').read()
-    check("the executor actually carries that rule",
-          'clearance_check' in _plan_src
-          and 'optimize_caps' in _plan_src
-          and ").get(\"clearance\")" in _plan_src)
+    _pred = ('_runs_caps = (step["action"] == "optimize_caps"\n'
+             '                          or (step["action"] == "fanout"\n'
+             '                              and _p.get("optimize_caps")))')
+    check("the executor actually carries that rule, verbatim",
+          _pred.replace('\n', '') in _plan_src.replace('\r', '')
+                                              .replace('\n', '')
+          and 'if _runs_caps and not _p.get("clearance"):' in _plan_src
+          and "_cc.SetValue(False)" in _plan_src,
+          "the mirror above no longer matches the shipped predicate, so "
+          "the four arms are testing this file rather than ai_plan.py")
 
     print()
     if failures:
