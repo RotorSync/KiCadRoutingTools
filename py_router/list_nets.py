@@ -578,7 +578,7 @@ def net_class_memberships(pcb_path, nets, design_rules=None):
     """{net_id: set of net-class names} from the sibling .kicad_pro: the
     explicit ``netclass_assignments`` entry UNION every matching
     ``netclass_patterns`` glob (KiCad merges memberships). The SHARED membership
-    resolver -- net_clearance_map_by_id and the #549 .kicad_dru track-clearance
+    resolver -- net_clearance_map_by_id and the .kicad_dru track-clearance
     channel both resolve through this, so router and grader cannot drift on who
     is in a class. Nets with no membership are omitted (not mapped to set()).
 

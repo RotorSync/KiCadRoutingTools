@@ -236,7 +236,7 @@ def build_base_obstacle_map(pcb_data: PCBData, config: GridRouteConfig,
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, _obstacle_clearance(seg.net_id))
-        # #549: a track-scoped DRU rule RAISES the seg-vs-seg requirement only
+        # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735)
         # (the track capsule); via_block keeps the resolved value.
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
@@ -1856,7 +1856,7 @@ def add_net_stubs_as_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         # #498: a .kicad_dru layer rule REPLACES the pair clearance on seg.layer.
         seg_clearance = config.layer_clearance(seg.layer, obs_clearance)
-        # #549: a track-scoped DRU rule RAISES the seg-vs-seg requirement only.
+        # A track-scoped DRU rule RAISES the seg-vs-seg requirement only (#735).
         trk_clearance = config.track_obstacle_clearance(seg.net_id, seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance
         via_block_mm = config.via_size / 2 + seg_width / 2 + seg_clearance + extra_clearance
@@ -2260,7 +2260,7 @@ def add_segments_list_as_obstacles(obstacles: GridObstacleMap, segments: list,
             seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
             seg_clearance = config.layer_clearance(  # #498: layer rule replaces
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
-            # #549: track rule raises the seg-vs-seg capsule; identical line in
+            # The track rule raises the seg-vs-seg capsule; identical line in
             # the REMOVE twin below (ref-count symmetry).
             trk_clearance = config.track_obstacle_clearance(
                 getattr(seg, 'net_id', 0), seg_clearance)
@@ -2330,7 +2330,7 @@ def remove_segments_list_from_obstacles(obstacles: GridObstacleMap, segments: li
         seg_width = seg.width if hasattr(seg, 'width') and seg.width > 0 else config.get_track_width(seg.layer)
         seg_clearance = config.layer_clearance(  # #498: layer rule replaces
             seg.layer, config.obstacle_clearance(getattr(seg, 'net_id', 0)))
-        # #549: identical raise to the ADD twin, or ref-counts desync.
+        # Identical track-rule raise to the ADD twin, or ref-counts desync.
         trk_clearance = config.track_obstacle_clearance(
             getattr(seg, 'net_id', 0), seg_clearance)
         expansion_mm = reserve_width / 2 + seg_width / 2 + trk_clearance + extra_clearance

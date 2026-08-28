@@ -1428,14 +1428,27 @@ class PadClearanceModel:
     path unchanged -- when the board declares no netclass, no dru rule and no
     pad override. That is the common case, and the reason this cannot perturb
     an ordinary board.
+
+    #735: the same `.kicad_dru`'s TRACK-scoped rules are carried too, in
+    `track_rules` / `net_classes`, and answered by `track_pair` -- which is a
+    separate resolver from `pair` and is **not** part of `active`. Both halves
+    of that are deliberate. A track rule binds `A.Type=='track' &&
+    B.Type=='track'`, so it can never price a pad pair, which is all `pair`
+    is asked for; and `active` is the switch consumers use to drop this object
+    entirely, so admitting a track-only board there would move
+    `grade_pad_legality`, `quench` and every broad phase in
+    `fanout_clearance` onto their resolved path to answer a question none of
+    them asks. The one caller that does ask reads `track_rules` for itself.
     """
 
     __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
-                 'active', 'notes', 'ceiling', '_pair_cache')
+                 'active', 'notes', 'ceiling', '_pair_cache',
+                 'track_rules', 'net_classes')
 
     def __init__(self, base: float, net_floor=None, layer_rules=None,
                  board_copper=(), has_overrides: bool = False,
-                 ceiling: Optional[float] = None):
+                 ceiling: Optional[float] = None,
+                 track_rules=None, net_classes=None):
         self.base = float(base)
         # #768: the --clearance ceiling this model was built under, or None.
         # Recorded rather than re-derived: `net_floor` is already capped by the
@@ -1445,6 +1458,17 @@ class PadClearanceModel:
         self.net_floor = dict(net_floor or {})
         self.layer_rules = dict(layer_rules or {})
         self.board_copper = list(board_copper or [])
+        # #735: the TRACK-scoped .kicad_dru channel and the class memberships
+        # that are its binding key. A separate tier from the three above, and
+        # deliberately NOT part of `active`: those three price the pair kinds
+        # every consumer of this model asks about, while a track rule binds
+        # track-vs-track and nothing else (KiCad's `A.Type=='track' &&
+        # B.Type=='track'`). Folding it in would move `grade_pad_legality`,
+        # `quench` and every broad phase in `fanout_clearance` off their inert
+        # path to answer a question none of them asks. The one consumer that
+        # DOES ask reads `track_rules` directly -- see `track_pair`.
+        self.track_rules = list(track_rules or [])
+        self.net_classes = dict(net_classes or {})
         self.active = bool(self.net_floor or self.layer_rules or has_overrides)
         self.notes = []
         self._pair_cache = {}
@@ -1485,6 +1509,8 @@ class PadClearanceModel:
             or [])
         net_floor = {}
         layer_rules = {}
+        track_rules = []
+        net_classes = {}
         notes = []
         if path:
             nets = getattr(pcb_data, 'nets', None) or {}
@@ -1551,7 +1577,40 @@ class PadClearanceModel:
                 layer_rules = {}
                 notes.append('.kicad_dru unread (%s: %s)'
                              % (type(exc).__name__, exc))
+            # #735: the SAME .kicad_dru's track-scoped rules, plus the class
+            # memberships that bind them. `board_track_rules` is quiet by
+            # construction and never raises -- it answers ([], {}) for a
+            # missing file, an unparsable one, and the case where the rules
+            # parse but memberships cannot be read (keeping rules there would
+            # grade every pair as a NON-member, which is a different answer,
+            # not a degraded one; check_drc drops them for the same reason).
+            #
+            # NOTHING IS ADDED TO `notes` HERE, and that is deliberate twice
+            # over.
+            #
+            # The parse notes would DUPLICATE. `read_board_layer_clearances`
+            # and `read_board_track_clearances` are two calls into the same
+            # `kicad_dru._parse_dru`, differing only in the copper list they
+            # pass -- and no note site in that function depends on the copper
+            # list, so the two note lists come back byte-identical (measured
+            # on a six-rule dru). The layer read above already filed them.
+            #
+            # And a note SAYING WHICH RULES WERE HONOURED would be a lie in
+            # two of this constructor's three callers. `notes` reaches the
+            # operator as `pad clearance: ...` from `grade_pad_legality` and
+            # from the quench census, and NEITHER reads `track_rules` --
+            # a track rule binds no pad pair, which is the whole reason it is
+            # a separate tier. The pass that does honour it discloses it where
+            # it acts, in the nudger's own fallback line.
+            try:
+                from kicad_dru import board_track_rules
+                track_rules, net_classes = board_track_rules(pcb_data, path)
+            except Exception as exc:                            # noqa: BLE001
+                track_rules, net_classes = [], {}
+                notes.append('.kicad_dru track rules unread (%s: %s)'
+                             % (type(exc).__name__, exc))
         model = cls(clearance, net_floor, layer_rules, board_copper,
+                    track_rules=track_rules, net_classes=net_classes,
                     has_overrides=has_overrides, ceiling=ceiling)
         model.notes = notes
         return model
@@ -1632,6 +1691,30 @@ class PadClearanceModel:
             # grader and not the other.
             src = ''
         return eff, src
+
+    # -- the TRACK-vs-track pair (#735) ---------------------------------------
+    def track_pair(self, net_a: int, net_b: int, resolved: float):
+        """(required mm, the TrackRule that raised it or None) for one pair of
+        TRACKS -- `resolved` raised by any binding `.kicad_dru` track rule.
+
+        A SEPARATE resolver from `pair`, not a flag on it, because this is the
+        only pair kind a track rule can bind: KiCad's condition is
+        `A.Type=='track' && B.Type=='track'`, so a pad or a via on either side
+        exempts the pair, and every other requirement this model answers has
+        one. Callers pass the value `pair()` already gave them: the rule is the
+        LAST tier and raise-only, exactly the order check_drc composes it in.
+
+        Keyed on NETS, never on floors, so it is correct to call with a
+        `resolved` that came from the flat fallback -- which is what happens on
+        a board whose only declaration IS a track rule, where the model is
+        `active is False` and no floor resolves at all.
+        """
+        if not self.track_rules:
+            return resolved, None
+        from kicad_dru import track_pair_clearance
+        return track_pair_clearance(self.track_rules,
+                                    self.net_classes.get(net_a, ()),
+                                    self.net_classes.get(net_b, ()), resolved)
 
 
 def resolve_npth_floor(pcb_data, pcb_file: str = None,

@@ -1972,12 +1972,12 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
             print("Per-layer clearance rules (.kicad_dru, #498): "
                   + ", ".join(f"{l}:{v:g}" for l, v in sorted(_lcl.items())))
 
-    # #549: track-scoped clearance rules from the same .kicad_dru. Grader-side
+    # Track-scoped clearance rules from the same .kicad_dru (#735). Grader-side
     # they are PAIR-EXACT (a rule binds a specific (a, b) pair, other_only
     # exempts member siblings), which is <= the router's per-obstacle-net
     # over-approximation -- so router output always grades clean. Applied at
     # the SEG-SEG site only (KiCad's Type=='track' binds tracks).
-    from kicad_dru import read_board_track_clearances
+    from kicad_dru import read_board_track_clearances, track_pair_clearance
     _track_rules, _track_notes = read_board_track_clearances(pcb_file)
     _cls_of: Dict[int, set] = {}
     if _track_rules:
@@ -1991,29 +1991,32 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
     if not quiet and _track_rules:
         for _n in _track_notes:
             print(f"  .kicad_dru: {_n}")
-        print("Track-to-track clearance rules (.kicad_dru, #549): "
+        print("Track-to-track clearance rules (.kicad_dru): "
               + ", ".join(f"'{r.cls}':{r.clearance_mm:g}"
                           f"{'(other-only)' if r.other_only else ''}"
                           for r in _track_rules))
 
     def _track_pair_cl(net_a: int, net_b: int, layer: str):
-        """Effective seg-seg clearance for the pair, plus the #549 TrackRule
+        """Effective seg-seg clearance for the pair, plus the TrackRule
         that RAISED it (None when no track rule binds above the base value).
         The rule identity is what lets the violation record distinguish a
-        structural, floor-governed rule pair from a physical graze."""
+        structural, floor-governed rule pair from a physical graze.
+
+        The binding predicate itself lives in `kicad_dru.track_pair_clearance`
+        (#735) so the fanout-clearance connector gate resolves a track pair
+        through THIS code rather than a second copy of it. Only the base value
+        is this grader's own -- `_pair_cl` reads the netclass/layer state that
+        exists nowhere else.
+
+        The empty-list early-out stays HERE rather than inside the resolver:
+        this runs per nearby seg-seg pair, and a board with no rules must not
+        pay a call for it (the same zero-cost-when-undeclared property the
+        netclass and override channels above have)."""
         eff = _pair_cl(net_a, net_b, layer=layer)
-        rule = None
         if not _track_rules:
-            return eff, rule
-        a_cls = _cls_of.get(net_a, ())
-        b_cls = _cls_of.get(net_b, ())
-        for r in _track_rules:
-            a_in, b_in = r.cls in a_cls, r.cls in b_cls
-            binds = ((a_in != b_in) or (a_in and b_in and not r.other_only))
-            if binds and r.clearance_mm > eff:
-                eff = r.clearance_mm
-                rule = r
-        return eff, rule
+            return eff, None
+        return track_pair_clearance(_track_rules, _cls_of.get(net_a, ()),
+                                    _cls_of.get(net_b, ()), eff)
 
     def _layer_cl(layer: str, eff: float) -> float:
         v = _lcl.get(layer) if _lcl else None
@@ -2185,7 +2188,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                 net2_name = pcb_data.nets.get(net2, None)
                 net1_str = net1_name.name if net1_name else f"net_{net1}"
                 net2_str = net2_name.name if net2_name else f"net_{net2}"
-                # #549 classification: the pair is RULE-governed (not a
+                # Track-rule classification: the pair is RULE-governed (not a
                 # physical graze) when a track rule raised the clearance AND
                 # the copper gap (eff - overlap) still clears the base pair
                 # value -- i.e. the violation exists only because of the rule.
@@ -3364,7 +3367,7 @@ def run_drc(pcb_file: str, clearance: float = 0.1, net_patterns: Optional[List[s
                         print(f"  {v['net1']} <-> {v['net2']}")
                         print(f"    Layer: {v['layer']}, Overlap: {v['overlap_mm']:.3f}mm")
                         if v.get('track_rule'):
-                            print(f"    Track rule: '{v['track_rule']}' (#549; floor-governed pair)")
+                            print(f"    Track rule: '{v['track_rule']}' (floor-governed pair)")
                         print(f"    Seg1: ({v['loc1'][0]:.2f},{v['loc1'][1]:.2f})-({v['loc1'][2]:.2f},{v['loc1'][3]:.2f})")
                         print(f"    Seg2: ({v['loc2'][0]:.2f},{v['loc2'][1]:.2f})-({v['loc2'][2]:.2f},{v['loc2'][3]:.2f})")
                     elif vtype == 'via-segment':

@@ -378,7 +378,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     per foreign net. base_clearance should be the moving net's own floor
     (max(global, own class)). Inert when net_clearances is None.
 
-    #549: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
+    #735: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
     folds the SAME way, raise-only on top of the class value -- this channel is
     seg-vs-seg ONLY, which is exactly what this helper measures, so a caller
     passing it here must NOT pass it to the pad/via helpers (KiCad's
@@ -410,7 +410,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     dist = np.hypot(sx[:, None] - projx, sy[:, None] - projy) - hw[None, :]
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
-        # #549: the track-rule value raises the same per-foreign requirement.
+        # The track-rule value raises the same per-foreign requirement (#735).
         fnid = nid[near]
         _nc = net_clearances or {}
         _tc = track_clearances or {}
@@ -3552,7 +3552,7 @@ def route_multipoint_main(
         print(f"  Existing copper joins {len(pad_info)} terminals into "
               f"{num_components} group(s)")
     if net_id in (getattr(pcb_data, '_zone_blob_fallback_nets', None) or ()):
-        # #549: the strict grouping above fell back to zone-outline credit
+        # strict view: the grouping above fell back to zone-outline credit
         # for a zone with no fill model (scipy absent / oversize) -- the
         # fragment view for this net is DEGRADED, disclose it.
         print("  (fragment view degraded to zone-outline credit: no fill "
@@ -3607,7 +3607,7 @@ def route_multipoint_main(
             'tap_edges_failed': 0,
             'tap_pads_connected': len(pad_info),
             'tap_pads_total': len(pad_info),
-            # #549 A-2: the STRICT component count behind this verdict --
+            # #578: the STRICT component count behind this verdict --
             # with the planner on the strict view, an "already connected"
             # return now really means one fragment per outline.
             'strict_fragments': num_components,

@@ -138,7 +138,7 @@ DIRECTION_PREFERENCE_COST = 250  # Cost penalty per off-axis move (0 = disabled)
 # #663 took this 250 -> 5 and reported -22 incomplete nets on sets1-5. That screen
 # ran on the old cloud image, which ships NO KiCad -- so find_kicad_cli() returned
 # None, oracle_reconnect returned available=False, and every oracle leg (the plane
-# finalize audit, the #589 re-audit, the #549 B-1 check) was a no-op. Re-screened
+# finalize audit, the #589 re-audit, the oracle-summary check) was a no-op. Re-screened
 # at ONE commit with kicad/kicad:10.0.0 in the image, sets1-5, decision rule
 # pre-registered before any arm reported:
 #

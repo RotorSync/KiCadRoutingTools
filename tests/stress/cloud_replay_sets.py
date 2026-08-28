@@ -968,7 +968,7 @@ def main():
                          "is then DEAD, not degraded -- oracle_reconnect returns "
                          "available=False as soon as find_kicad_cli() is None, so a "
                          "change acting only through the finalize audit / #589 "
-                         "re-audit / #549 B-1 check A/Bs as a PERFECT NULL that "
+                         "re-audit / oracle-summary check A/Bs as a PERFECT NULL that "
                          "reads as a measurement (#650). Only use it when you know "
                          "the change cannot touch an oracle leg and you want the "
                          "cheaper image. NOTE the arm label loses its -kc suffix, "

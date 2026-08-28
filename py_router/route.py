@@ -500,7 +500,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # #498: {layer: mm} per-layer clearance. None (both fronts) ->
                 # auto-read the sibling .kicad_dru; explicit dict (tests) wins.
                 layer_clearances: Optional[Dict[str, float]] = None,
-                # #549: {net_id: mm} track-to-track clearance (effective
+                # {net_id: mm} track-to-track clearance (#735; effective
                 # per-obstacle map). None (both fronts) -> auto-read the
                 # sibling .kicad_dru track rules; explicit dict (tests) wins.
                 track_clearances: Optional[Dict[int, float]] = None,
@@ -1315,7 +1315,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # oracle_links by the CALLER (the lap loop's landed-export), so re-laps
     # skip them the normal way.
     _assume_open572 = {l[0] for l in (oracle_links or []) if l and l[0]}
-    # fragment_gate (#549 A-2): a zone-less net whose copper KiCad holds in
+    # fragment_gate (#578): a zone-less net whose copper KiCad holds in
     # pieces must not be skipped as "Already fully connected". route_diff
     # deliberately keeps the default (a fragmented net entering the diff
     # engine is a separate behavior question).
@@ -1840,7 +1840,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # GUI inherits them with no wiring (see kicad_dru.install_layer_clearances).
     from kicad_dru import install_layer_clearances, install_track_clearances
     install_layer_clearances(config, layer_clearances, input_file, pcb_data)
-    # #549: track-scoped .kicad_dru rules, same engine-side pattern (raise-only
+    # Track-scoped .kicad_dru rules (#735), same engine-side pattern (raise-only
     # on seg-vs-seg stamps; effective map over THIS call's routed set).
     install_track_clearances(config, track_clearances, input_file, pcb_data,
                              routed_net_ids=base_map_exclusions)
@@ -3221,12 +3221,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for _p in _dp],
         })
 
-    # ---- FRAGMENT SWEEP (#549 C3) ------------------------------------------
+    # ---- FRAGMENT SWEEP -----------------------------------------------------
     # The grading verdict above is pad-oriented: a zone-less net can grade
     # "connected" while its copper sits in several KiCad islands (run 6's
     # VCC3V3: 25/27 reported, 7 islands real). Census every such net with the
     # strict-fragment model and report splits honestly. DISCLOSURE ONLY since
-    # the #549 A-2 fragment gate was removed for main parity (#578): these
+    # the #578 fragment gate was removed for main parity and ported back: these
     # entries name the splits, they no longer re-queue the net for routing.
     fragmented_nets = []
     _frag_already = {m['net_id'] for m in failed_multipoint}
@@ -3305,7 +3305,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 for (_x, _y) in _frag['fragment_anchors'][1:]],
         })
 
-    # ---- ORACLE SUMMARY CHECK (#549 B-1) -----------------------------------
+    # ---- ORACLE SUMMARY CHECK (KICAD_ORACLE_SUMMARY) ------------------------
     # KiCad's own connectivity over the AS-WRITTEN board, once per run.
     # Strictly ADDITIVE: it can only add failure disclosure (kicad-cli's
     # threaded connectivity is nondeterministic, so it never reclassifies a
@@ -3671,7 +3671,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             (pcb_data.nets[_n].name if _n in pcb_data.nets else str(_n)): _v
             for _n, _v in sorted(state.terminal_restores.items())}
     if fragmented_nets:
-        # #549 C3: pad-connected nets whose copper is several KiCad islands
+        # Fragment sweep: pad-connected nets whose copper is several KiCad islands
         # (additive; also present as failed_multipoint entries above).
         summary['fragmented_nets'] = fragmented_nets
     if stacked_copper_findings:
@@ -3681,7 +3681,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         summary['stacked_copper'] = stacked_copper_findings
     summary['oracle_check'] = oracle_check
     if oracle_open:
-        # #549 B-1: KiCad's own open-link counts for this run's scope
+        # Oracle summary: KiCad's own open-link counts for this run's scope
         # (additive; nets not already flagged also gained failed_multipoint
         # entries marked oracle_only).
         summary['oracle_open'] = oracle_open

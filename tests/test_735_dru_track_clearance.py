@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""#549 track-scoped clearance channel, inert half (A-1).
+"""The .kicad_dru TRACK-scoped clearance channel, parser half (#735).
+
+Renamed from test_549_track_clearance.py: it was never about GitHub #549
+(a CLOSED placement-skill issue), only about the work-plan label that
+commit fa685741 used. #735 is the live tracker for this channel.
 
 The run-5 case this exists for: a spec clause "2.4 mm from unrelated nets"
 written as a NETCLASS also binds pad-to-pad and is unsatisfiable on the

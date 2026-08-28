@@ -336,7 +336,7 @@ class GridRouteConfig:
     # the rules file is the one source of truth, and the graders (check_drc,
     # staged kicad-cli) read the same file.
     layer_clearances: Dict[str, float] = field(default_factory=dict)
-    # Track-to-track clearance from the board's .kicad_dru (#549),
+    # Track-to-track clearance from the board's .kicad_dru (#735),
     # {obstacle_net_id: mm} -- the EFFECTIVE per-obstacle map for this call's
     # routed set (kicad_dru.effective_track_clearances). RAISE-ONLY, applied
     # by track-vs-track stamp sites over the already-resolved value (so it
@@ -346,7 +346,7 @@ class GridRouteConfig:
     track_clearances: Dict[int, float] = field(default_factory=dict)
 
     def track_obstacle_clearance(self, net_id: int, resolved: float) -> float:
-        """#549 seg-vs-seg pair clearance against obstacle net ``net_id``:
+        """Track-rule seg-vs-seg clearance against obstacle net ``net_id``:
         max(resolved, the track-rule value) -- raise-only, one dict lookup per
         SEGMENT. ``resolved`` is the caller's fully-resolved value (class
         pairwise max, #498 layer replacement already applied)."""

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""#549 end-to-end: a .kicad_dru TRACK-scoped clearance rule is honored by the
+"""End-to-end (#735): a .kicad_dru TRACK-scoped clearance rule is honored by the
 router and graded by check_drc, with no CLI flag and no GUI wiring.
 
 Board: splitflap_driver, class 'CRIT' = /LED_* (netclass_patterns in a staged

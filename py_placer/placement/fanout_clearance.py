@@ -850,6 +850,14 @@ class _Repair:
                                              ceiling=netclass_ceiling)
         self.clearance_notes = list(_model.notes)
         self._floors = _model if _model.active else None
+        # #735: the track-scoped .kicad_dru channel, on its OWN handle and
+        # deliberately not folded into `self._floors`. That one is the switch
+        # for every requirement in this class, and nine consumers change code
+        # path when it flips; a track rule binds track-vs-track and nothing
+        # else, which happens at exactly one site (`connector_clear`'s s2 arm,
+        # via `track_required`). A board whose only declaration is a track rule
+        # therefore keeps `self._floors is None` and every existing number.
+        self._track = _model if _model.track_rules else None
         # Pad-layer scope for the non-pad items below. A via spans copper, so
         # it is scoped to ALL copper: check_drc's pad-via path passes
         # layers_b=None meaning "scope to the pad's own layers", and
@@ -1535,6 +1543,39 @@ class _Repair:
         unresolved that its own nudger then refuses to see). The via eff rows
         are built from this same call, so they cannot drift from it either."""
         return self._pair_or_flat(pad_floor, self._via_floor_for(via_net))
+
+    def track_required(self, fa, fb, net_a, net_b):
+        """The required clearance between two TRACKS: `required(fa, fb)` raised
+        by any binding track-scoped `.kicad_dru` rule (#735).
+
+        THE ONLY track-vs-track pair kind in this module, which is why it is a
+        separate resolver rather than an argument to `required`. KiCad's rule
+        condition names a track on BOTH sides, so a pad or a via on either side
+        exempts the pair -- and every other requirement resolved here has one.
+        The cap-pad arms, the via arms and the broad-phase over-reach are
+        exempt by that condition, not by omission.
+
+        Composition is check_drc's, term for term: resolve the pair first, THEN
+        raise. So the rule outranks the net class and the layer rule and can
+        lower neither. The raise is keyed on NETS, so it applies to the flat
+        fallback too -- which is the whole answer on a board whose only
+        declaration is a track rule."""
+        base = self._pair_or_flat(fa, fb)
+        if self._track is None:
+            return base
+        return self._track.track_pair(net_a, net_b, base)[0]
+
+    @property
+    def track_rules_active(self) -> bool:
+        """True when the board declares a track rule at all.
+
+        Public because `nudge_vias_for_unresolved` needs it to decide whether
+        a SECOND sweep rung is worth running: with no rule the strict and the
+        relaxed rung ask the same question, and sweeping twice for the same
+        answer would double the cost of every `no clear spot` on every
+        ordinary board. Read through `getattr`, so a duck-typed st is
+        single-rung."""
+        return self._track is not None
 
     @property
     def edge_margin(self) -> float:
@@ -3573,6 +3614,9 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
     _pad_fl = getattr(st, 'pad_floor', None)
     _via_fl = getattr(st, 'via_floor', None)
     _seg_fl = getattr(st, 'seg_floor', None)
+    _trk_req = getattr(st, 'track_required', None)
+    # #735: whether a SECOND, relaxed sweep rung is worth running at all.
+    _trk_on = bool(getattr(st, 'track_rules_active', False))
     _via_rad = getattr(st, 'via_radius', None)
     # #733: the board-edge requirement comes from st, so the two edge helpers
     # below cannot gate the copper this function EMITS more weakly than the cap
@@ -3615,6 +3659,17 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
 
     def seg_fl(net, layer):
         return None if _seg_fl is None else _seg_fl(net, layer)
+
+    def track_req(fa, fb, net_a, net_b):
+        """The TRACK-vs-track requirement (#735), st-resolved when it can be.
+
+        Falls back through `req`, not to `clearance`: an st that resolves pairs
+        but predates this resolver must still get its netclass and layer-rule
+        answer. The duck-typed harnesses carry neither, and grade flat -- the
+        same contract every shim above keeps."""
+        if _trk_req is None:
+            return req(fa, fb)
+        return _trk_req(fa, fb, net_a, net_b)
 
     def via_rad(v):
         """This via's RADIUS, resolved by st when it can (#732), so the offender
@@ -3880,16 +3935,26 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                 return False
         return True
 
-    def connector_clear(net_id, layer, width, sx, sy, ex, ey):
+    def connector_clear(net_id, layer, width, sx, sy, ex, ey,
+                        honour_track_rules=True):
         hw = width / 2.0
-        # The connector is a TRACK on `layer`, so it resolves like one. Note
-        # this honours netclasses and .kicad_dru LAYER rules, but not
-        # TRACK-SCOPED .kicad_dru rules, which live in a channel
-        # PadClearanceModel does not carry (kicad_dru.read_board_track_clearances,
-        # applied by check_drc at the seg-seg site only). Under-blocking a
-        # geometric connector that is separately DRC'd is the safe direction.
-        # Filed as #735. (check_drc.py tags that channel `#549`; GitHub #549 is
-        # a closed, unrelated issue, so this cites the tracker instead.)
+        # The connector is a TRACK on `layer`, so it resolves like one: net
+        # classes, .kicad_dru LAYER rules, and -- since #735 -- the board's
+        # TRACK-SCOPED .kicad_dru rules, through the same resolver check_drc
+        # grades a seg-seg pair with.
+        #
+        # THE TRACK RULE REACHES ONE ARM OF THIS FUNCTION, and the arms below
+        # are exempt by KiCad's own rule condition rather than by omission: it
+        # names a track on BOTH sides, so a cap pad, a board pad or a via on
+        # the far side takes the pair out of scope. The last loop is the only
+        # place both sides are tracks. The same reasoning exempts the via
+        # mover above and this module's broad-phase over-reach, whose far side
+        # is always a cap pad.
+        #
+        # Before #735 this arm priced at the net class alone, so on a board
+        # declaring a track rule the pass drew a connector closer to foreign
+        # copper than its own checker accepts -- an under-block, which ships
+        # the violation rather than refusing the landing.
         cfl = seg_fl(net_id, layer)
         # board edge / cutouts + NPTH drill holes at their floor (#370 B3):
         # a connector is drawn geometrically, not routed, so it must gate
@@ -3948,7 +4013,10 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
                     _point_to_seg_dist(ex, ey, s2.start_x, s2.start_y, s2.end_x, s2.end_y),
                     _point_to_seg_dist(s2.start_x, s2.start_y, sx, sy, ex, ey),
                     _point_to_seg_dist(s2.end_x, s2.end_y, sx, sy, ex, ey))
-            if d < hw + s2.width / 2.0 + req(cfl, seg_fl(s2.net_id, s2.layer)):
+            sfl = seg_fl(s2.net_id, s2.layer)
+            pair_req = (track_req(cfl, sfl, net_id, s2.net_id)
+                        if honour_track_rules else req(cfl, sfl))
+            if d < hw + s2.width / 2.0 + pair_req:
                 return False
         return True
 
@@ -4028,33 +4096,60 @@ def nudge_vias_for_unresolved(st, pcb_data, clearance: float,
             # max() is the one-rung raise this replaced. min() would take the
             # fab floor always and make the declaration inert. The point is
             # ORDER: prefer the board, keep the repair.
-            found = None
-            for H2H_VIA, H2H_PAD in drill_ladder:
-                r = 0.05
-                while found is None and r <= max_shift + 1e-9:
-                    for k in range(16):
-                        ang = k * math.pi / 8
-                        nx = round(v.x + r * math.cos(ang), 4)
-                        ny = round(v.y + r * math.sin(ang), 4)
-                        if not valid_via_pos(v, nx, ny):
-                            continue
-                        if all(connector_clear(v.net_id, layer, w,
-                                               v.x, v.y, nx, ny)
-                               for layer, w in conn_layers.items()):
-                            found = (nx, ny)
-                            break
-                    r += 0.05
+            #
+            # #735: the .kicad_dru TRACK rule is an OUTER rung of the same
+            # ladder, and for the same reason. A hard gate on it would trade
+            # the #130 pad-via graze this pass exists to remove -- which stays
+            # on the board when the sweep abandons the via -- for a
+            # `segment-segment-track-rule` pair, and check_drc counts both. So
+            # the rule is a PREFERENCE: sweep every drill rung honouring it,
+            # and only if nothing clears, sweep again at the base requirement
+            # and keep the repair. That is the same "prefer the board, keep the
+            # repair" order as the rungs above, and it means this can never
+            # place copper worse than the pre-#735 pass did.
+            trk_ladder = [True, False] if _trk_on else [True]
+            found, trk_relaxed = None, False
+            for TRK_STRICT in trk_ladder:
+                for H2H_VIA, H2H_PAD in drill_ladder:
+                    r = 0.05
+                    while found is None and r <= max_shift + 1e-9:
+                        for k in range(16):
+                            ang = k * math.pi / 8
+                            nx = round(v.x + r * math.cos(ang), 4)
+                            ny = round(v.y + r * math.sin(ang), 4)
+                            if not valid_via_pos(v, nx, ny):
+                                continue
+                            if all(connector_clear(v.net_id, layer, w,
+                                                   v.x, v.y, nx, ny, TRK_STRICT)
+                                   for layer, w in conn_layers.items()):
+                                found = (nx, ny)
+                                break
+                        r += 0.05
+                    if found is not None:
+                        if (H2H_VIA, H2H_PAD) != drill_ladder[0]:
+                            # Said out loud: the board asked for more than this
+                            # landing gives, and the pass took the landing rather
+                            # than the refusal. An operator who cares can widen
+                            # --max-displacement or move the neighbour.
+                            print(f"  via-nudge: no spot cleared the board's "
+                                  f"{_h2h_decl:g}mm min_hole_to_hole for {ref}'s "
+                                  f"via at ({v.x:.2f}, {v.y:.2f}); fell back to "
+                                  f"the {H2H_VIA:g}mm fab floor")
+                        break
                 if found is not None:
-                    if (H2H_VIA, H2H_PAD) != drill_ladder[0]:
-                        # Said out loud: the board asked for more than this
-                        # landing gives, and the pass took the landing rather
-                        # than the refusal. An operator who cares can widen
-                        # --max-displacement or move the neighbour.
-                        print(f"  via-nudge: no spot cleared the board's "
-                              f"{_h2h_decl:g}mm min_hole_to_hole for {ref}'s "
-                              f"via at ({v.x:.2f}, {v.y:.2f}); fell back to "
-                              f"the {H2H_VIA:g}mm fab floor")
+                    trk_relaxed = not TRK_STRICT
                     break
+            if trk_relaxed:
+                # The same disclosure the drill rung makes, for the same
+                # reason: the copper about to be emitted does NOT satisfy the
+                # board's track rule, and check_drc will say so. Printed here
+                # because `required_rows` cannot -- it is cap-pad-anchored and
+                # returns nothing at all on a board whose only declaration is
+                # this rule.
+                print(f"  via-nudge: no spot cleared the board's .kicad_dru "
+                      f"track rule for {ref}'s via at "
+                      f"({v.x:.2f}, {v.y:.2f}); took a landing at the base "
+                      f"clearance rather than abandoning the repair")
             if found is None:
                 print(f"  via-nudge: no clear spot for {ref}'s offending via "
                       f"at ({v.x:.2f}, {v.y:.2f}) within {max_shift}mm")

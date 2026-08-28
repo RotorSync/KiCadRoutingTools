@@ -355,7 +355,7 @@ def filter_already_routed(
             -- the model accepts pad<->zone kisses the exact fill denies
             (the ~0.10% residual FP class), which false-cleared oracle-punted
             custody nets as "Already fully connected".
-        fragment_gate: #549 A-2 -- a ZONE-LESS net whose pads grade connected
+        fragment_gate: #578 -- a ZONE-LESS net whose pads grade connected
             but whose copper is multiple strict fragments within one outline
             is NOT already routed: a plain --nets call must route the joins
             (run 6's VCC3V3 sat in 7 KiCad islands while this filter said
@@ -430,7 +430,7 @@ def filter_already_routed(
         # burning iterations on impossible edges and reporting phantom fails.
         _broken, _ = net_break_within_outlines(pcb_data, result)
         if not _broken and fragment_gate and not net_zones and net_segments:
-            # #549 A-2 fragment gate: pads connected != copper whole.
+            # #578 fragment gate: pads connected != copper whole.
             from check_connected import net_copper_fragments
             frag = net_copper_fragments(net_id, net_segments, net_vias,
                                         net_pads, net_zones,
@@ -449,7 +449,7 @@ def filter_already_routed(
             # broke this gate's own fixture: STRICT pad-less-ness only says
             # the fragment misses the pad's copper, which is exactly what a
             # phantom split looks like -- the net's real route ending a hair
-            # short of the pad, the case #549 A-2 was built to route. Ask the
+            # short of the pad, the case #578 was built to route. Ask the
             # authoritative graph which copper is dead, drop it, and re-count:
             # only if the REMAINDER is whole is there nothing left to route.
             if n > 1 and os.environ.get('KICAD_659_DIVERT', '1') != '0':
@@ -479,7 +479,7 @@ def filter_already_routed(
                       f"is {n} separate track fragment(s)"
                       + (f" ({frag['padless_fragments']} pad-less)"
                          if frag['padless_fragments'] else "")
-                      + " -- routing to join them (#549)")
+                      + " -- routing to join them")
                 nets_to_route.append((net_name, net_id))
                 continue
         if not _broken:
