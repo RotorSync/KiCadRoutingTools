@@ -1729,9 +1729,17 @@ class FanoutTab(wx.Panel):
                 # get_shared_params carried clearance_ceiling=0.2 and the
                 # engine still received netclass_ceiling=None.
                 #
-                # `clamp_netclasses` rides along because the two are one
-                # decision on the standalone path and reading them from
-                # different places is how they came apart here.
+                # `clamp_netclasses` rides along for parity with the
+                # standalone dict, which has carried it since #768.
+                # NOTHING ON THIS TAB READS IT -- grepped: the signal,
+                # differential and planes tabs each consume their own copy
+                # as `clamp_nondefault_netclasses`, and this tab has no
+                # such writeback (#782). It is carried rather than dropped
+                # because it is precisely the argument that writeback will
+                # need, and because the two values coming from different
+                # places is how they came apart here in the first place --
+                # but it is inert today, and an earlier draft of this
+                # comment implied otherwise.
                 'clamp_netclasses': shared.get('clamp_netclasses', False),
                 'clearance_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
@@ -2074,6 +2082,19 @@ class FanoutTab(wx.Panel):
                 # there, the GUI priced every pair at the ceiling and clamped no
                 # class at all -- pricing on the GIVEN branch and writing back
                 # on the OMITTED one, which is #768 pointing the other way.
+                #
+                # AND HALF OF THAT SURVIVES THE CORRECT GATE (#782), stated
+                # here because the paragraph above reads as though choosing
+                # the right switch fixed it. It fixed WHICH runs are priced
+                # at the ceiling; it did not add the writeback. With the
+                # override ticked this tab still prices non-Default classes
+                # at min(class, ceiling) and lowers none of them --
+                # update_live_drc_floors writes the DEFAULT class only, and
+                # this tab never calls fix_project_for_output the way the
+                # signal, differential and planes tabs do. A plan run is
+                # covered by ai_plan's end-of-run writeback; both
+                # INTERACTIVE paths are not. On a single-class board -- most
+                # boards -- there is nothing to clamp and no difference.
                 #
                 # Default False, not True: an absent key means the operator
                 # never ticked the override, and the safe reading of that is
