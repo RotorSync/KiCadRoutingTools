@@ -256,3 +256,96 @@ single-board DRC regression at the tuned band.
 Re-score outputs under carrier_lab/si_corpus_rescore/ (git-untracked). Drivers:
 carrier_lab/si_corpus_rescore.py (replay chain per board) and
 carrier_lab/si_corpus_grade.py (grade both arms), both committed with this section.
+---
+
+## Middle-point probe (R1.0/C0.2) -- does a middle point dominate?
+
+Date: 2026-08-28
+Branch: optimize-via-protection-parse
+
+The tuned-defaults re-score (above) left an open question: R0.8/C0.1 fixed the
+carrier timing and the old DRC regressions, but cut the corpus si_coupling win to
+~1/3 and let ulx3s DRC regress 6->19 (SDRAM_A1 steered into SDRAM_D4). The old
+defaults (R1.5/C0.44) delivered strong SI wins but cost carrier +29.5% time,
+tigard +4 DRC, and a carrier +3V3 RLD5 pad disconnect. Is there a middle point
+that dominates both? Probed R1.0/C0.2 on exactly four gates.
+
+### Method
+
+Same faithful chain (aggressors -> victims -> rest) replayed from the original
+si_corpus_ab logs, fresh output paths under carrier_lab/si_corpus_mid/. The mid
+arm sets KICAD_SI_ENFORCE=1 KICAD_SI_ENFORCE_RADIUS=1.0 KICAD_SI_ENFORCE_COST=0.2.
+OFF/ON arms are the existing deterministic rescore runs (ulx3s ON re-verified
+deterministic x3 in the rescore section; ulx3s mid re-run fresh here and
+deterministic: identical si_coup 78.897, DRC 6, conn 10 across two fresh chains).
+Carrier timing: back-to-back OFF vs mid on the full 6-step chain
+(carrier_lab/si_phase2/run_carrier_mid.sh), fresh output paths, machine-quiet
+gate met at start (load 1.42; a constant ~44% CPU voice-typer process runs for
+both arms -- same-run deltas only). Grading identical to the rescore:
+check_connected + check_drc --clearance <floor> --clearance-margin 0.1 +
+quality/score.py.
+
+### Probe table (R1.0/C0.2)
+
+| Board | arm | conn | unrouted | DRC | si_coup | final |
+|---|---|---|---|---|---|---|
+| ulx3s | off | 9 | 3 | 6 | 85.6 | 60.56 |
+| ulx3s | on (R0.8/C0.1) | 6 | 0 | 19 | 81.0 | 59.26 |
+| ulx3s | **mid (R1.0/C0.2)** | **10** | 0 | **6** | 78.9 | 59.95 |
+| watchy | off | 0 | 0 | 0 | 31.5 | 54.96 |
+| watchy | on (R0.8/C0.1) | 0 | 0 | 0 | 31.4 | 54.11 |
+| watchy | **mid (R1.0/C0.2)** | **1** | 0 | 0 | **53.0** | 55.09 |
+| haasoscope | off | 12 | 0 | 3 | 73.8 | 66.99 |
+| haasoscope | on (R0.8/C0.1) | 9 | 3 | 0 | 73.3 | 67.23 |
+| haasoscope | **mid (R1.0/C0.2)** | **8** | 1 | 2 | **87.7** | 68.74 |
+
+Carrier timing (back-to-back, same-run):
+
+| arm | step6 user (s) | vs OFF |
+|---|---|---|
+| OFF | 420.78 | -- |
+| mid (R1.0/C0.2) | 450.62 | **+7.1%** |
+
+Carrier connectivity: BOTH arms fully connected (ALL NETS FULLY CONNECTED); the
++3V3 RLD5 pad (pad1 at 40.175,73.5) is connected in both -- mid lands a direct
++3V3 segment on the pad. Carrier DRC: OFF 1 violation, mid 0.
+
+### Verdict: NO default change -- the knob is board-dependent
+
+The middle point does NOT dominate; it trades one set of regressions for another.
+
+- **Probe 1 (ulx3s): FAIL.** DRC returns to ~6 and unrouted to 0, but
+  connectivity regresses to conn=10 -- WORSE than both off (9) and the current
+  defaults (6). The +3V3 net alone has 7 disconnected pads (U1), plus GP0,
+  SDRAM_D8, SDRAM_CLK, LED7, SD_D0, WIFI_EN, SDRAM_D15, SDRAM_D14, /power/FB1.
+  Deterministic across two fresh chains.
+- **Probe 2 (watchy/haasoscope): PASS.** SI recovery comes back meaningfully:
+  watchy si_coup +21.5 vs off (old defaults +40.6, current ~0), haasoscope +13.9
+  (old +10.5, current ~0). BUT watchy gains a new connectivity issue (conn=1,
+  +3V3 U4 pad at (82.68,85.31) disconnected) that neither arm has.
+- **Probe 3 (carrier timing): FAIL.** step6 user +7.1% (420.8 -> 450.6s), over
+  the +5% budget.
+- **Probe 4 (carrier connectivity): PASS.** Fully connected; RLD5 +3V3 pad stays
+  connected; DRC actually better than OFF (0 vs 1).
+
+**Binding constraints: ulx3s connectivity (+4 vs current defaults) and carrier
+timing (+7.1% > +5%).** The knob is genuinely board-dependent: R1.0/C0.2 recovers
+the SI win on the dense corpus boards (watchy/haasoscope) but at the cost of
+ulx3s connectivity and carrier time -- the same knob that fixes one board breaks
+another. There is no single radius/cost pair that dominates.
+
+**Recorded recommendation for a future Rust/py design: per-board adaptive
+scaling.** The exposure analysis already explains the mechanism: on the carrier,
+victim segments sit >2mm from aggressors (the metric's coupling window is only
+1.0mm), so a small band wastes steering; on dense corpus boards victims sit close,
+so a large band over-steers into DRC/connectivity trouble. A per-board radius
+derived from the actual victim-aggressor distance distribution (e.g. the metric's
+own coupling window vs the board's exposure profile) would let enforcement keep
+the SI win without the cross-board regressions. Defaults stay at R0.8/C0.1.
+
+### Files
+
+Mid-arm outputs under carrier_lab/si_corpus_mid/ (git-untracked). Drivers:
+carrier_lab/si_corpus_mid.py (mid faithful chain), carrier_lab/si_corpus_mid_grade.py
+(grade off/on/mid), carrier_lab/si_phase2/run_carrier_mid.sh (carrier timing A/B),
+all committed with this section.
