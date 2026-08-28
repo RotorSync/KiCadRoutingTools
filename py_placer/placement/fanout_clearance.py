@@ -1019,6 +1019,15 @@ class _Repair:
         # to reach it -- see via_radius() for what that cost.
         self._default_via_size = default_via_size
         self._via_radius_by_id: Dict[int, Tuple[tuple, float]] = {}
+        # #779: where a RELOCATED barrel sat at the seed, for the seed
+        # half of required_rows. Keyed by the id of the tuple
+        # relocate_vias built, and holding that tuple as its first element
+        # for the same reason the radius map does: a bare id can be
+        # recycled by the very next tuple this object makes, and the entry
+        # would then describe someone else's barrel. Empty on every run
+        # that moves nothing, which is every tracked board at the shipped
+        # defaults.
+        self._via_seed_xy: Dict[int, Tuple[tuple, float, float]] = {}
         # #747: through _register_via, which is also what a via RELOCATED
         # after construction goes through -- so a barrel the pass moves cannot
         # be shaped, priced or filed differently from one present here.
@@ -2156,10 +2165,21 @@ class _Repair:
                     # an alias is one refactor away from being taken before
                     # that assignment.
                     rec = self._via_radius_by_id.get(id(t))
-                    rebuilt.append(self._register_via(
+                    moved = self._register_via(
                         nx, ny, t[2],
                         radius=None if rec is None else rec[1],
-                        keepout=t[3]))
+                        keepout=t[3])
+                    # #779: carry the SEED position forward. `.get` with
+                    # the current tuple as the fallback is what makes a
+                    # SECOND relocation of the same barrel keep its
+                    # ORIGINAL seed rather than the intermediate landing --
+                    # and this method really can move one twice, for the
+                    # reason its own docstring gives above.
+                    _sd = self._via_seed_xy.get(id(t))
+                    self._via_seed_xy[id(moved)] = (
+                        (moved, _sd[1], _sd[2]) if _sd is not None
+                        else (moved, t[0], t[1]))
+                    rebuilt.append(moved)
                     n += 1
                 else:
                     rebuilt.append(t)
@@ -2469,11 +2489,25 @@ class _Repair:
                 five times it.
 
                 #736: `seed_kw` scopes the SEED half to the copper that
-                existed at the seed. Only the TRACK kind needs it -- the pad
-                and via channels gain nothing after __init__ -- and without it
-                a connector the pass DREW is charged against the cap's seed
-                pads, a pair no board ever had. That is the same class of
-                phantom #731 removed from this very report."""
+                existed at the seed, so a connector the pass DREW is not
+                charged against the cap's seed pads -- a pair no board ever
+                had, the same class of phantom #731 removed from this very
+                report.
+
+                TWO of the three kinds need it, and this comment used to
+                say one. The via channel DOES gain something after
+                __init__: since #747 relocate_vias SUBSTITUTES a moved
+                barrel at its new coordinates, so the seed half was grading
+                the cap's seed pose against post-nudge via positions
+                (#779). Measured on orangecrab_ext_pll at the one in-repo
+                configuration that relocates barrels: 43 of 65 caps held a
+                relocated barrel and 6 produced a different seed-half
+                number -- discarded only because that board declares no
+                floor, so best() emitted nothing.
+
+                The PAD channel is the one that genuinely gains nothing:
+                foreign pads are never added, moved or re-priced by the
+                pass."""
                 out = set(fn(ref, cap, sx, sy, srot, **(seed_kw or {})))
                 out |= set(fn(ref, cap, x, y, rot))
                 return out
@@ -2485,7 +2519,8 @@ class _Repair:
                      both(self._pad_shortfalls), None, lambda t: t[5]),
                     ('via', self.cap_vias[ref],
                      lambda t: self._via_floor_for(t[2]), lambda t: t[2],
-                     both(self._via_shortfalls), None, None),
+                     both(self._via_shortfalls, {'seed_pos': True}),
+                     None, None),
                     ('track', self.cap_segs[ref],
                      lambda t: self._seg_floor_by_id.get(id(t)), lambda t: t[4],
                      both(self._seg_shortfalls,
@@ -2586,22 +2621,48 @@ class _Repair:
                     pen += (ko - d)
         return pen
 
-    def _via_shortfalls(self, ref, cap, x, y, rot):
+    def _via_shortfalls(self, ref, cap, x, y, rot, seed_pos=False):
         """PER-FOREIGN-NET via penetration for a placement, keyed by the via's
         net_id (#445) -- the via analogue of _seg_shortfalls/_pad_shortfalls.
         A net absent from the dict is fully clear; a positive value is a real
         PAD-VIA DRC violation. Backs the hard accept gate so a move can never
         drop a pad onto a via net that was clear at the seed, no matter how
         much track graze it relieves elsewhere (zynq_ad9364 R2 onto the
-        DDR3_VREF via)."""
+        DDR3_VREF via).
+
+        #779: `seed_pos` charges each barrel where it sat AT THE SEED,
+        which is what required_rows' seed half needs. Since #747 the via
+        registrar SUBSTITUTES a relocated tuple at its new coordinates, so
+        without this the seed half grades the cap's seed pose against
+        post-nudge barrels -- a pair no board ever had, the same class of
+        phantom #736 removed from the TRACK half of this report.
+
+        A COORDINATE SWAP rather than a filtered list, and that is forced:
+        the eff rows below are index-aligned with `vias`, so dropping or
+        reordering entries would mis-index them. It is also why the track
+        channel's `upto` has no analogue here -- register_new_segments
+        APPENDS, so its seed-era entries are a PREFIX, while relocate_vias
+        substitutes in place and leaves the length unchanged.
+
+        Costs nothing on a run that moved nothing: the map is empty, the
+        comprehension is skipped, and every lookup would have missed.
+        """
         by_net: Dict[int, float] = {}
         vias = self.cap_vias[ref]
+        # index-aligned seed coordinates, or None to read them off the
+        # tuple as every other caller does
+        at = None
+        if seed_pos and self._via_seed_xy:
+            at = [self._via_seed_xy.get(id(t), (t, t[0], t[1]))[1:]
+                  for t in vias]
         effs = self._via_effs(ref, cap, vias)
         if effs is None:
             for (bx0, by0, bx1, by1, net) in cap.pad_rects(x, y, rot):
-                for vx, vy, vnet, keepout in vias:
+                for j, (vx, vy, vnet, keepout) in enumerate(vias):
                     if vnet == net:
                         continue
+                    if at is not None:
+                        vx, vy = at[j]
                     d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
                     if d < keepout - EPS:
                         by_net[vnet] = by_net.get(vnet, 0.0) + (keepout - d)
@@ -2611,6 +2672,8 @@ class _Repair:
             for j, (vx, vy, vnet, _ko) in enumerate(vias):
                 if vnet == net:
                     continue
+                if at is not None:
+                    vx, vy = at[j]
                 keepout = row[j]
                 d = _point_to_rect_dist(vx, vy, (bx0, by0, bx1, by1))
                 if d < keepout - EPS:
