@@ -97,14 +97,21 @@ def main():
     tab = dlg.fanout_tab
     failures = []
 
-    def check(name, cond, detail=""):
+    def check(name, cond, detail="", info=""):
         # `detail` is the FAILURE explanation, so print it only on
         # failure -- a PASS line carrying "so the cap pass runs the
         # OMITTED branch" reads as a contradiction. The same note is on
         # test_733_cap_edge_clearance_gui's check, for the same reason.
+        #
+        # `info` is the MEASUREMENT, and prints either way. Suppressing
+        # both was an over-correction: two checks here carried the value
+        # they had just read (`keys=..`, `clamp_netclasses=..`) as their
+        # detail, and a run that prints strictly less about what it
+        # measured is a worse gate, not a tidier one.
         if not cond:
             failures.append(name)
         print(("  PASS " if cond else "  FAIL ") + name
+              + (f"  {info}" if info else "")
               + (f"  {detail}" if detail and not cond else ""))
 
     # -- capture the kwargs, run nothing ------------------------------------
@@ -140,6 +147,14 @@ def main():
 
     ABSENT = '<<absent>>'
 
+    def _near(got, want):
+        # A SpinCtrlDouble read-back is a float that made a round trip
+        # through the control, and #493 was a one-ULP netclass clearance in
+        # exactly this repo. Section 2b already compared with a tolerance;
+        # the other sections used `==` on the same kind of value, which is
+        # a latent flake rather than a stricter check.
+        return isinstance(got, float) and abs(got - want) < 1e-9
+
     def _inline_cfg():
         """The fanout_config `_run_bga_fanout` ACTUALLY builds (#780).
 
@@ -156,7 +171,7 @@ def main():
         """
         import threading
         captured = {}
-        real_poll = tab._poll_operation
+        why = []
         real_thread = threading.Thread
 
         class _NoThread:
@@ -171,19 +186,79 @@ def main():
         try:
             cfg = tab.bga_options.get_config()
             cfg['optimize_caps'] = True
-            fp = sorted(parse_kicad_pcb(board).footprints)[0]
+            # A real Footprint, not its reference. `PCBData.footprints` is
+            # a dict KEYED by reference, so sorted(...)[0] is the string
+            # 'C1'. It happens to work because nothing on this path reads
+            # the object before the stubbed thread -- which is exactly the
+            # kind of accident that turns into a misleading
+            # 'never reached _poll_operation' the day a line does.
+            _pcb = parse_kicad_pcb(board)
+            fp = _pcb.footprints[sorted(_pcb.footprints)[0]]
             try:
                 tab._run_bga_fanout(fp, ['*'], cfg)
-            except Exception:                              # noqa: BLE001
-                pass    # the engine half is stubbed; we want the dict only
+            except Exception as e:                         # noqa: BLE001
+                # the engine half is stubbed; we want the dict only -- but
+                # KEEP the reason, or a real break reads as 'the method
+                # never got there' with no trace of what actually raised.
+                why.append('%s: %s' % (type(e).__name__, str(e)[:160]))
         finally:
-            tab._poll_operation = real_poll
             threading.Thread = real_thread
+            # delete the instance shadow rather than writing the bound
+            # method back onto the instance (that leaves a self-reference)
+            tab.__dict__.pop('_poll_operation', None)
+            # _begin_run ran and _end_run did not, so the tab is left
+            # _running with its button disabled -- ai_plan._poll_until_idle
+            # reads exactly that as 'busy'. Hand it back the way we found
+            # it, or the next arm to use a real entry point hangs.
+            try:
+                tab._end_run()
+            except Exception:                              # noqa: BLE001
+                tab._running = False
         if 'fanout_config' not in captured:
             raise AssertionError(
                 '_run_bga_fanout never reached _poll_operation, so there is '
-                'no config to read and every check below would be vacuous')
+                'no config to read and every check below would be vacuous'
+                + (' (raised %s)' % why[0] if why else ''))
         return captured['fanout_config']
+
+    def _standalone_kw():
+        """The engine kwargs `run_cap_optimization` ACTUALLY produces (#780).
+
+        Section 3 used to build its own cfg from `get_shared_params()` and
+        hand it to `_drive`. That is the same flaw #780 found in the INLINE
+        section, still standing in the STANDALONE one: it proved the
+        CONSUMER reads the key while its label named the PRODUCER. Measured
+        -- with `run_cap_optimization`'s two forwarding lines stripped at
+        runtime, the old section 3 passed 18 of 18.
+
+        So drive the method itself. `pcbnew.GetBoard()` is None outside the
+        KiCad process and the method returns early on that, so point it at
+        the loaded fixture for the call.
+        """
+        seen.clear()
+        _fc.repair_fanout_clearance = _spy
+        real_getboard = _pcbnew.GetBoard
+        _pcbnew.GetBoard = lambda: live
+        try:
+            try:
+                tab.run_cap_optimization()
+            except _Stop:
+                pass
+            except Exception as e:                         # noqa: BLE001
+                if not seen:
+                    raise AssertionError(
+                        'run_cap_optimization did not reach the engine '
+                        '(%s: %s) -- every kwarg below would read as absent'
+                        % (type(e).__name__, str(e)[:160]))
+            if not seen:
+                raise AssertionError(
+                    'run_cap_optimization returned without reaching the '
+                    'engine and nothing raised, so no kwarg below means '
+                    'anything')
+            return dict(seen)
+        finally:
+            _pcbnew.GetBoard = real_getboard
+            _fc.repair_fanout_clearance = real
 
     def _drive(cfg):
         """Call the tab's cap step with `cfg` and return the engine kwargs.
@@ -216,7 +291,7 @@ def main():
     shared = tab.get_shared_params() if tab.get_shared_params else {}
     check("the fanout tab's shared params carry clamp_netclasses",
           'clamp_netclasses' in shared,
-          "keys=%d" % len(shared))
+          info="keys=%d" % len(shared))
 
     # -- 2. the INLINE path, both positions of the override -----------------
     # #780: the config comes from `_run_bga_fanout` itself now, not from a
@@ -230,14 +305,16 @@ def main():
         got_cfg = cfg.get('clearance_ceiling', ABSENT)
         check("inline: _run_bga_fanout CARRIES the ceiling, override %s"
               % ('CHECKED' if ticked else 'unchecked'),
-              got_cfg == want,
+              got_cfg is None if want is None else _near(got_cfg, want),
               "the dict the inline path builds has clearance_ceiling=%r, "
-              "so the cap pass runs #768's OMITTED branch" % (got_cfg,))
+              "so the cap pass runs #768's OMITTED branch" % (got_cfg,),
+              info="got %r" % (got_cfg,))
         kw = _drive(cfg)
         got = kw.get('netclass_ceiling', ABSENT)
         check("inline: override %s -> ceiling %r"
               % ('CHECKED' if ticked else 'unchecked', want),
-              got == want, "got %r" % (got,))
+              got is None if want is None else _near(got, want),
+              "got %r" % (got,))
 
     # -- 2b. THE RAW OVERRIDE, not the resolved base ------------------------
     # flat_hierarchy declares Default 0.2. An override of 0.3 must arrive as
@@ -260,28 +337,28 @@ def main():
     # -- 3. the STANDALONE path, which builds its own cfg -------------------
     # This is the one the plan executor uses, and the one an earlier cut of
     # #768 left inert by gating on a key this cfg never carried.
+    #
+    # #780: driven through `run_cap_optimization` itself now, for the reason
+    # section 2 is. Assembling the cfg here tested the consumer under a
+    # label naming the producer, and passed with the producer's forwarding
+    # deleted.
     for ticked in (False, True):
         dlg.clearance_check.SetValue(ticked)
+        dlg.clearance.SetValue(0.2)
         shared2 = tab.get_shared_params()
-        cfg = dict(tab.bga_options.get_config())
-        cfg.update({
-            'clearance': shared2.get('clearance'),
-            'grid_step': shared2.get('grid_step'),
-            'via_size': shared2.get('via_size'),
-            'clamp_netclasses': shared2.get('clamp_netclasses', False),
-            'clearance_ceiling': shared2.get('clearance_ceiling'),
-            'fix_drc_settings': shared2.get('fix_drc_settings', True),
-        })
         check("standalone: shared params report override %s"
               % ('CHECKED' if ticked else 'unchecked'),
               bool(shared2.get('clamp_netclasses')) == ticked,
-              "clamp_netclasses=%r" % (shared2.get('clamp_netclasses'),))
-        kw = _drive(cfg)
+              info="clamp_netclasses=%r" % (shared2.get('clamp_netclasses'),))
+        kw = _standalone_kw()
         got = kw.get('netclass_ceiling', ABSENT)
-        check("standalone: override %s -> ceiling is %s"
-              % ('CHECKED' if ticked else 'unchecked',
-                 'the clearance' if ticked else 'None'),
-              (got is not None) == ticked, "got %r" % (got,))
+        want = 0.2 if ticked else None
+        check("standalone: run_cap_optimization CARRIES the ceiling, "
+              "override %s" % ('CHECKED' if ticked else 'unchecked'),
+              got is None if want is None else _near(got, want),
+              "the cfg run_cap_optimization builds reached the engine as "
+              "netclass_ceiling=%r, so the cap pass runs the wrong "
+              "#768 branch" % (got,), info="got %r" % (got,))
 
     # -- 4. the gate is NOT fix_drc_settings --------------------------------
     # The change detector for the defect this file was written after: with the
