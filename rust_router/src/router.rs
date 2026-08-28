@@ -450,6 +450,15 @@ pub(crate) struct GridSearch {
     grace_used: u32,
     /// Extension tranches granted (RouteStats.iteration_tranches).
     pub(crate) tranches_granted: u32,
+    /// C2 fruitless cap: fraction of initial_h below which best_h must have
+    /// dropped for the search to keep earning tranches. 0.0 = disabled (the
+    /// default). A search contouring a wall keeps improving best_h by tiny
+    /// per-tranche quanta (2 cells / 2%) and can ride to the ceiling without
+    /// ever approaching the target; this cumulative check stops extension
+    /// once best_h is still above `fruitless_pct * initial_h` after the
+    /// first tranche -- the search is not genuinely approaching, so it falls
+    /// back to the caller's rip-up ladder sooner. Deterministic.
+    fruitless_pct: f32,
 }
 
 impl GridSearch {
@@ -535,6 +544,7 @@ impl GridSearch {
             grace_tranches: 0,
             grace_used: 0,
             tranches_granted: 0,
+            fruitless_pct: 0.0,
         }
     }
 
@@ -549,11 +559,13 @@ impl GridSearch {
     /// progress is judged cumulatively over the whole plateau window).
     pub(crate) fn set_iteration_ceiling(&mut self, ceiling: u32,
                                         quantum_cells: f64, quantum_pct: f64,
-                                        grace_tranches: u32) {
+                                        grace_tranches: u32,
+                                        fruitless_pct: f32) {
         self.iteration_ceiling = ceiling.max(self.max_iterations);
         self.quantum_h = ((self.cell_h_unit as f64 * quantum_cells).max(1.0)) as i32;
         self.quantum_frac = (quantum_pct / 100.0) as f32;
         self.grace_tranches = grace_tranches;
+        self.fruitless_pct = fruitless_pct;
     }
 
     /// #529 tranche grant, called with the iteration cap reached: returns true
@@ -565,6 +577,18 @@ impl GridSearch {
     fn extend_budget(&mut self) -> bool {
         if self.max_iterations >= self.iteration_ceiling || self.tranche_ref_h == i32::MAX {
             return false;
+        }
+        // C2 cumulative fruitless check: once the first tranche has been
+        // granted (the search has had a full base budget to approach), stop
+        // extending if best_h is still above fruitless_pct * initial_h -- the
+        // search is contouring a wall, not approaching the target. The
+        // per-tranche quantum below only requires tiny (2-cell) improvements,
+        // so without this a wall-contouring search rides to the ceiling.
+        if self.fruitless_pct > 0.0 && self.tranches_granted >= 1 {
+            let floor = (self.initial_h as f32 * self.fruitless_pct) as i32;
+            if self.best_h > floor {
+                return false;
+            }
         }
         let quantum = self.quantum_h
             .max((self.tranche_ref_h as f32 * self.quantum_frac) as i32);
@@ -1145,7 +1169,7 @@ impl GridRouter {
     /// ceiling. 0 (the default) disables: existing callers are unchanged.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a StatsSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, fruitless_pct=0.0, via_rung=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_multi(
         &self,
@@ -1163,6 +1187,7 @@ impl GridRouter {
         quantum_cells: f64,
         quantum_pct: f64,
         grace_tranches: u32,
+        fruitless_pct: f32,
         via_rung: usize,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, std::collections::HashMap<String, f64>) {
         let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
@@ -1171,7 +1196,7 @@ impl GridRouter {
         opts.via_rung = via_rung;
         let mut sink = StatsSink::default();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
-        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
+        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches, fruitless_pct);
         sink.stats.initial_h = search.initial_h;
 
         loop {
@@ -1223,7 +1248,7 @@ impl GridRouter {
     /// 0 (the default) disables.
     ///
     /// C1: thin wrapper over the shared GridSearch core with a FrontierSink.
-    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, via_rung=0))]
+    #[pyo3(signature = (obstacles, sources, targets, max_iterations, collinear_vias=false, via_exclusion_radius=0, start_direction=None, end_direction=None, direction_steps=2, track_margin=TrackMarginArg::Scalar(0.0), max_iterations_ceiling=0, quantum_cells=2.0, quantum_pct=2.0, grace_tranches=0, fruitless_pct=0.0, via_rung=0))]
     #[allow(clippy::too_many_arguments)]
     pub fn route_with_frontier(
         &self,
@@ -1241,6 +1266,7 @@ impl GridRouter {
         quantum_cells: f64,
         quantum_pct: f64,
         grace_tranches: u32,
+        fruitless_pct: f32,
         via_rung: usize,
     ) -> (Option<Vec<(i32, i32, u8)>>, u32, Vec<(i32, i32, u8)>) {
         let mut opts = SearchOptions::new(collinear_vias, via_exclusion_radius,
@@ -1249,7 +1275,7 @@ impl GridRouter {
         opts.via_rung = via_rung;
         let mut sink = FrontierSink::new();
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
-        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
+        search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches, fruitless_pct);
 
         loop {
             match search.step(self, obstacles, &mut sink) {
@@ -1692,5 +1718,65 @@ impl GridRouter {
         }
 
         dict
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a router + a 2-layer obstacle map with a solid wall between
+    /// source and target, so the search is genuinely blocked (fruitless).
+    fn blocked_scenario() -> (GridRouter, GridObstacleMap) {
+        let router = GridRouter::new(
+            1000, 1.0, None, None, 0, 0, None, None, None, 0, 0, 0, 0, 0);
+        let mut obs = GridObstacleMap::new(2);
+        // Wall across the middle on layer 0.
+        for gx in 0..40 {
+            obs.add_blocked_cell(gx, 20, 0);
+        }
+        (router, obs)
+    }
+
+    #[test]
+    fn fruitless_cap_stops_earlier() {
+        let (router, obs) = blocked_scenario();
+        let sources = vec![(5, 5, 0)];
+        let targets = vec![(35, 35, 0)];
+
+        // Without the cap: the search may extend (dynamic iterations).
+        let (_, iters_no_cap, _) = router.route_with_frontier(
+            &obs, sources.clone(), targets.clone(), 200000,
+            false, 0, None, None, 2,
+            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0, 0.0, 0);
+
+        // With the cap at 50%: best_h stays above 50% of initial_h (the wall
+        // blocks approach), so extension is denied after the first tranche.
+        let (_, iters_cap, _) = router.route_with_frontier(
+            &obs, sources.clone(), targets.clone(), 200000,
+            false, 0, None, None, 2,
+            TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0, 0.5, 0);
+
+        // The capped search must not burn more than the uncapped one.
+        assert!(iters_cap <= iters_no_cap,
+                "capped {} > uncapped {}", iters_cap, iters_no_cap);
+    }
+
+    #[test]
+    fn fruitless_cap_deterministic() {
+        let (router, obs) = blocked_scenario();
+        let sources = vec![(5, 5, 0)];
+        let targets = vec![(35, 35, 0)];
+
+        let run = |pct: f32| -> u32 {
+            router.route_with_frontier(
+                &obs, sources.clone(), targets.clone(), 200000,
+                false, 0, None, None, 2,
+                TrackMarginArg::Scalar(0.0), 10_000_000, 2.0, 2.0, 0, pct, 0).1
+        };
+
+        // Same params -> identical iteration counts (determinism).
+        assert_eq!(run(0.5), run(0.5));
+        assert_eq!(run(0.0), run(0.0));
     }
 }

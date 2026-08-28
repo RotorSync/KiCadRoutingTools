@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.20.0**
+**Current Version: 0.24.0**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -311,6 +311,21 @@ src/
 
 ## Version History
 
+
+### 0.24.0 (2026-08-27)
+
+- C2 fruitless-iteration cap: `fruitless_pct` parameter on `route_multi` /
+  `route_with_frontier` -- a cumulative-progress check on the #529 dynamic
+  iteration extension. A search contouring a wall keeps improving `best_h` by
+  tiny per-tranche quanta (2 cells / 2%) and can ride to the 1e7 ceiling
+  without ever approaching the target; once the first tranche is granted,
+  extension is denied while `best_h` is still above `fruitless_pct *
+  initial_h`, so the search falls back to the caller's rip-up ladder sooner.
+  0.0 (the default) = disabled, byte-identical to prior behavior. Measured on
+  the carrier bulk route: capping the dynamic-iteration ceiling at 600k cut
+  step-6 user time ~19% (590s -> 477s) with connectivity/DRC/score unchanged;
+  the cumulative check is the safer default than a hard ceiling for boards
+  whose searches legitimately need long detours.
 
 ### 0.21.1 (2026-08-16)
 

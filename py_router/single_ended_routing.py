@@ -1318,7 +1318,7 @@ def _dynamic_iterations(config: 'GridRouteConfig') -> Tuple[int, dict]:
     if not env_knobs.DYNAMIC_ITERATIONS or config.max_iterations <= 10_000:
         return config.max_iterations, {}
     base = min(config.max_iterations, env_knobs.DYNAMIC_ITERATIONS_CLAMP)
-    kwargs = {'max_iterations_ceiling': DYNAMIC_ITERATIONS_CEILING}
+    kwargs = {'max_iterations_ceiling': env_knobs.DYNAMIC_ITERATIONS_CEILING}
     # Quantum/grace dials (#529 A/B): only pass when non-default (they
     # postdate the ceiling kwarg; older binaries lack them).
     cells = env_knobs.DYNAMIC_ITERATIONS_QUANTUM_CELLS
@@ -1328,6 +1328,10 @@ def _dynamic_iterations(config: 'GridRouteConfig') -> Tuple[int, dict]:
         kwargs['quantum_pct'] = pct
     if env_knobs.DYNAMIC_ITERATIONS_GRACE > 0:
         kwargs['grace_tranches'] = env_knobs.DYNAMIC_ITERATIONS_GRACE
+    # C2 fruitless-cap: only pass when non-zero (postdates the ceiling
+    # kwarg; older binaries lack it).
+    if env_knobs.DYNAMIC_ITERATIONS_FRUITLESS_PCT > 0.0:
+        kwargs['fruitless_pct'] = env_knobs.DYNAMIC_ITERATIONS_FRUITLESS_PCT
     return base, kwargs
 
 

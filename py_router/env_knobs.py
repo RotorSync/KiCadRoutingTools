@@ -87,6 +87,16 @@ def refresh() -> None:
     # this phase -- the env knob is how the A/B harness toggles the engine
     # kwarg without a flag.
     g['PLANNER_ORDERING'] = _s('KICAD_PLANNER_ORDERING', '0') == '1'
+    # C2 phase-3 ordering: promote long-span / high-pad-count multipoint
+    # nets earlier in the Phase-3 tap order (composite score =
+    # boxed-in-risk + alpha*log(1+span) + beta*log(1+pads)). The power
+    # trunks that burn millions of A* iterations routing LAST into a full
+    # board get routed while the board is emptier. Default OFF (the
+    # boxed-in-risk-only order is the production default); the env knob is
+    # how the A/B harness toggles it without a flag.
+    g['PHASE3_SPAN_FIRST'] = _s('KICAD_PHASE3_SPAN_FIRST', '0') == '1'
+    g['PHASE3_SPAN_ALPHA'] = _f('KICAD_PHASE3_SPAN_ALPHA', 5.0)
+    g['PHASE3_SPAN_BETA'] = _f('KICAD_PHASE3_SPAN_BETA', 2.0)
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     # #648 oracle source union: kicad-cli DRC gates the demand set, the
@@ -138,6 +148,21 @@ def refresh() -> None:
     # set CLAMP=200000 as the deliberate speed-over-completion dial.
     g['DYNAMIC_ITERATIONS'] = _s('KICAD_DYNAMIC_ITERATIONS', '1') != '0'
     g['DYNAMIC_ITERATIONS_CLAMP'] = _i('KICAD_DYNAMIC_ITERATIONS_CLAMP', 10_000_000)
+    # C2 fruitless-cap A/B: the absolute ceiling for dynamic-iteration
+    # extension (default 1e7). A search that keeps earning tranches while
+    # its heuristic creeps down by tiny quanta can grind to 1e7 iterations
+    # on a genuinely-blocked tap edge; capping the ceiling makes it fall
+    # back to the rip-up ladder sooner. Env-tunable so the hypothesis is
+    # A/B-able without a crate bump.
+    g['DYNAMIC_ITERATIONS_CEILING'] = _i('KICAD_DYNAMIC_ITERATIONS_CEILING', 10_000_000)
+    # C2 fruitless-cap: fraction of initial_h below which best_h must have
+    # dropped for a dynamic-iteration search to keep earning tranches. 0.0 =
+    # disabled (the default). A wall-contouring search keeps improving best_h
+    # by tiny per-tranche quanta and can ride to the ceiling without ever
+    # approaching the target; this cumulative check stops extension once
+    # best_h is still above fruitless_pct * initial_h after the first
+    # tranche, falling back to the rip-up ladder sooner.
+    g['DYNAMIC_ITERATIONS_FRUITLESS_PCT'] = _f('KICAD_DYNAMIC_ITERATIONS_FRUITLESS_PCT', 0.0)
 
     # --- opt-in experiments (env turns ON) ----------------------------------
     g['COLLINEAR_VIAS'] = _opt_in('KICAD_COLLINEAR_VIAS')  # #487: on-axis vias

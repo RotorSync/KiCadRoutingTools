@@ -11,6 +11,7 @@ Phase 3 connects remaining pads to the main route.
 from __future__ import annotations
 
 import env_knobs
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -359,6 +360,52 @@ def _order_nets_by_boxed_in_risk(pending_multipoint_nets, pcb_data):
         return best
 
     risks = {net_id: _risk(net_id, mr) for net_id, mr in items}
+
+    # C2 span-first mode (KICAD_PHASE3_SPAN_FIRST=1): composite score =
+    # boxed-in-risk + alpha*log(1+span) + beta*log(1+pads), where span is
+    # the net's pad bounding-box diagonal (mm) over its PENDING terminals
+    # and pads is the pending-terminal count. The long power trunks that
+    # burn millions of A* iterations routing LAST into a full board get
+    # routed while the board is emptier. Boxed-in risk stays the dominant
+    # term (the #347 connectivity doctrine is preserved); span/pads only
+    # break ties and lift large nets within a risk tier. Deterministic:
+    # float score, stable sort preserving insertion order on ties.
+    _span_first = env_knobs.PHASE3_SPAN_FIRST
+    if _span_first:
+        _alpha = env_knobs.PHASE3_SPAN_ALPHA
+        _beta = env_knobs.PHASE3_SPAN_BETA
+
+        def _span_pads(net_id, main_result):
+            pad_info = main_result.get('multipoint_pad_info') or []
+            routed = main_result.get('routed_pad_indices') or set()
+            xs, ys = [], []
+            n_pending = 0
+            for i, info in enumerate(pad_info):
+                if i in routed:
+                    continue
+                xs.append(info[3])
+                ys.append(info[4])
+                n_pending += 1
+            if not xs:
+                return 0.0, 0
+            span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+            return span, n_pending
+
+        def _score(net_id, mr):
+            span, n_pending = _span_pads(net_id, mr)
+            return (risks[net_id]
+                    + _alpha * math.log(1.0 + span)
+                    + _beta * math.log(1.0 + n_pending))
+
+        scores = {net_id: _score(net_id, mr) for net_id, mr in items}
+        ordered = sorted(items, key=lambda kv: -scores[kv[0]])
+        if [k for k, _ in ordered] != [k for k, _ in items]:
+            names = [pcb_data.nets[k].name if k in pcb_data.nets else f"net_{k}"
+                     for k, _ in ordered]
+            print(f"Phase 3 order (boxed-in risk + span first): "
+                  f"{', '.join(names)}")
+        return ordered
+
     ordered = sorted(items, key=lambda kv: -risks[kv[0]])
     if [k for k, _ in ordered] != [k for k, _ in items]:
         names = [pcb_data.nets[k].name if k in pcb_data.nets else f"net_{k}"
