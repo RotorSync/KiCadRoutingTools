@@ -122,8 +122,16 @@ def make_run(tmp, name, *, pre_name='frozen.kicad_pcb', checklist=None,
     rows = list(ledger_rows or ())
     if ledger_chain:
         prev = pre_sha
-        for sha in ledger_chain:
-            rows.append({'parent_sha': prev, 'result_sha': sha})
+        for n, sha in enumerate(ledger_chain):
+            row = {'parent_sha': prev, 'result_sha': sha}
+            # The LAST row of a chain is the run's final, accepted board. The
+            # ledger is the terminal authority, so a fixture without a
+            # `final: true` row is a run that never closed -- which is its own
+            # refusal, not a shortcut for the shapes under test.
+            if n == len(ledger_chain) - 1:
+                row['final'] = True
+                row['accepted'] = True
+            rows.append(row)
             prev = sha
     if rows:
         with open(os.path.join(d, 'ledger.jsonl'), 'w', encoding='utf-8') as f:
@@ -145,40 +153,91 @@ def sha_of(text):
 # cases
 # ---------------------------------------------------------------------------
 
-def t_tier1_picks_the_terminal_sha_not_the_name(tmp):
-    """The run23/tigard shape: score.json is NOT the terminal score."""
-    r18 = '(kicad_pcb r18)\n'
-    d, pre, routed = make_run(
+def t_ledger_final_beats_run_state_and_the_filename(tmp):
+    """The run23/tigard shape, which cost the first version of this file.
+
+    `RUN_STATE.board_sha` is set from the LAST ledger row's result_sha whether
+    or not that lap was ACCEPTED. On run23 the last lap was rejected -- its own
+    lever text ends "Step back to routed.kicad_pcb" -- so RUN_STATE names a
+    board the run explicitly walked away from, while its sibling `quality`
+    block still reports the ACCEPTED board's vias. Reading `board_sha` there
+    picks the output of a rejected lap.
+
+    The ledger has no such ambiguity, so the ledger is the authority and
+    RUN_STATE is a disclosed cross-check.
+    """
+    good = '(kicad_pcb accepted final)' + chr(10)
+    rejected = '(kicad_pcb rejected lap)' + chr(10)
+    d, pre, _r = make_run(
         tmp, 'tigard_like',
-        scores=[('score.json', None, 3, ''),
-                ('score_r18.json', r18, 3, 'lap 18')],
-        routed='(kicad_pcb routed)\n',
-        run_state={'final_recorded': True, 'board_sha': sha_of(r18)},
-        ledger_chain=[sha_of('(kicad_pcb mid)\n'), sha_of(r18)])
+        scores=[('score.json', good, 3, ''),
+                ('score_r18.json', rejected, 3, 'the rejected lap')],
+        routed=good,
+        run_state={'final_recorded': True, 'board_sha': sha_of(rejected)},
+        ledger_rows=None,
+        ledger_chain=None)
+    # a ledger whose LAST row is the rejected lap, and whose last FINAL row is
+    # the accepted one -- exactly run23's shape.
+    mid = sha_of('(kicad_pcb mid)' + chr(10))
+    with open(os.path.join(d, 'ledger.jsonl'), 'w', encoding='utf-8') as f:
+        for row in [{'parent_sha': pre, 'result_sha': mid},
+                    {'parent_sha': mid, 'result_sha': sha_of(good),
+                     'final': True, 'accepted': True},
+                    {'parent_sha': sha_of(good), 'result_sha': sha_of(rejected),
+                     'accepted': False}]:
+            f.write(json.dumps(row) + chr(10))
     row = H.build_row(d, tmp)
-    check(row['provenance']['terminal_score_file'] == 'score_r18.json',
-          f'the terminal score is chosen by SHA, not by the name score.json '
+    check(row['provenance']['terminal_score_file'] == 'score.json',
+          f'the ACCEPTED final board wins, not the last row RUN_STATE names '
           f'(got {row["provenance"]["terminal_score_file"]})')
-    check(row['provenance']['terminal_rule'] == 'run_state_sha',
-          'and the row records which authority it used')
-    check(row['provenance']['lineage_hops'] == 2,
-          f'lineage found over 2 hops (got {row["provenance"]["lineage_hops"]})')
+    check(row['provenance']['terminal_rule'] == 'ledger_final',
+          f'and the rule is named on the row '
+          f'(got {row["provenance"]["terminal_rule"]})')
+    check(any('RUN_STATE.board_sha' in n for n in row['notes']),
+          f'the RUN_STATE disagreement is DISCLOSED, not silently won: '
+          f'{row["notes"]}')
+    check(row['truth']['headline'] == 3, 'the truth comes from that score')
 
 
-def t_tier2_is_weaker_and_says_so(tmp):
-    """The run17/18/19 shape: no RUN_STATE, so routed.kicad_pcb by convention."""
-    d, pre, routed = make_run(
-        tmp, 'urchin_like',
-        scores=[('score.json', None, 3, ''),
-                ('score_R1.json', '(kicad_pcb R1)\n', 68, 'lap 1')],
-        routed='(kicad_pcb routed)\n',
-        ledger_chain=[routed if False else sha_of('(kicad_pcb routed)\n')])
+def t_a_final_row_that_was_not_accepted_is_disclosed(tmp):
+    good = '(kicad_pcb g)' + chr(10)
+    d, pre, _r = make_run(tmp, 'unaccepted_final',
+                          scores=[('score.json', good, 5, '')], routed=good)
+    with open(os.path.join(d, 'ledger.jsonl'), 'w', encoding='utf-8') as f:
+        f.write(json.dumps({'parent_sha': pre, 'result_sha': sha_of(good),
+                            'final': True, 'accepted': False}) + chr(10))
     row = H.build_row(d, tmp)
-    check(row['provenance']['terminal_rule'] == 'routed_artifact_sha',
-          'no RUN_STATE falls to the WEAKER artifact tier')
-    check(any('weaker' in n for n in row['notes']),
-          f'and the row says out loud that it is weaker: {row["notes"]}')
-    check(row['truth']['headline'] == 3, 'the terminal truth is the routed one')
+    check(any('accepted=False' in n for n in row['notes']),
+          f'a final row the run did not accept is NAMED on the row: '
+          f'{row["notes"]}')
+
+
+def t_no_ledger_refuses(tmp):
+    t = '(kicad_pcb t)' + chr(10)
+    d, _p, _r = make_run(tmp, 'no_ledger', scores=[('score.json', t, 1, '')],
+                         routed=t,
+                         run_state={'final_recorded': True, 'board_sha': sha_of(t)})
+    try:
+        H.build_row(d, tmp)
+        check(False, 'a run with no ledger has no terminal authority, even '
+                     'with a RUN_STATE that looks decisive')
+    except H.Refusal as e:
+        check(e.code == 'no_ledger', f'refused as no_ledger (got {e.code})')
+
+
+def t_run_never_closed_refuses(tmp):
+    t = '(kicad_pcb t)' + chr(10)
+    d, pre, _r = make_run(tmp, 'never_closed',
+                          scores=[('score.json', t, 4, '')], routed=t)
+    with open(os.path.join(d, 'ledger.jsonl'), 'w', encoding='utf-8') as f:
+        f.write(json.dumps({'parent_sha': pre,
+                            'result_sha': sha_of(t)}) + chr(10))
+    try:
+        H.build_row(d, tmp)
+        check(False, 'a ledger with no final row means the run never closed')
+    except H.Refusal as e:
+        check(e.code == 'run_never_closed',
+              f'refused as run_never_closed (got {e.code})')
 
 
 def t_ambiguous_terminal_score_refuses(tmp):
@@ -217,14 +276,15 @@ def t_vacuous_blocking_refuses(tmp):
 def t_no_score_for_terminal_sha_refuses(tmp):
     d, _p, _r = make_run(
         tmp, 'orphan_score',
-        scores=[('score.json', '(kicad_pcb other)\n', 5, '')],
-        routed='(kicad_pcb routed)\n')
+        scores=[('score.json', '(kicad_pcb other)' + chr(10), 5, '')],
+        routed='(kicad_pcb routed)' + chr(10),
+        ledger_chain=[sha_of('(kicad_pcb routed)' + chr(10))])
     try:
         H.build_row(d, tmp)
         check(False, 'a score grading a different board must refuse')
     except H.Refusal as e:
-        check(e.code == 'no_score_for_terminal_sha',
-              f'refused as no_score_for_terminal_sha (got {e.code})')
+        check(e.code == 'no_score_for_terminal_board',
+              f'refused as no_score_for_terminal_board (got {e.code})')
         check('score.json' in e.detail,
               'and the refusal names every score file it scanned')
 
@@ -268,7 +328,8 @@ def t_lineage_needs_a_bfs_not_a_walk(tmp):
         {'parent_sha': a, 'result_sha': b},
         # the DEAD END a greedy walk would take, recorded last so a
         # "follow the newest row" rule picks it and terminates at `pre`
-        {'parent_sha': b, 'result_sha': term},
+        {'parent_sha': b, 'result_sha': term, 'final': True,
+         'accepted': True},
         {'parent_sha': b, 'result_sha': pre},
     ]
     d, _p, _r = make_run(
@@ -293,7 +354,9 @@ def t_lineage_unproven_refuses(tmp):
         tmp, 'broken_lineage',
         scores=[('score.json', '(kicad_pcb t)\n', 1, '')],
         routed='(kicad_pcb t)\n',
-        ledger_rows=[{'parent_sha': sha_of('x'), 'result_sha': sha_of('y')}])
+        ledger_rows=[{'parent_sha': sha_of('x'),
+                      'result_sha': sha_of('(kicad_pcb t)' + chr(10)),
+                      'final': True, 'accepted': True}])
     try:
         H.build_row(d, tmp)
         check(False, 'an unreachable terminal board must refuse')
@@ -428,13 +491,13 @@ def t_harvest_reports_refusals_alongside_rows(tmp):
 
 
 CASES = [
-    t_tier1_picks_the_terminal_sha_not_the_name,
-    t_tier2_is_weaker_and_says_so,
+    t_ledger_final_beats_run_state_and_the_filename,
+    t_a_final_row_that_was_not_accepted_is_disclosed,
+    t_no_ledger_refuses,
+    t_run_never_closed_refuses,
     t_ambiguous_terminal_score_refuses,
     t_vacuous_blocking_refuses,
     t_no_score_for_terminal_sha_refuses,
-    t_no_authority_refuses,
-    t_run_state_not_final_refuses,
     t_lineage_needs_a_bfs_not_a_walk,
     t_lineage_unproven_refuses,
     t_pre_board_gone_refuses,

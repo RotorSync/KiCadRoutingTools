@@ -12,55 +12,52 @@ This tool does the join, and its most important output is the REFUSAL LIST.
 WHY REFUSING IS THE DELIVERABLE
 
 A hand join of these documents was published in the #703 issue body: six rows,
-rho(crossings, blocking) = +0.339. That join picked the score file named
-`score.json`, and picking by NAME is wrong twice over on the recorded corpus:
+rho(crossings, blocking) = +0.339. That join picked the score file NAMED
+`score.json`, and a name is not a verdict. `wk/run14/castor` holds four score
+files across two boards, and `score_final.json` (blocking 0) and
+`score_final_declared.json` (blocking 62 -- drc 42, undersized 20) grade the SAME
+final board at two different floors. Castor is the row whose removal moves the
+published headline from +0.339 to +0.632, so the most influential sample in that
+table is a board whose truth is 0 or 62 depending on which grade you reach for.
+It is REFUSED here.
 
-  * `wk/run23/tigard/score.json` grades board b52f79c9. `RUN_STATE.json` says
-    the run's terminal board is 5eff4294, which is `score_r18.json`. The run
-    continued for one more lap after `routed.kicad_pcb` was written. Both
-    happen to report blocking 3, so the published table was right by luck.
+THE LEDGER IS THE AUTHORITY, AND THE FIRST VERSION OF THIS FILE GOT IT WRONG
 
-  * `wk/run14/castor` holds `score.json` (blocking 0) and
-    `score_declared.json` (blocking 62: drc 42, undersized 20) for the SAME
-    `board_sha`. They are one board graded at two different floors. The
-    published table took the 0 -- and castor is the row whose removal moves the
-    headline from +0.339 to +0.632, so the single most influential sample in
-    that table is a board whose truth value is 0 or 62 depending on which grade
-    you read.
+That first version used `RUN_STATE.json`'s `board_sha`, reasoning that
+`converge.write_run_state` is the one thing in a run that asserts where it
+ended. It is not: that field is copied from the LAST ledger row's `result_sha`
+whether or not the lap was ACCEPTED, while the sibling `final_recorded` flag is
+a property of a different row. On `wk/run23/tigard` the file contradicts itself
+-- `board_sha` names the output of row 42 (`accepted: false`, lever text ending
+"Step back to routed.kicad_pcb") while its own `quality.vias` is 377, which is
+the ACCEPTED board's value, and `score_lap` is 39.
 
-Neither is a bug in `board_score`; both are a bug in joining by filename. So
-this tool identifies the terminal score by CONTENT HASH, refuses when it cannot,
-and commits the refusals next to the rows. A dataset that hides what it could
-not read is how six uninterpretable rows become a quotable number.
+So the rule reads the ledger: the terminal board is the LAST row carrying
+`final: true`, and the terminal score is the single score file grading it.
+RUN_STATE stays as a CROSS-CHECK and any disagreement is written onto the row,
+because that disagreement is informative. An adversarial review found this, and
+it changed three of five rows and un-refused two more:
 
-TWO TIERS OF AUTHORITY, AND THE ROW SAYS WHICH ONE IT USED
-
-  1. `run_state_sha` -- `RUN_STATE.json` with `final_recorded: true` names the
-     terminal board; the terminal score is the one score file whose `board_sha`
-     matches it. `converge.write_run_state` is the only writer of that file and
-     the only thing in a run that asserts "this is where it ended".
-  2. `routed_artifact_sha` -- no `RUN_STATE` (9 of 11 recorded runs predate it),
-     so the terminal score is the one whose `board_sha` matches
-     `sha256(routed.kicad_pcb)`, the artifact the run named as its output. This
-     is WEAKER: it trusts a filename convention for the board rather than a
-     recorded verdict for the run. Rows stamped with it are reported separately
-     and never silently pooled with tier-1 rows.
-
-Anything else refuses. In particular TWO score files at the terminal sha is
-`ambiguous_terminal_score`, not a coin flip.
+  * tigard  -- terminal is `score.json` (b52f79c9, vias 377), NOT `score_r18`
+    (5eff4294, vias 372). **The published 377 was right and my first
+    correction of it was wrong.**
+  * urchin  -- terminal is `score_c2.json`: blocking **0**, vias 177. The
+    published 3 / 175 came from an earlier final board that happens to be the
+    file named `routed.kicad_pcb`. The headline truth variable flips.
+  * neo6502 -- terminal is `score2.json`: blocking **78**, vias 408, not
+    79 / 427.
+  * run10 and run11 smartknob each have exactly one score grading their final
+    board and were previously refused for want of an authority that was in the
+    ledger the whole time.
 
 LINEAGE IS A REACHABILITY SEARCH, NOT A WALK
 
 `handoff.json`'s `instrument` block carries a PATH and never a sha, so the
-pre-route board cannot be bound to the post-route score by the document alone.
-`ledger.jsonl` closes the gap: its rows carry `parent_sha` and `result_sha`, so
-the frozen board and the terminal board are connected iff one is reachable from
-the other over that edge set.
-
-It has to be a BFS with a seen-set. A greedy "follow the last accepted row"
-walk terminates back at the frozen sha on run23 and reports the lineage
-unproven; the BFS finds the terminal board 19 hops away. That is measured, not
-defensive: `tests/test_703_predictor_harvest.py` pins both.
+pre-route board is bound to the post-route score over `ledger.jsonl`'s
+`parent_sha -> result_sha` edges. It has to be a BFS with a seen-set: an
+accepted-only greedy walk on run23 returns to the frozen sha after 18 steps.
+`tests/test_703_predictor_harvest.py` pins that shape, and a cyclic ledger that
+must terminate.
 
 AN ABSENT KEY IS null, NEVER 0
 
@@ -210,12 +207,78 @@ def score_files(run_dir):
     return sorted(glob.glob(os.path.join(run_dir, 'score*.json')))
 
 
-def terminal_score(run_dir):
-    """(score_path, rule, terminal_sha, note) or raise Refusal.
+def terminal_from_ledger(run_dir):
+    """(sha, row_index, accepted) of the run's LAST `final: true` ledger row.
 
-    Never falls back to the name `score.json`. See the module docstring for the
-    two runs on the recorded corpus where that fallback reads the wrong board.
+    THE LEDGER IS THE AUTHORITY, and the first version of this file got that
+    wrong in a way worth writing down.
+
+    It used `RUN_STATE.json`'s `board_sha`, on the reasoning that
+    `converge.write_run_state` is the one thing in a run that asserts "this is
+    where it ended". But that field is set from the LAST ledger row's
+    `result_sha` whether or not the lap was ACCEPTED, while the sibling
+    `final_recorded` flag is a property of a different row entirely. On
+    `wk/run23/tigard` the two disagree and the file contradicts itself:
+
+        board_sha      5eff4294   <- row 42, accepted: False, whose own lever
+                                     text ends "Step back to routed.kicad_pcb"
+        score_lap      39         <- the accepted final lap
+        quality.vias   377        <- b52f79c9's vias, not 5eff4294's 372
+        last_accepted  False
+
+    Reading `board_sha` there selects the output of a REJECTED lap. The ledger
+    has no such ambiguity: row 39 is the run's only `final: true` row, it is
+    accepted, and it names b52f79c9 -- which is `routed.kicad_pcb`, which is
+    what `score.json` grades, and it is what `RUN_STATE`'s own quality block
+    agrees with.
+
+    `RUN_STATE` is kept as a CROSS-CHECK and disclosed when it disagrees,
+    because that disagreement is informative. It is not the authority.
     """
+    led = os.path.join(run_dir, 'ledger.jsonl')
+    if not os.path.isfile(led):
+        raise Refusal(
+            'no_ledger',
+            'the run has no ledger.jsonl, so nothing in it says which board it '
+            'ended on. A filename convention is not a verdict.')
+    rows = []
+    with open(led, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:                               # noqa: BLE001
+                    continue
+    finals = [(i, r) for i, r in enumerate(rows) if r.get('final')]
+    if not finals:
+        raise Refusal(
+            'run_never_closed',
+            f'ledger.jsonl has {len(rows)} row(s) and none carries '
+            f'`final: true`. The run did not record a final board, so it has '
+            f'no terminal score.')
+    i, row = finals[-1]
+    sha = row.get('result_sha')
+    if not sha:
+        raise Refusal('final_row_has_no_sha',
+                      f'ledger row {i} is final but carries no result_sha')
+    return sha, i, row.get('accepted')
+
+
+def terminal_score(run_dir):
+    """(score_path, rule, terminal_sha, notes) or raise Refusal.
+
+    The terminal board comes from the ledger; the terminal SCORE is the single
+    score file that grades it. Never from a filename: two runs on this corpus
+    are decided wrongly by the name `score.json` and two more are refused by a
+    harvester that cannot read the ledger.
+    """
+    sha, idx, accepted = terminal_from_ledger(run_dir)
+    notes = []
+    if accepted is False:
+        notes.append(f'ledger row {idx} is final but records accepted=False; '
+                     f'the run ended on a lap it did not accept')
+
     scored = []
     for p in score_files(run_dir):
         try:
@@ -224,63 +287,44 @@ def terminal_score(run_dir):
             scored.append((p, None, f'unreadable: {e}'))
             continue
         scored.append((p, s.get('board_sha'), None))
-    if not scored:
-        raise Refusal('no_score_file',
-                      'the run holds a handoff.json and no score*.json')
-
     inventory = ', '.join(
-        f'{os.path.basename(p)}={str(sha)[:10] if sha else "no board_sha"}'
-        for p, sha, _e in scored)
+        f'{os.path.basename(p)}={str(bs)[:10] if bs else "no board_sha"}'
+        for p, bs, _e in scored) or '(none)'
 
-    rs_path = os.path.join(run_dir, 'RUN_STATE.json')
-    if os.path.isfile(rs_path):
-        rs = _load(rs_path)
-        if not rs.get('final_recorded'):
-            raise Refusal(
-                'run_state_not_final',
-                f'RUN_STATE.json exists but final_recorded is '
-                f'{rs.get("final_recorded")!r} -- the run did not close out, so '
-                f'no score in it is terminal')
-        want = rs.get('board_sha')
-        if not want:
-            raise Refusal('run_state_no_sha',
-                          'RUN_STATE.json carries no board_sha')
-        hits = [p for p, sha, _e in scored if sha == want]
-        rule, note = 'run_state_sha', None
-    else:
-        routed = os.path.join(run_dir, 'routed.kicad_pcb')
-        if not os.path.isfile(routed):
-            raise Refusal(
-                'no_terminal_authority',
-                f'no RUN_STATE.json and no routed.kicad_pcb, so nothing in the '
-                f'run says which of {len(scored)} score file(s) is terminal '
-                f'({inventory})')
-        want = sha256_file(routed)
-        hits = [p for p, sha, _e in scored if sha == want]
-        rule = 'routed_artifact_sha'
-        note = ('no RUN_STATE.json; the terminal board is routed.kicad_pcb by '
-                'filename convention, which is weaker than a recorded verdict')
-
+    hits = [p for p, bs, _e in scored if bs == sha]
     if not hits:
         raise Refusal(
-            'no_score_for_terminal_sha',
-            f'terminal board is {str(want)[:10]} ({rule}) and no score file '
-            f'grades it. Scanned: {inventory}')
+            'no_score_for_terminal_board',
+            f'ledger row {idx} names the final board {str(sha)[:10]} and no '
+            f'score file grades it. Scanned: {inventory}')
     if len(hits) > 1:
-        # run14/castor: score.json (blocking 0) and score_declared.json
-        # (blocking 62) grade the SAME board at different floors.
         verdicts = []
         for p in hits:
             s = _load(p)
             verdicts.append(f'{os.path.basename(p)} '
                             f'blocking={s.get("blocking")!r} '
-                            f'label={s.get("label") or ""!r}')
+                            f'label={(s.get("label") or "")!r}')
         raise Refusal(
             'ambiguous_terminal_score',
-            f'{len(hits)} score files grade the terminal board '
-            f'{str(want)[:10]}, and they disagree about what it is worth: '
-            f'{"; ".join(verdicts)}. Picking one would be choosing the answer.')
-    return hits[0], rule, want, note
+            f'{len(hits)} score files grade the final board {str(sha)[:10]}, '
+            f'and they disagree about what it is worth: {"; ".join(verdicts)}. '
+            f'Picking one would be choosing the answer.')
+
+    # RUN_STATE as a CROSS-CHECK, never as the authority.
+    rs_path = os.path.join(run_dir, 'RUN_STATE.json')
+    if os.path.isfile(rs_path):
+        try:
+            rst = _load(rs_path)
+        except Exception:                                       # noqa: BLE001
+            rst = {}
+        rs_sha = rst.get('board_sha')
+        if rs_sha and rs_sha != sha:
+            notes.append(
+                f'RUN_STATE.board_sha is {str(rs_sha)[:10]} but the ledger\'s '
+                f'last final row (#{idx}) names {str(sha)[:10]}. '
+                f'write_run_state copies the LAST row\'s result_sha whether or '
+                f'not it was accepted; the ledger is the authority here')
+    return hits[0], 'ledger_final', sha, notes
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +447,7 @@ def build_row(run_dir, root):
     handoff_path = os.path.join(run_dir, 'handoff.json')
     handoff = _load(handoff_path)
 
-    score_path, rule, terminal_sha, tier_note = terminal_score(run_dir)
+    score_path, rule, terminal_sha, tier_notes = terminal_score(run_dir)
     score = _load(score_path)
 
     blocking = score.get('blocking')
@@ -447,9 +491,7 @@ def build_row(run_dir, root):
     pred, gaps, aliases, unknown = predictors_from_handoff(handoff)
     by = score.get('blocking_by') or {}
     q = score.get('quality') or {}
-    notes = []
-    if tier_note:
-        notes.append(tier_note)
+    notes = list(tier_notes)
     if unknown:
         notes.append(f'handoff metrics carries {len(unknown)} key(s) this tool '
                      f'does not record: {", ".join(unknown)}')

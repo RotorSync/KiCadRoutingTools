@@ -1,6 +1,6 @@
 {
  "generated_by": "tests/stress/harvest_predictor_rows.py",
- "harvester_git": "v0.21.3-190-g0583f89d",
+ "harvester_git": "v0.21.3-191-g27b336a3-dirty",
  "kind": "predictor-rows",
  "predictor_keys": [
   "align",
@@ -34,38 +34,28 @@
  ],
  "refusals": [
   {
-   "detail": "RUN_STATE.json exists but final_recorded is None -- the run did not close out, so no score in it is terminal",
-   "reason_code": "run_state_not_final",
+   "detail": "the run has no ledger.jsonl, so nothing in it says which board it ended on. A filename convention is not a verdict.",
+   "reason_code": "no_ledger",
    "run_dir": "wk"
   },
   {
-   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 5 score file(s) is terminal (score_input.json=a397c3e9ea, score_p1.json=b1f0fa62bd, score_p2.json=fe869b8daf, score_r5.json=845fceb2cc, score_r7.json=a7264269db)",
-   "reason_code": "no_terminal_authority",
-   "run_dir": "wk/run10/smartknob"
-  },
-  {
-   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 13 score file(s) is terminal (score0.json=a397c3e9ea, score1.json=0468b3134c, score2.json=379224f632, score3.json=1d5db98e8f, score_final_intent.json=bfe11bfbe9, score_r5.json=b988cb32b4, score_v2r7.json=5a3597c07d, score_v4r7.json=1605483970, score_v5r7.json=bfe11bfbe9, score_v6r7.json=826750223c, score_v7r7.json=a131ae9b2f, score_v9r7.json=4da9b14d1e, score_v9r7_at01.json=4da9b14d1e)",
-   "reason_code": "no_terminal_authority",
-   "run_dir": "wk/run11/smartknob"
-  },
-  {
-   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 11 score file(s) is terminal (score_R5.json=d5eed80fbb, score_R5b.json=48a8a18a19, score_final.json=no board_sha, score_lap0.json=no board_sha, score_lap1.json=no board_sha, score_lap2.json=no board_sha, score_lap3.json=no board_sha, score_lap4.json=no board_sha, score_lap5.json=no board_sha, score_lap6.json=no board_sha, score_run7_regraded.json=63799ee6f9)",
-   "reason_code": "no_terminal_authority",
+   "detail": "ledger row 6 names the final board 9f88776650 and no score file grades it. Scanned: score_R5.json=d5eed80fbb, score_R5b.json=48a8a18a19, score_final.json=no board_sha, score_lap0.json=no board_sha, score_lap1.json=no board_sha, score_lap2.json=no board_sha, score_lap3.json=no board_sha, score_lap4.json=no board_sha, score_lap5.json=no board_sha, score_lap6.json=no board_sha, score_run7_regraded.json=63799ee6f9",
+   "reason_code": "no_score_for_terminal_board",
    "run_dir": "wk/run13/glasgow"
   },
   {
-   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 4 score file(s) is terminal (score.json=d5dbfed5de, score_declared.json=d5dbfed5de, score_final.json=aa4c24ee74, score_final_declared.json=aa4c24ee74)",
-   "reason_code": "no_terminal_authority",
+   "detail": "2 score files grade the final board aa4c24ee74, and they disagree about what it is worth: score_final.json blocking=0 label=''; score_final_declared.json blocking=62 label='declared-floor grade'. Picking one would be choosing the answer.",
+   "reason_code": "ambiguous_terminal_score",
    "run_dir": "wk/run14/castor"
   },
   {
-   "detail": "3 score files grade the terminal board 7dafd6c67b, and they disagree about what it is worth: score.json blocking=10 label=''; score_advisory_widths_c1.json blocking=13 label=''; score_r4.json blocking=10 label=''. Picking one would be choosing the answer.",
+   "detail": "3 score files grade the final board 7dafd6c67b, and they disagree about what it is worth: score.json blocking=10 label=''; score_advisory_widths_c1.json blocking=13 label=''; score_r4.json blocking=10 label=''. Picking one would be choosing the answer.",
    "reason_code": "ambiguous_terminal_score",
    "run_dir": "wk/run20"
   },
   {
-   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 12 score file(s) is terminal (score_close.json=no board_sha, score_lap1.json=no board_sha, score_lap2.json=no board_sha, score_lap3.json=no board_sha, score_lap4.json=no board_sha, score_lap5.json=no board_sha, score_lap6.json=no board_sha, score_lap7.json=no board_sha, score_lap8.json=no board_sha, score_lap9.json=no board_sha, score_r3.json=9a4587590a, score_r4.json=b3865ec298)",
-   "reason_code": "no_terminal_authority",
+   "detail": "ledger.jsonl has 13 row(s) and none carries `final: true`. The run did not record a final board, so it has no terminal score.",
+   "reason_code": "run_never_closed",
    "run_dir": "wk/run22/tigard"
   }
  ],
@@ -131,7 +121,7 @@
      "score_r7.json"
     ],
     "terminal_board_sha": "04dec7d1a2855f2ab794ad3a4672bee13fe7de684cc1cd2903f4a4227577f2b0",
-    "terminal_rule": "run_state_sha",
+    "terminal_rule": "ledger_final",
     "terminal_score_file": "score.json"
    },
    "reproducible": false,
@@ -178,9 +168,7 @@
    "board_key": "neo6502",
    "generator": null,
    "kind": "predictor-row",
-   "notes": [
-    "no RUN_STATE.json; the terminal board is routed.kicad_pcb by filename convention, which is weaker than a recorded verdict"
-   ],
+   "notes": [],
    "predictor_source": "handoff.json",
    "predictors": {
     "align": 0.0,
@@ -217,7 +205,7 @@
     "clearance_requested": null,
     "handoff": "wk/run17/neo6502/handoff.json",
     "lineage": "ledger_reachable",
-    "lineage_hops": 6,
+    "lineage_hops": 14,
     "pre_board": "frozen.kicad_pcb",
     "pre_board_sha": "0ee5b47118e800568f969ff0c1c0a93a432977a85ff1400f660103a5989dd053",
     "run_dir": "wk/run17/neo6502",
@@ -226,9 +214,9 @@
      "score2.json",
      "score3.json"
     ],
-    "terminal_board_sha": "71a489cc217005031abf336501e2d9a92b5efdbcdb584081b8bbd3f29018428b",
-    "terminal_rule": "routed_artifact_sha",
-    "terminal_score_file": "score.json"
+    "terminal_board_sha": "3a13a8ccada2c91eee12521b01a7462d3766e0cbfcd63f5a67fce3d11d57783a",
+    "terminal_rule": "ledger_final",
+    "terminal_score_file": "score2.json"
    },
    "reproducible": false,
    "route": {
@@ -248,26 +236,25 @@
    ],
    "source": "harvest",
    "truth": {
-    "blocking": 79,
+    "blocking": 78,
     "blocking_by": {
      "assembly": 0,
-     "broken": 47,
+     "broken": 46,
      "drc": 0,
-     "floorplan": null,
+     "floorplan": 0,
      "impedance": null,
      "length": null,
      "net_widths": null,
      "undersized": 0,
      "unrouted": 32
     },
-    "headline": 79,
+    "headline": 78,
     "quality": {
-     "copper_mm": 4406.45,
-     "segments": 6896,
-     "vias": 427
+     "copper_mm": 4181.18,
+     "segments": 6140,
+     "vias": 408
     },
     "ungraded": [
-     "floorplan",
      "impedance",
      "length",
      "net_widths"
@@ -279,9 +266,7 @@
    "board_key": "piantor",
    "generator": null,
    "kind": "predictor-row",
-   "notes": [
-    "no RUN_STATE.json; the terminal board is routed.kicad_pcb by filename convention, which is weaker than a recorded verdict"
-   ],
+   "notes": [],
    "predictor_source": "handoff.json",
    "predictors": {
     "align": 0.0,
@@ -329,7 +314,7 @@
      "score_r6.json"
     ],
     "terminal_board_sha": "91b81dd5f29867223ab57a9b93e620ab662fb8ca58abf623b7f023dff5054b10",
-    "terminal_rule": "routed_artifact_sha",
+    "terminal_rule": "ledger_final",
     "terminal_score_file": "score.json"
    },
    "reproducible": false,
@@ -377,10 +362,221 @@
    "variant": "recorded"
   },
   {
-   "board_key": "tigard",
+   "board_key": "smartknob",
    "generator": null,
    "kind": "predictor-row",
    "notes": [],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 8,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": null,
+    "courtyard_blocking_pairs": null,
+    "courtyard_off_outline": 30,
+    "courtyard_overlap_mm2": null,
+    "cross_side_stacks": null,
+    "crossings": 145,
+    "edge": 168.5678899941383,
+    "halo": 853.9657030030587,
+    "hole_conflicts": 0,
+    "hole_shortfall": 0.0,
+    "hpwl": 2079.7842090000004,
+    "length": 1739.2905155791163,
+    "locked_contact_pairs": 0,
+    "oob_amount": 954.9273853343238,
+    "oob_area": 146.6952,
+    "oob_count": 30,
+    "orient": 0.0,
+    "overlap_area": 77.38329193549706,
+    "pad_clearance_pairs": 5,
+    "pad_conflict_pairs": 5,
+    "pad_copper": 11,
+    "pad_intersection_pairs": 8,
+    "pad_overlap_pairs": 5,
+    "pad_shortfall": 1.3233,
+    "total": 4211.824108576314
+   },
+   "provenance": {
+    "clearance": 0.2,
+    "clearance_requested": null,
+    "handoff": "wk/run10/smartknob/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 2,
+    "pre_board": "p2.kicad_pcb",
+    "pre_board_sha": "fe869b8dafa8144006fb5a235d5b00fc4c5d676c61d0786598417c662de4d91c",
+    "run_dir": "wk/run10/smartknob",
+    "score_files_scanned": [
+     "score_input.json",
+     "score_p1.json",
+     "score_p2.json",
+     "score_r5.json",
+     "score_r7.json"
+    ],
+    "terminal_board_sha": "a7264269dbe336a2ce03a8552aceacc479ab399c810a262ca31b73e124cfb1e3",
+    "terminal_rule": "ledger_final",
+    "terminal_score_file": "score_r7.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:smartknob:wk-run10-smartknob",
+   "schema": 1,
+   "schema_aliases_used": {},
+   "schema_gaps": [
+    "checklist.b_courtyard_advisory_pairs",
+    "checklist.b_courtyard_blocking_pairs",
+    "checklist.b_cross_side_stacks",
+    "checklist.b_courtyard_overlap_mm2"
+   ],
+   "source": "harvest",
+   "truth": {
+    "blocking": 50,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 37,
+     "drc": 0,
+     "floorplan": null,
+     "impedance": null,
+     "length": null,
+     "net_widths": null,
+     "undersized": 0,
+     "unrouted": 13
+    },
+    "headline": 50,
+    "quality": {
+     "copper_mm": 1712.38,
+     "segments": 1370,
+     "vias": 175
+    },
+    "ungraded": [
+     "floorplan",
+     "impedance",
+     "length",
+     "net_widths"
+    ]
+   },
+   "variant": "recorded"
+  },
+  {
+   "board_key": "smartknob",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 9,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": null,
+    "courtyard_blocking_pairs": null,
+    "courtyard_off_outline": 22,
+    "courtyard_overlap_mm2": null,
+    "cross_side_stacks": null,
+    "crossings": 321,
+    "edge": 185.71932462463445,
+    "halo": 577.9482967493782,
+    "hole_conflicts": 0,
+    "hole_shortfall": 0.0,
+    "hpwl": 2079.377511,
+    "length": 1920.8389742614288,
+    "locked_contact_pairs": 8,
+    "oob_amount": 29.394529077801675,
+    "oob_area": 0.6120000000001511,
+    "oob_count": 22,
+    "orient": 0.0,
+    "overlap_area": 39.33668318607804,
+    "pad_clearance_pairs": 5,
+    "pad_conflict_pairs": 5,
+    "pad_copper": 0,
+    "pad_intersection_pairs": 9,
+    "pad_overlap_pairs": 5,
+    "pad_shortfall": 1.3233,
+    "total": 5894.506595635442
+   },
+   "provenance": {
+    "clearance": 0.2,
+    "clearance_requested": null,
+    "handoff": "wk/run11/smartknob/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 5,
+    "pre_board": "p3.kicad_pcb",
+    "pre_board_sha": "1d5db98e8fdbc3bd9daefa0eb11e3c3b6960696f5da7f0bba6a2da52763e9e78",
+    "run_dir": "wk/run11/smartknob",
+    "score_files_scanned": [
+     "score0.json",
+     "score1.json",
+     "score2.json",
+     "score3.json",
+     "score_final_intent.json",
+     "score_r5.json",
+     "score_v2r7.json",
+     "score_v4r7.json",
+     "score_v5r7.json",
+     "score_v6r7.json",
+     "score_v7r7.json",
+     "score_v9r7.json",
+     "score_v9r7_at01.json"
+    ],
+    "terminal_board_sha": "826750223cb35a0e6d5ecaf603c4bd3d9cc827ea264f06fb92b5300d4cd21260",
+    "terminal_rule": "ledger_final",
+    "terminal_score_file": "score_v6r7.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:smartknob:wk-run11-smartknob",
+   "schema": 1,
+   "schema_aliases_used": {},
+   "schema_gaps": [
+    "checklist.b_courtyard_advisory_pairs",
+    "checklist.b_courtyard_blocking_pairs",
+    "checklist.b_cross_side_stacks",
+    "checklist.b_courtyard_overlap_mm2"
+   ],
+   "source": "harvest",
+   "truth": {
+    "blocking": 20,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 16,
+     "drc": 0,
+     "floorplan": 0,
+     "impedance": null,
+     "length": null,
+     "net_widths": null,
+     "undersized": 0,
+     "unrouted": 4
+    },
+    "headline": 20,
+    "quality": {
+     "copper_mm": 2703.86,
+     "segments": 2188,
+     "vias": 250
+    },
+    "ungraded": [
+     "impedance",
+     "length",
+     "net_widths"
+    ]
+   },
+   "variant": "recorded"
+  },
+  {
+   "board_key": "tigard",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [
+    "RUN_STATE.board_sha is 5eff429472 but the ledger's last final row (#39) names b52f79c9ad. write_run_state copies the LAST row's result_sha whether or not it was accepted; the ledger is the authority here"
+   ],
    "predictor_source": "handoff.json",
    "predictors": {
     "align": 0.0,
@@ -417,7 +613,7 @@
     "clearance_requested": 0.15,
     "handoff": "wk/run23/tigard/handoff.json",
     "lineage": "ledger_reachable",
-    "lineage_hops": 1,
+    "lineage_hops": 18,
     "pre_board": "frozen.kicad_pcb",
     "pre_board_sha": "d93b73e31182299dce812d214ec42f0b87606a0277001be8f7eac18c0a5eda83",
     "run_dir": "wk/run23/tigard",
@@ -462,9 +658,9 @@
      "score_r8.json",
      "score_r9.json"
     ],
-    "terminal_board_sha": "5eff429472be69426f4f8587efcd160b263679bab26ecae6dd48af4045db7c6b",
-    "terminal_rule": "run_state_sha",
-    "terminal_score_file": "score_r18.json"
+    "terminal_board_sha": "b52f79c9adf494a2ae0acfc910d1a64f66094bb3fdbf76f30efe357efa9ec983",
+    "terminal_rule": "ledger_final",
+    "terminal_score_file": "score.json"
    },
    "reproducible": false,
    "route": {
@@ -498,9 +694,9 @@
     },
     "headline": 3,
     "quality": {
-     "copper_mm": 2823.17,
-     "segments": 4222,
-     "vias": 372
+     "copper_mm": 2831.61,
+     "segments": 4250,
+     "vias": 377
     },
     "ungraded": [
      "length",
@@ -513,9 +709,7 @@
    "board_key": "urchin",
    "generator": null,
    "kind": "predictor-row",
-   "notes": [
-    "no RUN_STATE.json; the terminal board is routed.kicad_pcb by filename convention, which is weaker than a recorded verdict"
-   ],
+   "notes": [],
    "predictor_source": "handoff.json",
    "predictors": {
     "align": 0.0,
@@ -552,7 +746,7 @@
     "clearance_requested": 0.2,
     "handoff": "wk/run19/urchin/handoff.json",
     "lineage": "ledger_reachable",
-    "lineage_hops": 3,
+    "lineage_hops": 8,
     "pre_board": "frozen.kicad_pcb",
     "pre_board_sha": "740f9a1201abb5ad9e882e5d8db4001602ea95441ff1761462f29aaf80785748",
     "run_dir": "wk/run19/urchin",
@@ -564,9 +758,9 @@
      "score_R5_c2.json",
      "score_c2.json"
     ],
-    "terminal_board_sha": "d2ce0afb84ad3db24ca9f0de7b5748854c97a7becbec1e6c8199ab65d72c6cac",
-    "terminal_rule": "routed_artifact_sha",
-    "terminal_score_file": "score.json"
+    "terminal_board_sha": "b84b7c761341e6f9a012b6b7fd3e905dc52984ef6b16c8490530ccd809fa1ef4",
+    "terminal_rule": "ledger_final",
+    "terminal_score_file": "score_c2.json"
    },
    "reproducible": false,
    "route": {
@@ -586,23 +780,23 @@
    ],
    "source": "harvest",
    "truth": {
-    "blocking": 3,
+    "blocking": 0,
     "blocking_by": {
      "assembly": 0,
-     "broken": 1,
+     "broken": 0,
      "drc": 0,
-     "floorplan": 2,
+     "floorplan": 0,
      "impedance": null,
      "length": null,
      "net_widths": 0,
      "undersized": 0,
      "unrouted": 0
     },
-    "headline": 3,
+    "headline": 0,
     "quality": {
-     "copper_mm": 3176.47,
-     "segments": 1431,
-     "vias": 175
+     "copper_mm": 3179.74,
+     "segments": 1363,
+     "vias": 177
     },
     "ungraded": [
      "impedance",
