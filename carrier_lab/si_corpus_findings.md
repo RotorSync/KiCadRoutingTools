@@ -151,3 +151,108 @@ committed). This findings file is the only committed artifact. The tuning runs'
 outputs live under /tmp/si_tune_{off,on,tuned}/ and /tmp/si_tune2_{off,tuned2}/
 (not committed); the drivers are carrier_lab/si_phase2/run_carrier_tune.sh and
 run_carrier_tune2.sh (committed).
+---
+
+## Re-score at tuned defaults (R0.8/C0.1)
+
+Date: 2026-08-28
+Commit under test: 975180c0 (SI enforcement: tune default radius/cost to 0.8/0.1)
+Branch: optimize-via-protection-parse
+
+The corpus verdict above (dd7b047e) was measured at the OLD defaults (RADIUS 1.5 /
+COST 0.44). The production defaults are now R0.8/C0.1 (975180c0). This section
+re-scores the SAME 8-board corpus at the CURRENT defaults to confirm the verdict
+still holds.
+
+### Method
+
+Identical board set and chain shape as the original: the faithful chain
+(aggressors -> victims -> rest) replayed from the original si_corpus_ab logs
+(CMD lines parsed verbatim, only output paths fresh). Arms: OFF
+(KICAD_SI_ENFORCE=0) vs ON (KICAD_SI_ENFORCE=1, current defaults, no knob
+overrides). One chain at a time, free -g >= 8 before each step, all nice -n 19.
+Grading identical to the original: check_connected.py + check_drc.py
+--clearance <floor> --clearance-margin 0.1 + quality/score.py.
+
+Replay fidelity verified: sonde_u and interf_u reproduce the original table
+exactly (si_coup 100/100, final 62.74/62.74 etc.), and the OFF arms of the
+remaining boards reproduce their original OFF numbers exactly (tigard DRC 1,
+kitdev DRC 1, glasgow conn 6, ulx3s conn 9/unrouted 3/DRC 6, haasoscope conn
+12/DRC 3). The ulx3s ON arm was re-run twice more (fresh full chain from the
+staged input) and is deterministic: DRC 19, conn 6, si_coup 81.0, final 59.26
+every time.
+
+### Corpus table (re-score at R0.8/C0.1)
+
+| Board | layers | OFF conn | ON conn | OFF unrout | ON unrout | OFF DRC | ON DRC | OFF si_coup | ON si_coup | OFF final | ON final |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| tigard | 4 | 0 | 0 | 0 | 0 | 1 | 1 | 88.5 | **92.9** | 62.83 | **63.22** |
+| watchy | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 31.5 | 31.4 | 54.96 | 54.11 |
+| sonde_u | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 100 | 100 | 68.32 | 68.32 |
+| interf_u | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 100 | 100 | 62.74 | 62.74 |
+| kit-dev-coldfire-xilinx_5213 | 4 | 0 | 0 | 0 | 0 | 1 | **0** | 70.7 | **98.1** | 60.86 | **63.20** |
+| glasgow_revC | 4 | 6 | 6 | 0 | 0 | 0 | 0 | 100 | 100 | 59.80 | 59.78 |
+| ulx3s (fine via) | 4 | **9** | **6** | **3** | **0** | **6** | **19** | 85.6 | **81.0** | **60.56** | **59.26** |
+| haasoscope_pro_max_test (fine via) | 10 | **12** | **9** | **0** | **3** | **3** | **0** | 73.8 | **73.3** | **66.99** | **67.23** |
+
+### Verdict at tuned defaults
+
+**Default stays ON, but the si_coupling win is much smaller than at the old
+defaults and one board (ulx3s) shows a real DRC regression.**
+
+Connectivity/DRC cost vs the same rules as the original:
+
+- Connectivity issues: ulx3s -3 better, haasoscope -3 better, glasgow equal (6/6),
+  all others equal. No board >3 nets worse on connectivity.
+- Unrouted nets: haasoscope +3 is the only regression and it is a SINGLE board
+  (within the +-2..3 noise band); ulx3s -3 better.
+- DRC: ulx3s +13 (6 -> 19) is a REAL regression on a single board -- the SDRAM_A1
+  copper is steered into SDRAM_D4's channel on In1.Cu by the enforcement field.
+  tigard +0 (was +4 at old defaults -- the old DRC regression is GONE at R0.8/C0.1),
+  kitdev -1 better, haasoscope -3 better, all others equal.
+- si_coupling: improves on only 2/8 boards (kitdev +27.4, tigard +4.4), NEUTRAL on
+  4 (sonde_u, interf_u, glasgow, haasoscope ~-0.4), and REGRESSES on watchy (-0.1)
+  and ulx3s (-4.6). The old table's headline wins -- watchy +40.6, haasoscope +10.5,
+  ulx3s +3.7 -- are all GONE at R0.8/C0.1.
+- final_score: improves on tigard (+0.39), kitdev (+2.34), haasoscope (+0.24);
+  regresses on watchy (-0.85), ulx3s (-1.30); neutral elsewhere.
+
+The si_coupling win the corpus keeps at R0.8/C0.1 vs the old table's numbers:
+
+| Board | si_coup delta old (R1.5/C0.44) | si_coup delta new (R0.8/C0.1) |
+|---|---|---|
+| tigard | +7.1 | +4.4 |
+| watchy | +40.6 | -0.1 |
+| sonde_u | +0.0 | +0.0 |
+| interf_u | +0.0 | +0.0 |
+| kitdev | +29.3 | +27.4 |
+| glasgow | +0.0 | +0.0 |
+| ulx3s | +3.7 | -4.6 |
+| haasoscope | +10.5 | -0.4 |
+
+The corpus keeps only ~half of its old si_coupling win (sum of deltas: old +91.2,
+new +26.7), concentrated in kitdev (+27.4) and tigard (+4.4). The watchy and
+haasoscope wins that dominated the old verdict do not survive the tuned band.
+
+### Interpretation
+
+The R0.8/C0.1 tuning was validated on the CARRIER board (its victims sit >2mm from
+aggressors, so the smaller band still catches them). The corpus boards are denser:
+their victims sit closer to aggressors, so the smaller band + lighter cost steer
+less, and on ulx3s the remaining steering actively hurts (SDRAM_A1 pushed into
+SDRAM_D4). The verdict gate -- no systematic connectivity/DRC cost beyond noise --
+still PASSES (the only >3 DRC regression is ulx3s, a single board; connectivity is
+equal-or-better everywhere; haasoscope +3 unrouted is within noise). But the
+si_coupling benefit that justified default-ON is materially weaker at the tuned
+knobs: only kitdev keeps a large win.
+
+Recommendation: keep default ON (the gate passes and kitdev/tigard still win), but
+note that the corpus-level si_coupling benefit at R0.8/C0.1 is roughly a third of
+what the old defaults delivered, and ulx3s shows enforcement can still cause a
+single-board DRC regression at the tuned band.
+
+### Files
+
+Re-score outputs under carrier_lab/si_corpus_rescore/ (git-untracked). Drivers:
+carrier_lab/si_corpus_rescore.py (replay chain per board) and
+carrier_lab/si_corpus_grade.py (grade both arms), both committed with this section.
