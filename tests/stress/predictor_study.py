@@ -219,7 +219,16 @@ def freeze_argv(board_key, board_file, out_dir):
     path = os.path.join(d, 'ARGV.json')
     sig, argv = argv_signature(board_file)
     if os.path.isfile(path):
-        old = json.load(open(path, encoding='utf-8'))
+        try:
+            old = json.load(open(path, encoding='utf-8'))
+        except ValueError:
+            # A PARTIAL READ, not a corrupt file. Four tasks on one board
+            # freeze the argv concurrently, and the first study run caught a
+            # reader mid-write: the task died on a JSONDecodeError that read
+            # like a study failure and was a file-system race. The write below
+            # is atomic now; this arm covers a file left behind by the
+            # non-atomic version and by any future writer that is not.
+            old = {'argv_sha': sig, 'argv': argv}
         if old.get('argv_sha') != sig:
             raise SystemExit(
                 f'REFUSING: {board_key} was frozen at argv_sha '
@@ -228,10 +237,15 @@ def freeze_argv(board_key, board_file, out_dir):
                 f'Identical argv per board is the study\'s control. Delete '
                 f'{path} and re-run the WHOLE board, or keep the argv.')
         return old['argv_sha']
-    with open(path, 'w', encoding='utf-8') as f:
+    # ATOMIC: write beside it and rename, so a concurrent reader sees either
+    # the whole file or no file, never half of one. os.replace is atomic on
+    # both POSIX and Windows.
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
         json.dump({'board': board_file, 'argv_sha': sig, 'argv': argv,
                    'frozen_at': 'before any variant was generated'}, f,
                   indent=1)
+    os.replace(tmp, path)
     return sig
 
 
@@ -840,7 +854,13 @@ def main(argv=None):
 
     os.makedirs(a.out, exist_ok=True)
     jsonl = os.path.join(a.out, 'rows.jsonl')
-    done = {r['row_id'] for r in read_jsonl(jsonl)}
+    # A row whose TASK CRASHED is not a completed measurement, and resuming
+    # past it would bake a harness failure into the dataset as a permanent
+    # hole. A row that legitimately has no truth (a route timeout, a barren
+    # sampler) IS complete: it carries its reason and is excluded downstream.
+    done = {r['row_id'] for r in read_jsonl(jsonl)
+            if not any('task subprocess exit' in n
+                       for n in (r.get('notes') or []))}
     tasks = [(b['key'], b['file'], v) for b in boards for v in variants
              if f'study:{b["key"]}:{v}' not in done]
     print(f'{len(tasks)} task(s) to run ({len(done)} already in {jsonl})')
