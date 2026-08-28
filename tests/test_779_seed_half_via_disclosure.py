@@ -41,15 +41,21 @@ declaring rig below is what makes the report non-empty.
 THE MUTATION BATTERY, AS RUN (`tests/mutate_779.py`): **11 rows, 8 killed,
 3 survived -- all three expected -- 0 broken.**
 
-  1  revert the seed-position lookup .......... 2 arms
-  2  record nothing at all .................... 5 arms
-  3  the via kind stops asking for it ......... 1 arm
-  4  drop the swap in the EFF loop ............ 2 arms
+  1  revert the seed-position lookup .......... 3 arms
+  2  record nothing at all .................... 6 arms
+  3  the via kind stops asking for it ......... 2 arms  <- was 1, a GREP
+  4  drop the swap in the EFF loop ............ 3 arms
   5  drop the swap in the FLAT loop ........... SURVIVED, expected -- below
   6  a second hop overwrites the original seed  1 arm
   7  the map stops holding its tuple .......... 2 arms
   8  seed_pos defaults ON ..................... 1 arm
-  9  record the LANDING instead of the seed ... 4 arms
+  9  record the LANDING instead of the seed ... 5 arms
+
+ROW 3 IS THE ONE TO READ. Before TestTheDisclosureCHANGESEndToEnd existed it
+was killed by a single arm, and that arm was a SUBSTRING MATCH OVER SOURCE --
+so the only thing making this fix reach production was a grep. Five rows
+gained a killer when the behavioural arm landed; this is the row where it
+mattered.
   10 INERT: a trailing comment names the kwarg ........ SURVIVED
   11 INERT: the resolve is a generator, not a list .... SURVIVED
 
