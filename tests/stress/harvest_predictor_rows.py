@@ -69,7 +69,7 @@ normalised and recorded in `schema_aliases_used`.
 
     python3 -X utf8 tests/stress/harvest_predictor_rows.py
     python3 -X utf8 tests/stress/harvest_predictor_rows.py \
-        --runs-dir wk --out tests/stress/predictor_rows.json
+        --runs-dir wk --out wk/703/harvest_rows.json
     python3 -X utf8 tests/stress/harvest_predictor_rows.py --verify
 
 Nothing here routes anything, and nothing here computes a correlation: these
@@ -691,7 +691,7 @@ def main(argv=None):
                     metavar='ROWS_JSON',
                     help='re-derive the committed rows and report the '
                          'disagreements (default file: '
-                         'tests/stress/predictor_rows.json)')
+                         'wk/703/harvest_rows.json)')
     a = ap.parse_args(argv)
 
     # The kernel's arms, every invocation. It costs milliseconds and the live
@@ -704,8 +704,8 @@ def main(argv=None):
         return 3
 
     if a.verify is not None:
-        path = a.verify or os.path.join(a.root, 'tests', 'stress',
-                                        'predictor_rows.json')
+        path = a.verify or os.path.join(a.root, 'wk', '703',
+                                        'harvest_rows.json')
         if not os.path.isfile(path):
             print(f'no committed rows at {path}', file=sys.stderr)
             return 3

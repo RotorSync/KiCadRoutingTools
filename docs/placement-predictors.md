@@ -16,14 +16,32 @@ This is that measurement. Nothing in it is a proxy for a proxy: 80 placements
 were generated, each routed once with an argv frozen before any variant existed,
 and each graded by `board_score`.
 
-> **Reproduce any of it.** The rows live in `tests/stress/predictor_rows.json`.
-> Every statistic re-derives with no routing at all:
+> **THE ROWS ARE NOT COMMITTED, and that is a deliberate trade.** They were,
+> at 276 KB, so this table could not drift from them. drandyhaas asked for the
+> file to go on review: the results are regenerable, and he verified that rather
+> than trusting the contract — `--task esp_prog:authored` rebuilt a row in 4.4 s
+> with every predictor, `truth` and `poses_sha256` matching.
+>
+> **What that costs, said plainly: no number in this document has an automated
+> change detector any more** — not the rho table, not the per-board tables, not
+> the shuffle-control rates — **and re-deriving them is an 8.8-hour job** (the sum of `provenance.total_seconds`
+> over the 87 rows; median 217 s, max 2012 s on `tigard:perturb-wrong_side`;
+> about 2.5 h wall clock at `-j 4`). It is the recorded finding.
+>
 > ```bash
-> python3 -X utf8 tests/stress/predictor_study.py --from-rows tests/stress/predictor_rows.json
-> python3 -X utf8 tests/stress/predictor_study.py --from-rows tests/stress/predictor_rows.json --shuffle-control 200
+> # rebuild the rows (8.8 h serial, ~2.5 h at -j 4)
+> python3 -X utf8 tests/stress/predictor_study.py --out wk/703 -j 4
+> # then every statistic, free, from the rows it wrote
+> python3 -X utf8 tests/stress/predictor_study.py --from-rows wk/703/rows.jsonl
+> python3 -X utf8 tests/stress/predictor_study.py --from-rows wk/703/rows.jsonl --shuffle-control 200
 > ```
-> Regenerating one placement and re-measuring its predictors costs seconds
-> (`--verify-row esp_prog:portfolio-3`); re-routing it costs one route.
+>
+> What IS guarded is the **rig**: `tests/test_703_predictor_regen.py`
+> regenerates four cheap declared variants (~51 s) and diffs their predictors
+> and routed truth against literals, so a change to the placement engine, the
+> predictor extraction or the route argv cannot silently move what this study
+> measured. `predictor_study.py --verify-row esp_prog:authored` is the same
+> check for one row.
 
 *(This file is deliberately NOT in `test_431_skill_commands.py`'s `SOURCES`. Its
 commands invoke `tests/stress/*.py`, which `krt_capabilities._tool_path` cannot

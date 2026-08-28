@@ -69,9 +69,9 @@ reduced the real one is a verdict resting on a criterion nobody printed.
     python3 -X utf8 tests/stress/predictor_study.py --plan
     python3 -X utf8 tests/stress/predictor_study.py --out wk/703 -j 4
     python3 -X utf8 tests/stress/predictor_study.py --task esp_prog:authored --out wk/703
-    python3 -X utf8 tests/stress/predictor_study.py --from-rows tests/stress/predictor_rows.json
+    python3 -X utf8 tests/stress/predictor_study.py --from-rows wk/703/rows.jsonl
     python3 -X utf8 tests/stress/predictor_study.py --from-rows ... --shuffle-control 200
-    python3 -X utf8 tests/stress/predictor_study.py --verify-row tigard:perturb-swap-d1
+    python3 -X utf8 tests/stress/predictor_study.py --verify-row esp_prog:authored
 
 The run is hours and a session can die inside it, so rows are appended to a
 JSONL as each task finishes and `--resume` skips any (board, variant) already
@@ -761,6 +761,46 @@ def shuffle_control(rows, n=200, seed=12345):
 # CLI
 # ---------------------------------------------------------------------------
 
+def compare_row(row, want):
+    """Diff a freshly measured row against a recorded expectation.
+
+    Compares only fields that are a property of the BOARD and the argv, never
+    of the run: `routed_board_sha` changes every run because KiCad stamps fresh
+    UUIDs into the output, which CLAUDE.md warns about explicitly ("outputs
+    carry per-run random UUIDs ... never hash or whole-file-diff .kicad_pcb
+    outputs to judge determinism").
+
+    `poses_sha256` rather than the input board's bytes: it is computed from
+    PARSED footprint poses, so it is identical on a CRLF and an LF checkout.
+    Hashing the raw file is not -- all four board hashes in the withdrawn rows
+    file were CRLF hashes, and the gate that checked them was green only on
+    Windows.
+    """
+    bad = []
+    for k in ('poses_sha256',):
+        got = (row.get('provenance') or {}).get(k)
+        if got != want.get(k):
+            bad.append(f'provenance.{k}: {got} != {want.get(k)}')
+    if (row.get('route') or {}).get('argv_sha') != want.get('argv_sha'):
+        bad.append(f'route.argv_sha: {(row.get("route") or {}).get("argv_sha")}'
+                   f' != {want.get("argv_sha")}')
+    for k, v in (want.get('truth') or {}).items():
+        got = (row.get('truth') or {}).get(k)
+        if k == 'quality':
+            got = {kk: (row['truth'].get('quality') or {}).get(kk)
+                   for kk in v}
+        if got != v:
+            bad.append(f'truth.{k}: {got} != {v}')
+    for k, v in (want.get('predictors') or {}).items():
+        got = (row.get('predictors') or {}).get(k)
+        if isinstance(v, float) or isinstance(got, float):
+            if got is None or abs(float(got) - float(v)) > 1e-6:
+                bad.append(f'predictors.{k}: {got} != {v}')
+        elif got != v:
+            bad.append(f'predictors.{k}: {got} != {v}')
+    return bad
+
+
 def load_rows(path):
     d = json.load(open(path, encoding='utf-8'))
     return d.get('rows') or []
@@ -797,7 +837,11 @@ def main(argv=None):
     ap.add_argument('--calibrate', action='store_true')
     ap.add_argument('--from-rows', default=None, metavar='ROWS_JSON')
     ap.add_argument('--shuffle-control', type=int, default=0, metavar='N')
-    ap.add_argument('--verify-row', default=None, metavar='BOARD:VARIANT')
+    ap.add_argument('--verify-row', default=None, metavar='BOARD:VARIANT',
+                    help='regenerate ONE variant, re-measure it, and diff '
+                         'against the expectation recorded in '
+                         'tests/test_703_predictor_regen.py. Exits non-zero on '
+                         'any disagreement')
     ap.add_argument('--append', default=None, metavar='ROWS_JSON',
                     help='merge the run\'s rows into this committed file')
     ap.add_argument('--list', action='store_true')
@@ -876,6 +920,38 @@ def main(argv=None):
                 json.dump(cal, f, indent=1, sort_keys=True)
         print(f'wrote {cal_path}')
         return 0
+
+    if a.verify_row:
+        # THE FLAG THAT DID NOTHING. It was declared, documented in the usage
+        # text, and advertised in the pull request as the cheap single-row
+        # check -- and `args.verify_row` was read ZERO times, so passing it fell
+        # through to a full run and printed "111 task(s) to run". An advertised
+        # cheap check that silently starts an 8.8-hour study is worse than a
+        # flag that errors. Caught in review by drandyhaas.
+        bk, _, variant = a.verify_row.partition(':')
+        try:
+            from test_703_predictor_regen import EXPECTED
+        except ImportError:
+            sys.path.insert(0, os.path.join(ROOT, 'tests'))
+            from test_703_predictor_regen import EXPECTED
+        want = EXPECTED.get(f'{bk}:{variant}')
+        if want is None:
+            print(f'no recorded expectation for {a.verify_row!r}. Known: '
+                  f'{", ".join(sorted(EXPECTED))}', file=sys.stderr)
+            return 2
+        board = next((b for b in CALIBRATION_CANDIDATES if b['key'] == bk), None)
+        if board is None:
+            print(f'no such board: {bk}', file=sys.stderr)
+            return 2
+        row = run_task(bk, board['file'], variant, a.out, a.seed,
+                       a.route_timeout)
+        bad = compare_row(row, want)
+        for line in bad:
+            print(f'  DISAGREES  {line}')
+        if not bad:
+            print(f'  {a.verify_row}: regenerated and matched every recorded '
+                  f'field ({row["route"].get("seconds")}s)')
+        return 1 if bad else 0
 
     if a.task:
         bk, _, variant = a.task.partition(':')
