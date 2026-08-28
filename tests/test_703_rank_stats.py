@@ -27,61 +27,71 @@ than fifteen minutes later.
 
     python3 -X utf8 tests/test_703_rank_stats.py
 
-WHAT THE BATTERY MEASURED (`python3 tests/mutate_703.py`, 25 rows against
-`tests/stress/rank_stats.py`). The count is how many of THIS file's checks the
-mutation trips, PLUS one for the `t_self_test` line; subtract 1 for the
-external-only figure. Every shipped row is >= 2, so every row is killed by this
-file's own checks with the kernel's self-test neutered.
+WHAT THE BATTERY MEASURED (`python3 tests/mutate_703.py`, 27 rows against
+`tests/stress/rank_stats.py`). Two columns, both MEASURED rather than inferred:
+`all` is the run as shipped, `ext` is the same run with the kernel's
+`_self_test` replaced by `return 99`, so `ext` is this file's own checks alone.
 
-    nan-becomes-zero                             KILLED   3
-    constant-side-becomes-zero                   KILLED   3
-    uncorrected-d2-formula                       KILLED   5
-    ties-get-sequential-ranks                    KILLED   7
-    tie-detection-grows-a-tolerance              KILLED   2
-    min-n-lowered-to-two                         KILLED   5
-    sign-test-accepts-a-sequence                 KILLED   3
-    per-board-buckets-a-missing-key              KILLED   2
-    per-board-buckets-every-board-into-one       KILLED   3
-    board-rho-drops-the-one-board-guard          KILLED   3
-    classify-board-drops-the-one-board-guard     KILLED   2
-    the-one-board-guard-only-warns               KILLED   3
-    nan-boards-join-the-denominator              KILLED   4
-    saturated-is-reported-as-measurable          KILLED   3
-    a-constant-truth-is-not-named-as-saturation  KILLED   2
-    the-rule-tolerates-one-wrong-board           KILLED   2
-    fmt-rho-drops-the-LOO-span                   KILLED   4
-    fmt-rho-hides-a-missing-span                 KILLED   2
-    fmt-renders-NaN-as-zero                      KILLED   2
-    zero-count-glued-to-its-marker               KILLED   2
-    rank-accepts-a-None                          KILLED   2
-    board-rho-coerces-a-null-to-zero             KILLED   5
-    a-NaN-value-is-reported-as-a-null-one        KILLED   4
-    a-comment-names-the-dependent-variable       SURVIVED 0   (expected: inert)
-    fmt-default-width-widens                     SURVIVED 0   (expected: inert)
+                                                 all  ext
+    nan-becomes-zero                     KILLED    3    2
+    constant-side-becomes-zero           KILLED    3    2
+    uncorrected-d2-formula               KILLED    5    4
+    ties-get-sequential-ranks            KILLED    7    6
+    tie-detection-grows-a-tolerance      KILLED    2    1
+    min-n-lowered-to-two                 KILLED    5    4
+    sign-test-accepts-a-sequence         KILLED    3    2
+    per-board-buckets-a-missing-key      KILLED    2    1
+    per-board-buckets-every-board-into-one  KILLED 3    2
+    board-rho-drops-the-one-board-guard  KILLED    3    2
+    classify-board-drops-the-one-board-guard KILLED 2   1
+    the-one-board-guard-only-warns       KILLED    3    2
+    nan-boards-join-the-denominator      KILLED    4    3
+    saturated-is-reported-as-measurable  KILLED    3    2
+    a-constant-truth-is-not-named-as-saturation KILLED 2 1
+    the-rule-tolerates-one-wrong-board   KILLED    2    1
+    fmt-rho-drops-the-LOO-span           KILLED    4    3
+    fmt-rho-hides-a-missing-span         KILLED    2    1
+    fmt-renders-NaN-as-zero              KILLED    2    1
+    zero-count-glued-to-its-marker       KILLED    2    1
+    rank-accepts-a-None                  KILLED    2    1
+    board-rho-coerces-a-null-to-zero     KILLED    5    4
+    a-NaN-value-is-reported-as-a-null-one KILLED   6    5
+    a-NaN-TRUTH-is-reported-as-a-null-one KILLED   2    2
+    the-NaN-TRUTH-arm-is-deleted         KILLED    1    1
+    a-comment-names-the-dependent-variable  SURVIVED 0  0  (expected: inert)
+    fmt-default-width-widens             SURVIVED  0    0  (expected: inert)
 
-    25 rows: 23 killed, 2 survived (2 of them expected), 0 broken
+    27 rows: 25 killed, 2 survived (2 of them expected), 0 broken
+    -- identical verdicts with the self-test neutered, so every kill is this
+       file's own.
 
-READ THE COUNT COLUMN, NOT THE VERDICT COLUMN. The FIRST run of this battery
-said "16 killed, 2 survived, 0 broken" -- and every one of those kills was
-`t_self_test` raising. It ran first, its AssertionError escaped, the file
-aborted, and none of the checks below it ever executed. The verdicts were
-identical and the external coverage was zero. What changed is the attribution:
-the self-test runs LAST and catches, so a count of N here means N-1 of this
-file's own checks fired.
+WHY TWO COLUMNS AND NOT ONE MINUS ONE. The FIRST run of this battery said
+"16 killed, 2 survived, 0 broken" and every one of those kills was `t_self_test`
+raising: it ran first, its AssertionError escaped, the file aborted, and none of
+the checks below it executed. The verdicts were indistinguishable from real
+coverage. The self-test now runs LAST and catches, and for most rows `ext` is
+simply `all - 1`.
 
-That is measured, not assumed: with `_self_test` replaced by `return 99` the
-battery still reports 23 killed, and this file still exits 0 on the unmutated
-kernel (so the neutering itself is not what turns it red).
+But not for all of them, which is why `ext` is measured rather than derived.
+`a-NaN-TRUTH-is-reported-as-a-null-one` and `the-NaN-TRUTH-arm-is-deleted` sit
+at 2 and 1 in BOTH columns: the kernel's self-test does not reach the
+truth-column arm at all, so those two rows are carried entirely by this file. An
+`all - 1` rule would have reported the second as external 0 and sent someone
+looking for a hole that is not there.
 
-Two rows previously sat at external count ZERO -- `zero-count-glued-to-its-marker`
-and `a-NaN-value-is-reported-as-a-null-one` -- caught by the kernel's self-test
-and by nothing here. They now carry their own checks. The thinnest rows left are
-at external count 1, and they are named rather than averaged away:
-`tie-detection-grows-a-tolerance`, `per-board-buckets-a-missing-key`,
+Both of those rows exist because an adversarial review found that arm reachable
+by neither grader: `board_rho` drops a NaN predictor and a NaN truth in sibling
+arms, the earlier battery row rewrote BOTH in one edit, and it was killed
+entirely by the predictor half. A row whose kill is due to a sibling line covers
+nothing.
+
+The thinnest rows are at `ext` 1 and are named rather than averaged into a
+25/27: `tie-detection-grows-a-tolerance`, `per-board-buckets-a-missing-key`,
 `classify-board-drops-the-one-board-guard`,
 `a-constant-truth-is-not-named-as-saturation`,
 `the-rule-tolerates-one-wrong-board`, `fmt-rho-hides-a-missing-span`,
-`fmt-renders-NaN-as-zero` and `rank-accepts-a-None`.
+`fmt-renders-NaN-as-zero`, `zero-count-glued-to-its-marker`,
+`rank-accepts-a-None` and `the-NaN-TRUTH-arm-is-deleted`.
 """
 import inspect
 import math
