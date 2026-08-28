@@ -38,6 +38,33 @@ because every one of its caps has `max_floor == 0.0`, so `best()` emits
 nothing. The wrong number was computed and then discarded. The synthetic
 declaring rig below is what makes the report non-empty.
 
+THE MUTATION BATTERY, AS RUN (`tests/mutate_779.py`): **11 rows, 8 killed,
+3 survived -- all three expected -- 0 broken.**
+
+  1  revert the seed-position lookup .......... 2 arms
+  2  record nothing at all .................... 5 arms
+  3  the via kind stops asking for it ......... 1 arm
+  4  drop the swap in the EFF loop ............ 2 arms
+  5  drop the swap in the FLAT loop ........... SURVIVED, expected -- below
+  6  a second hop overwrites the original seed  1 arm
+  7  the map stops holding its tuple .......... 2 arms
+  8  seed_pos defaults ON ..................... 1 arm
+  9  record the LANDING instead of the seed ... 4 arms
+  10 INERT: a trailing comment names the kwarg ........ SURVIVED
+  11 INERT: the resolve is a generator, not a list .... SURVIVED
+
+ROW 5 IS A RECORDED HOLE, not a pass. The FLAT loop runs only for a cap
+offering neither floors nor layers -- the duck-typed path -- and orangecrab
+resolves an eff matrix for every one of its caps, so no arm in this family
+reaches it. The row is kept with its reason rather than deleted, because an
+inert row recorded is a finding and an inert row removed is a hole. If it ever
+flips to KILLED, that is the news.
+
+ROW 8 IS KILLED BY EXACTLY ONE ARM, and it is the signature arm rather than a
+behavioural one -- test_775 and test_725 are both indifferent to the default
+flipping, because neither drives a run that relocates a barrel. That is worth
+knowing before someone deletes the signature arm as redundant.
+
 Runtime ~25s: two real-board passes plus the declaring rig.
 """
 from __future__ import annotations
