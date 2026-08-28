@@ -1,0 +1,616 @@
+{
+ "generated_by": "tests/stress/harvest_predictor_rows.py",
+ "harvester_git": "v0.21.3-190-g0583f89d",
+ "kind": "predictor-rows",
+ "predictor_keys": [
+  "align",
+  "corridor_cut",
+  "crossings",
+  "edge",
+  "halo",
+  "hole_shortfall",
+  "hpwl",
+  "length",
+  "locked_contact_pairs",
+  "oob_amount",
+  "oob_area",
+  "oob_count",
+  "orient",
+  "overlap_area",
+  "pad_conflict_pairs",
+  "pad_intersection_pairs",
+  "pad_overlap_pairs",
+  "pad_shortfall",
+  "total",
+  "pad_copper",
+  "courtyard_off_outline",
+  "body_overlap_pairs",
+  "pad_clearance_pairs",
+  "courtyard_advisory_pairs",
+  "courtyard_blocking_pairs",
+  "cross_side_stacks",
+  "hole_conflicts",
+  "courtyard_overlap_mm2"
+ ],
+ "refusals": [
+  {
+   "detail": "RUN_STATE.json exists but final_recorded is None -- the run did not close out, so no score in it is terminal",
+   "reason_code": "run_state_not_final",
+   "run_dir": "wk"
+  },
+  {
+   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 5 score file(s) is terminal (score_input.json=a397c3e9ea, score_p1.json=b1f0fa62bd, score_p2.json=fe869b8daf, score_r5.json=845fceb2cc, score_r7.json=a7264269db)",
+   "reason_code": "no_terminal_authority",
+   "run_dir": "wk/run10/smartknob"
+  },
+  {
+   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 13 score file(s) is terminal (score0.json=a397c3e9ea, score1.json=0468b3134c, score2.json=379224f632, score3.json=1d5db98e8f, score_final_intent.json=bfe11bfbe9, score_r5.json=b988cb32b4, score_v2r7.json=5a3597c07d, score_v4r7.json=1605483970, score_v5r7.json=bfe11bfbe9, score_v6r7.json=826750223c, score_v7r7.json=a131ae9b2f, score_v9r7.json=4da9b14d1e, score_v9r7_at01.json=4da9b14d1e)",
+   "reason_code": "no_terminal_authority",
+   "run_dir": "wk/run11/smartknob"
+  },
+  {
+   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 11 score file(s) is terminal (score_R5.json=d5eed80fbb, score_R5b.json=48a8a18a19, score_final.json=no board_sha, score_lap0.json=no board_sha, score_lap1.json=no board_sha, score_lap2.json=no board_sha, score_lap3.json=no board_sha, score_lap4.json=no board_sha, score_lap5.json=no board_sha, score_lap6.json=no board_sha, score_run7_regraded.json=63799ee6f9)",
+   "reason_code": "no_terminal_authority",
+   "run_dir": "wk/run13/glasgow"
+  },
+  {
+   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 4 score file(s) is terminal (score.json=d5dbfed5de, score_declared.json=d5dbfed5de, score_final.json=aa4c24ee74, score_final_declared.json=aa4c24ee74)",
+   "reason_code": "no_terminal_authority",
+   "run_dir": "wk/run14/castor"
+  },
+  {
+   "detail": "3 score files grade the terminal board 7dafd6c67b, and they disagree about what it is worth: score.json blocking=10 label=''; score_advisory_widths_c1.json blocking=13 label=''; score_r4.json blocking=10 label=''. Picking one would be choosing the answer.",
+   "reason_code": "ambiguous_terminal_score",
+   "run_dir": "wk/run20"
+  },
+  {
+   "detail": "no RUN_STATE.json and no routed.kicad_pcb, so nothing in the run says which of 12 score file(s) is terminal (score_close.json=no board_sha, score_lap1.json=no board_sha, score_lap2.json=no board_sha, score_lap3.json=no board_sha, score_lap4.json=no board_sha, score_lap5.json=no board_sha, score_lap6.json=no board_sha, score_lap7.json=no board_sha, score_lap8.json=no board_sha, score_lap9.json=no board_sha, score_r3.json=9a4587590a, score_r4.json=b3865ec298)",
+   "reason_code": "no_terminal_authority",
+   "run_dir": "wk/run22/tigard"
+  }
+ ],
+ "rows": [
+  {
+   "board_key": "esp_prog",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 0,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": 1,
+    "courtyard_blocking_pairs": 0,
+    "courtyard_off_outline": 1,
+    "courtyard_overlap_mm2": 1.0,
+    "cross_side_stacks": 0,
+    "crossings": 36,
+    "edge": 22.696502503200094,
+    "halo": 85.60716265865315,
+    "hole_conflicts": 0,
+    "hole_shortfall": 0.0,
+    "hpwl": 221.88616000000002,
+    "length": 205.7381882340007,
+    "locked_contact_pairs": 0,
+    "oob_amount": 0.15000000000000568,
+    "oob_area": 1.2600000000000477,
+    "oob_count": 1,
+    "orient": 0.0,
+    "overlap_area": 0.0,
+    "pad_clearance_pairs": 0,
+    "pad_conflict_pairs": 0,
+    "pad_copper": 0,
+    "pad_intersection_pairs": 0,
+    "pad_overlap_pairs": 0,
+    "pad_shortfall": 0.0,
+    "total": 674.041853395854
+   },
+   "provenance": {
+    "clearance": 0.15,
+    "clearance_requested": 0.15,
+    "handoff": "wk/run24/esp_prog/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 5,
+    "pre_board": "frozen.kicad_pcb",
+    "pre_board_sha": "a5940d02054640145cb0e80664c289aee65d561679bf63021491249444c175d4",
+    "run_dir": "wk/run24/esp_prog",
+    "score_files_scanned": [
+     "score.json",
+     "score_freeze.json",
+     "score_lap1.json",
+     "score_lap2.json",
+     "score_lap3.json",
+     "score_lap4.json",
+     "score_lap5.json",
+     "score_lap6.json",
+     "score_r1.json",
+     "score_r2.json",
+     "score_r3.json",
+     "score_r5.json",
+     "score_r7.json"
+    ],
+    "terminal_board_sha": "04dec7d1a2855f2ab794ad3a4672bee13fe7de684cc1cd2903f4a4227577f2b0",
+    "terminal_rule": "run_state_sha",
+    "terminal_score_file": "score.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:esp_prog:wk-run24-esp_prog",
+   "schema": 1,
+   "schema_aliases_used": {
+    "courtyard_advisory_pairs": "b_courtyard_overlap_pairs"
+   },
+   "schema_gaps": [],
+   "source": "harvest",
+   "truth": {
+    "blocking": 0,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 0,
+     "drc": 0,
+     "floorplan": null,
+     "impedance": null,
+     "length": null,
+     "net_widths": null,
+     "undersized": 0,
+     "unrouted": 0
+    },
+    "headline": 0,
+    "quality": {
+     "copper_mm": 286.41,
+     "segments": 429,
+     "vias": 28
+    },
+    "ungraded": [
+     "floorplan",
+     "net_widths"
+    ]
+   },
+   "variant": "recorded"
+  },
+  {
+   "board_key": "neo6502",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [
+    "no RUN_STATE.json; the terminal board is routed.kicad_pcb by filename convention, which is weaker than a recorded verdict"
+   ],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 0,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": null,
+    "courtyard_blocking_pairs": null,
+    "courtyard_off_outline": 2,
+    "courtyard_overlap_mm2": null,
+    "cross_side_stacks": null,
+    "crossings": 172,
+    "edge": 45.89860400000004,
+    "halo": 321.2849217074284,
+    "hole_conflicts": 0,
+    "hole_shortfall": 0.0,
+    "hpwl": 1129.7431000000001,
+    "length": 952.3353051350169,
+    "locked_contact_pairs": 0,
+    "oob_amount": 1.5,
+    "oob_area": 15.394999999999982,
+    "oob_count": 2,
+    "orient": 0.0,
+    "overlap_area": 0.0,
+    "pad_clearance_pairs": 0,
+    "pad_conflict_pairs": 0,
+    "pad_copper": 0,
+    "pad_intersection_pairs": 0,
+    "pad_overlap_pairs": 0,
+    "pad_shortfall": 0.0,
+    "total": 3039.5188308424454
+   },
+   "provenance": {
+    "clearance": 0.2,
+    "clearance_requested": null,
+    "handoff": "wk/run17/neo6502/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 6,
+    "pre_board": "frozen.kicad_pcb",
+    "pre_board_sha": "0ee5b47118e800568f969ff0c1c0a93a432977a85ff1400f660103a5989dd053",
+    "run_dir": "wk/run17/neo6502",
+    "score_files_scanned": [
+     "score.json",
+     "score2.json",
+     "score3.json"
+    ],
+    "terminal_board_sha": "71a489cc217005031abf336501e2d9a92b5efdbcdb584081b8bbd3f29018428b",
+    "terminal_rule": "routed_artifact_sha",
+    "terminal_score_file": "score.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:neo6502:wk-run17-neo6502",
+   "schema": 1,
+   "schema_aliases_used": {},
+   "schema_gaps": [
+    "checklist.b_courtyard_advisory_pairs",
+    "checklist.b_courtyard_blocking_pairs",
+    "checklist.b_cross_side_stacks",
+    "checklist.b_courtyard_overlap_mm2"
+   ],
+   "source": "harvest",
+   "truth": {
+    "blocking": 79,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 47,
+     "drc": 0,
+     "floorplan": null,
+     "impedance": null,
+     "length": null,
+     "net_widths": null,
+     "undersized": 0,
+     "unrouted": 32
+    },
+    "headline": 79,
+    "quality": {
+     "copper_mm": 4406.45,
+     "segments": 6896,
+     "vias": 427
+    },
+    "ungraded": [
+     "floorplan",
+     "impedance",
+     "length",
+     "net_widths"
+    ]
+   },
+   "variant": "recorded"
+  },
+  {
+   "board_key": "piantor",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [
+    "no RUN_STATE.json; the terminal board is routed.kicad_pcb by filename convention, which is weaker than a recorded verdict"
+   ],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 0,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": null,
+    "courtyard_blocking_pairs": null,
+    "courtyard_off_outline": 12,
+    "courtyard_overlap_mm2": null,
+    "cross_side_stacks": null,
+    "crossings": 84,
+    "edge": 86.69443866114364,
+    "halo": 986.9139206228368,
+    "hole_conflicts": 0,
+    "hole_shortfall": 0.0,
+    "hpwl": 1990.0144839999998,
+    "length": 1812.8994494952253,
+    "locked_contact_pairs": 0,
+    "oob_amount": 12.83722288893468,
+    "oob_area": 3.232349999999485,
+    "oob_count": 12,
+    "orient": 0.0,
+    "overlap_area": 48.891823778661184,
+    "pad_clearance_pairs": 0,
+    "pad_conflict_pairs": 0,
+    "pad_copper": 0,
+    "pad_intersection_pairs": 0,
+    "pad_overlap_pairs": 0,
+    "pad_shortfall": 0.0,
+    "total": 3726.507808779206
+   },
+   "provenance": {
+    "clearance": 0.2,
+    "clearance_requested": 0.2,
+    "handoff": "wk/run18/piantor/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 4,
+    "pre_board": "frozen.kicad_pcb",
+    "pre_board_sha": "5dbf6c6750d6aba8c92cb7f63ee01184aa563416289b9fb6d44911b7416279fe",
+    "run_dir": "wk/run18/piantor",
+    "score_files_scanned": [
+     "score.json",
+     "score_r1.json",
+     "score_r5.json",
+     "score_r6.json"
+    ],
+    "terminal_board_sha": "91b81dd5f29867223ab57a9b93e620ab662fb8ca58abf623b7f023dff5054b10",
+    "terminal_rule": "routed_artifact_sha",
+    "terminal_score_file": "score.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:piantor:wk-run18-piantor",
+   "schema": 1,
+   "schema_aliases_used": {},
+   "schema_gaps": [
+    "checklist.b_courtyard_advisory_pairs",
+    "checklist.b_courtyard_blocking_pairs",
+    "checklist.b_cross_side_stacks",
+    "checklist.b_courtyard_overlap_mm2"
+   ],
+   "source": "harvest",
+   "truth": {
+    "blocking": 0,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 0,
+     "drc": 0,
+     "floorplan": null,
+     "impedance": null,
+     "length": null,
+     "net_widths": 0,
+     "undersized": 0,
+     "unrouted": 0
+    },
+    "headline": 0,
+    "quality": {
+     "copper_mm": 2198.51,
+     "segments": 938,
+     "vias": 162
+    },
+    "ungraded": [
+     "floorplan",
+     "impedance",
+     "length"
+    ]
+   },
+   "variant": "recorded"
+  },
+  {
+   "board_key": "tigard",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 0,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": null,
+    "courtyard_blocking_pairs": null,
+    "courtyard_off_outline": 5,
+    "courtyard_overlap_mm2": null,
+    "cross_side_stacks": null,
+    "crossings": 670,
+    "edge": 76.70638861759997,
+    "halo": 1152.0610504882632,
+    "hole_conflicts": 0,
+    "hole_shortfall": 0.0,
+    "hpwl": 1988.2689,
+    "length": 1713.558567150132,
+    "locked_contact_pairs": 0,
+    "oob_amount": 5.959439999999965,
+    "oob_area": 38.58238643039979,
+    "oob_count": 5,
+    "orient": 0.0,
+    "overlap_area": 26.302032000000015,
+    "pad_clearance_pairs": 0,
+    "pad_conflict_pairs": 0,
+    "pad_copper": 0,
+    "pad_intersection_pairs": 0,
+    "pad_overlap_pairs": 0,
+    "pad_shortfall": 0.0,
+    "total": 9642.326006255995
+   },
+   "provenance": {
+    "clearance": 0.15,
+    "clearance_requested": 0.15,
+    "handoff": "wk/run23/tigard/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 1,
+    "pre_board": "frozen.kicad_pcb",
+    "pre_board_sha": "d93b73e31182299dce812d214ec42f0b87606a0277001be8f7eac18c0a5eda83",
+    "run_dir": "wk/run23/tigard",
+    "score_files_scanned": [
+     "score.json",
+     "score_lap1.json",
+     "score_lap10.json",
+     "score_lap11.json",
+     "score_lap12.json",
+     "score_lap13.json",
+     "score_lap14.json",
+     "score_lap15.json",
+     "score_lap16.json",
+     "score_lap2.json",
+     "score_lap3.json",
+     "score_lap4_rejected.json",
+     "score_lap5.json",
+     "score_lap6.json",
+     "score_lap7.json",
+     "score_lap8_rejected.json",
+     "score_lap9_rejected.json",
+     "score_r1.json",
+     "score_r10.json",
+     "score_r11.json",
+     "score_r12.json",
+     "score_r13.json",
+     "score_r14a.json",
+     "score_r14b.json",
+     "score_r14c.json",
+     "score_r14d.json",
+     "score_r14e.json",
+     "score_r14f.json",
+     "score_r15.json",
+     "score_r16.json",
+     "score_r18.json",
+     "score_r19.json",
+     "score_r2.json",
+     "score_r3.json",
+     "score_r4.json",
+     "score_r5.json",
+     "score_r7.json",
+     "score_r8.json",
+     "score_r9.json"
+    ],
+    "terminal_board_sha": "5eff429472be69426f4f8587efcd160b263679bab26ecae6dd48af4045db7c6b",
+    "terminal_rule": "run_state_sha",
+    "terminal_score_file": "score_r18.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:tigard:wk-run23-tigard",
+   "schema": 1,
+   "schema_aliases_used": {},
+   "schema_gaps": [
+    "checklist.b_courtyard_advisory_pairs",
+    "checklist.b_courtyard_blocking_pairs",
+    "checklist.b_cross_side_stacks",
+    "checklist.b_courtyard_overlap_mm2"
+   ],
+   "source": "harvest",
+   "truth": {
+    "blocking": 3,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 3,
+     "drc": 0,
+     "floorplan": 0,
+     "impedance": null,
+     "length": null,
+     "net_widths": null,
+     "undersized": 0,
+     "unrouted": 0
+    },
+    "headline": 3,
+    "quality": {
+     "copper_mm": 2823.17,
+     "segments": 4222,
+     "vias": 372
+    },
+    "ungraded": [
+     "length",
+     "net_widths"
+    ]
+   },
+   "variant": "recorded"
+  },
+  {
+   "board_key": "urchin",
+   "generator": null,
+   "kind": "predictor-row",
+   "notes": [
+    "no RUN_STATE.json; the terminal board is routed.kicad_pcb by filename convention, which is weaker than a recorded verdict"
+   ],
+   "predictor_source": "handoff.json",
+   "predictors": {
+    "align": 0.0,
+    "body_overlap_pairs": 0,
+    "corridor_cut": 0.0,
+    "courtyard_advisory_pairs": null,
+    "courtyard_blocking_pairs": null,
+    "courtyard_off_outline": 4,
+    "courtyard_overlap_mm2": null,
+    "cross_side_stacks": null,
+    "crossings": 191,
+    "edge": 61.29062548208868,
+    "halo": 12441.893979594917,
+    "hole_conflicts": 2,
+    "hole_shortfall": 2.6058,
+    "hpwl": 3231.3904199999984,
+    "length": 2798.29964678516,
+    "locked_contact_pairs": 1,
+    "oob_amount": 3.9882119999999475,
+    "oob_area": 0.0,
+    "oob_count": 4,
+    "orient": 0.0,
+    "overlap_area": 2700.2244366299724,
+    "pad_clearance_pairs": 0,
+    "pad_conflict_pairs": 0,
+    "pad_copper": 1,
+    "pad_intersection_pairs": 0,
+    "pad_overlap_pairs": 0,
+    "pad_shortfall": 0.0,
+    "total": 17211.484251862166
+   },
+   "provenance": {
+    "clearance": 0.2,
+    "clearance_requested": 0.2,
+    "handoff": "wk/run19/urchin/handoff.json",
+    "lineage": "ledger_reachable",
+    "lineage_hops": 3,
+    "pre_board": "frozen.kicad_pcb",
+    "pre_board_sha": "740f9a1201abb5ad9e882e5d8db4001602ea95441ff1761462f29aaf80785748",
+    "run_dir": "wk/run19/urchin",
+    "score_files_scanned": [
+     "score.json",
+     "score_R1.json",
+     "score_R1_c2.json",
+     "score_R5.json",
+     "score_R5_c2.json",
+     "score_c2.json"
+    ],
+    "terminal_board_sha": "d2ce0afb84ad3db24ca9f0de7b5748854c97a7becbec1e6c8199ab65d72c6cac",
+    "terminal_rule": "routed_artifact_sha",
+    "terminal_score_file": "score.json"
+   },
+   "reproducible": false,
+   "route": {
+    "argv": null,
+    "argv_sha": null,
+    "returncode": null,
+    "seconds": null
+   },
+   "row_id": "harvest:urchin:wk-run19-urchin",
+   "schema": 1,
+   "schema_aliases_used": {},
+   "schema_gaps": [
+    "checklist.b_courtyard_advisory_pairs",
+    "checklist.b_courtyard_blocking_pairs",
+    "checklist.b_cross_side_stacks",
+    "checklist.b_courtyard_overlap_mm2"
+   ],
+   "source": "harvest",
+   "truth": {
+    "blocking": 3,
+    "blocking_by": {
+     "assembly": 0,
+     "broken": 1,
+     "drc": 0,
+     "floorplan": 2,
+     "impedance": null,
+     "length": null,
+     "net_widths": 0,
+     "undersized": 0,
+     "unrouted": 0
+    },
+    "headline": 3,
+    "quality": {
+     "copper_mm": 3176.47,
+     "segments": 1431,
+     "vias": 175
+    },
+    "ungraded": [
+     "impedance",
+     "length"
+    ]
+   },
+   "variant": "recorded"
+  }
+ ],
+ "schema": 1
+}
