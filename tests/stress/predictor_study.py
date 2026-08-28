@@ -265,7 +265,32 @@ def freeze_argv(board_key, board_file, out_dir):
         json.dump({'board': board_file, 'argv_sha': sig, 'argv': argv,
                    'frozen_at': 'before any variant was generated'}, f,
                   indent=1)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        # WINDOWS refuses os.replace while another process holds the
+        # destination open -- `PermissionError: [WinError 5]`, which killed a
+        # task on the very next run after the atomic write was introduced. A
+        # sibling task freezing the same board simply got there first. That is
+        # not a failure: the file it wrote carries the same argv, because
+        # `argv_signature` is a function of the board alone. Verify and move
+        # on; only a DISAGREEING file is an error, and the branch above
+        # already raises on that.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        if not os.path.isfile(path):
+            raise
+        try:
+            other = json.load(open(path, encoding='utf-8'))
+        except ValueError:
+            return sig
+        if other.get('argv_sha') != sig:
+            raise SystemExit(
+                f'REFUSING: {board_key} was frozen concurrently at argv_sha '
+                f'{str(other.get("argv_sha"))[:12]} and this task would use '
+                f'{sig[:12]}')
     return sig
 
 
@@ -883,6 +908,13 @@ def main(argv=None):
                        for n in (r.get('notes') or []))}
     tasks = [(b['key'], b['file'], v) for b in boards for v in variants
              if f'study:{b["key"]}:{v}' not in done]
+    # FREEZE EVERY BOARD'S ARGV HERE, serially, before a single task starts.
+    # It is the control the whole study rests on, so it should not be
+    # established by whichever of four concurrent workers wins a race -- and
+    # doing it once in the parent means the per-task freeze finds the file
+    # already correct and never contends for it.
+    for b in boards:
+        freeze_argv(b['key'], b['file'], a.out)
     print(f'{len(tasks)} task(s) to run ({len(done)} already in {jsonl})')
     if a.k or a.boards or a.variants:
         print('NOTE: this is a NARROWED run. A verdict requires the whole '
