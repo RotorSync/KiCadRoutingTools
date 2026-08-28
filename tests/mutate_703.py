@@ -265,23 +265,16 @@ ROWS = [
     # this line by itself and both graders stayed green. A battery row whose
     # kill is entirely due to a sibling line is a row that covers nothing.
     ('a-NaN-TRUTH-is-reported-as-a-null-one', 'rs',
-     "        if isinstance(d, float) and d != d:
-"
-     "            dropped_nan += 1
-",
-     "        if isinstance(d, float) and d != d:
-"
-     "            dropped += 1
-",
+     "        if isinstance(d, float) and d != d:\n"
+     "            dropped_nan += 1\n",
+     "        if isinstance(d, float) and d != d:\n"
+     "            dropped += 1\n",
      (T703,), 'KILLED'),
 
     ('the-NaN-TRUTH-arm-is-deleted', 'rs',
-     "        if isinstance(d, float) and d != d:
-"
-     "            dropped_nan += 1
-"
-     "            continue
-",
+     "        if isinstance(d, float) and d != d:\n"
+     "            dropped_nan += 1\n"
+     "            continue\n",
      '',
      (T703,), 'KILLED'),
 
