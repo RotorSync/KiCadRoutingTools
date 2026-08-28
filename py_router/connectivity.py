@@ -1588,12 +1588,36 @@ def get_stub_endpoints(pcb_data: PCBData, net_ids: List[int]) -> List[Tuple[floa
 
     Returns list of (x, y, layer) tuples - includes layer for same-layer filtering.
     """
+    # C4 (#bulk-profile): fresh-per-call by-net copper index. The historical
+    # per-net list comprehensions scanned ALL segments/vias once per net_id
+    # (O(nets x all-segments)); the index is rebuilt from the LIVE lists every
+    # call and preserves exact board order within each net bucket, so the
+    # per-net lists are identical objects in identical order -> bit-for-bit
+    # identical results. Gated by KICAD_CACHE_BY_NET (default ON; '0' restores
+    # the historical full-board scan for A/B equivalence testing). The index is
+    # only built when more than one net is queried -- a single-net call (stub
+    # layer switching, single-ended loop) pays the same O(all-segments) as the
+    # historical scan, so the dict build would be pure overhead there.
+    import env_knobs as _ek
+    if _ek.CACHE_BY_NET and len(net_ids) > 1:
+        _seg_by = {}
+        for _s in pcb_data.segments:
+            _seg_by.setdefault(_s.net_id, []).append(_s)
+        _via_by = {}
+        for _v in pcb_data.vias:
+            _via_by.setdefault(_v.net_id, []).append(_v)
+    else:
+        _seg_by = _via_by = None
     stubs = []
     for net_id in net_ids:
-        net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+        if _seg_by is not None:
+            net_segments = _seg_by.get(net_id, [])
+            net_vias = _via_by.get(net_id, [])
+        else:
+            net_segments = [s for s in pcb_data.segments if s.net_id == net_id]
+            net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         if len(net_segments) < 2:
             continue
-        net_vias = [v for v in pcb_data.vias if v.net_id == net_id]
         groups = find_connected_groups(net_segments, vias=net_vias)
         if len(groups) < 2:
             continue

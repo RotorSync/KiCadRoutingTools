@@ -321,7 +321,8 @@ def _small_via_pair(config, pcb_data):
 def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteConfig,
                               extra_clearance: float = 0.0,
                               diagonal_margin: float = defaults.DIAGONAL_MARGIN,
-                              _small_pass: bool = False) -> NetObstacleData:
+                              _small_pass: bool = False,
+                              _seg_by_net=None, _via_by_net=None) -> NetObstacleData:
     """Pre-compute obstacle cells for a single net.
 
     Returns cached data that can be quickly added to obstacle maps via batch operations.
@@ -332,6 +333,11 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
         config: Routing configuration
         extra_clearance: Additional clearance (for diff pair routing)
         diagonal_margin: Extra margin for via blocking near diagonal segments
+        _seg_by_net / _via_by_net: optional fresh-per-call by-net copper index
+            ({net_id -> [seg,...]} / {net_id -> [via,...]}, board order within
+            each bucket) built once by precompute_all_net_obstacles (C4). When
+            None, the historical full-board scan is used. The index preserves
+            exact iteration order, so results are bit-for-bit identical.
 
     Returns:
         NetObstacleData with blocked_cells and blocked_vias lists
@@ -397,8 +403,14 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # (build_base_obstacle_map) already stamps foreign copper at seg.width;
     # this keeps the cache at parity. Normal tracks (seg.width == configured)
     # are unaffected - no blanket margin.
-    for seg in pcb_data.segments:
-        if seg.net_id != net_id:
+    # C4 (#bulk-profile): when precompute_all_net_obstacles supplied a
+    # fresh-per-call by-net index, iterate the net's own bucket (board order
+    # preserved) instead of scanning all segments; identical objects/order ->
+    # bit-for-bit identical results.
+    _segs_iter = (_seg_by_net.get(net_id, []) if _seg_by_net is not None
+                  else pcb_data.segments)
+    for seg in _segs_iter:
+        if _seg_by_net is None and seg.net_id != net_id:
             continue
         layer_idx = layer_map.get(seg.layer)
         if layer_idx is None:
@@ -439,8 +451,11 @@ def precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # off-grid offset (off_cells) of those vias; at grid 0.05 the same vias land
     # on-grid (off_cells=0), exposing 74 track-via grazes. Matches the non-cache
     # add_net_vias_as_obstacles, which already uses via.size.
-    for via in pcb_data.vias:
-        if via.net_id != net_id:
+    # C4: same by-net index as the segment loop (see above).
+    _vias_iter = (_via_by_net.get(net_id, []) if _via_by_net is not None
+                  else pcb_data.vias)
+    for via in _vias_iter:
+        if _via_by_net is None and via.net_id != net_id:
             continue
         vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
         # #498: the via meets each layer's copper ON that layer -> per-layer rule.
@@ -723,10 +738,29 @@ def precompute_all_net_obstacles(pcb_data: PCBData, net_ids: List[int], config: 
     Returns:
         Dict mapping net_id to NetObstacleData
     """
+    # C4 (#bulk-profile): build a fresh-per-call by-net copper index ONCE and
+    # pass it to every per-net precompute, eliminating the O(nets x all-
+    # segments) rescans (the historical loop scanned all segments/vias once
+    # per net). The index is rebuilt from the LIVE lists every call and
+    # preserves board order within each bucket, so per-net iteration order is
+    # identical -> bit-for-bit identical results. Gated by KICAD_CACHE_BY_NET
+    # (default ON; '0' restores the historical full-board scan).
+    import env_knobs as _ek
+    if _ek.CACHE_BY_NET:
+        _seg_by = {}
+        for _s in pcb_data.segments:
+            _seg_by.setdefault(_s.net_id, []).append(_s)
+        _via_by = {}
+        for _v in pcb_data.vias:
+            _via_by.setdefault(_v.net_id, []).append(_v)
+    else:
+        _seg_by = _via_by = None
     cache: Dict[int, NetObstacleData] = {}
     for net_id in net_ids:
         cache[net_id] = precompute_net_obstacles(pcb_data, net_id, config,
-                                                   extra_clearance, diagonal_margin)
+                                                   extra_clearance, diagonal_margin,
+                                                   _seg_by_net=_seg_by,
+                                                   _via_by_net=_via_by)
     return cache
 
 

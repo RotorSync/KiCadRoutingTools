@@ -64,6 +64,13 @@ def refresh() -> None:
     # --- routing behavior switches (default ON, env turns OFF) -------------
     g['SEAM_REASK'] = _on_default('KICAD_SEAM_REASK', '')          # '' not in _OFF -> on
     g['ISLAND_LAUNCH'] = _on_default('KICAD_ISLAND_LAUNCH')
+    # C4 (#bulk-profile): fresh-per-call by-net copper index for the obstacle
+    # builders (get_stub_endpoints / precompute_all / precompute_net_obstacles)
+    # and SI aggressor-fingerprint dedup. Eliminates O(nets x all-segments)
+    # rescans with zero staleness risk (the index is rebuilt from live lists
+    # every call, preserving exact iteration order -> bit-for-bit identical
+    # output). Default ON; '0' restores the historical per-net full-board scan.
+    g['CACHE_BY_NET'] = _on_default('KICAD_CACHE_BY_NET')
     g['MULTIPOINT_STUB_SWITCH'] = _on_default('KICAD_MULTIPOINT_STUB_SWITCH')
     g['HYBRID_COUPLE'] = _on_default('KICAD_HYBRID_COUPLE', '')
     g['BUS_MULTIPOINT_SPAN'] = _on_default('KICAD_BUS_MULTIPOINT_SPAN')

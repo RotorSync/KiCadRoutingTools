@@ -244,9 +244,16 @@ def _build_aggressor_geometry(pcb_data, config, classes):
     return dict(geo)
 
 
-def _get_aggressor_geometry(pcb_data, config, classes):
-    """Cached aggressor geometry keyed on the board's aggressor fingerprint."""
-    fp = _aggressor_fingerprint(pcb_data, classes)
+def _get_aggressor_geometry(pcb_data, config, classes, fp=None):
+    """Cached aggressor geometry keyed on the board's aggressor fingerprint.
+
+    fp: optional pre-computed fingerprint (C4: compute_victim_si_field computes
+    it once and threads it through, so the O(all-segments) string build happens
+    once per victim instead of once here AND once in _get_union_field). When
+    None, the historical self-compute is used.
+    """
+    if fp is None:
+        fp = _aggressor_fingerprint(pcb_data, classes)
     cache = getattr(pcb_data, '_si_aggr_geo_cache', None)
     if cache is None or cache[0] != fp:
         geo = _build_aggressor_geometry(pcb_data, config, classes)
@@ -300,16 +307,19 @@ def _accumulate_field(geo, classes, exclude_nids=None):
                           axis=1).astype(np.int32)
 
 
-def _get_union_field(pcb_data, config, classes):
+def _get_union_field(pcb_data, config, classes, fp=None):
     """Cached union field (ALL aggressors, no same-interface filter).
 
     Keyed on the aggressor fingerprint. Victims with no same-interface aggressor
     reuse this directly -- a huge win on boards with extensive aggressor copper.
+
+    fp: optional pre-computed fingerprint (C4) -- see _get_aggressor_geometry.
     """
-    fp = _aggressor_fingerprint(pcb_data, classes)
+    if fp is None:
+        fp = _aggressor_fingerprint(pcb_data, classes)
     cache = getattr(pcb_data, '_si_union_field_cache', None)
     if cache is None or cache[0] != fp:
-        geo = _get_aggressor_geometry(pcb_data, config, classes)
+        geo = _get_aggressor_geometry(pcb_data, config, classes, fp=fp)
         arr = _accumulate_field(geo, classes) if geo else np.empty((0, 4), dtype=np.int32)
         try:
             pcb_data._si_union_field_cache = (fp, arr)
@@ -340,7 +350,16 @@ def compute_victim_si_field(pcb_data,
         return np.empty((0, 4), dtype=np.int32)
 
     victim_name = info['name'] or ''
-    geo = _get_aggressor_geometry(pcb_data, config, classes)
+    # C4 (#bulk-profile): compute the aggressor fingerprint ONCE per victim and
+    # thread it through _get_aggressor_geometry / _get_union_field, so the
+    # O(all-segments) string build happens once instead of twice per victim
+    # (the historical path recomputed it inside each helper). Gated by
+    # KICAD_CACHE_BY_NET (default ON; '0' restores the historical double
+    # compute). The fingerprint is a pure function of the current board state,
+    # so results are bit-for-bit identical.
+    import env_knobs as _ek
+    _fp = (_aggressor_fingerprint(pcb_data, classes) if _ek.CACHE_BY_NET else None)
+    geo = _get_aggressor_geometry(pcb_data, config, classes, fp=_fp)
     if not geo:
         return np.empty((0, 4), dtype=np.int32)
 
@@ -354,7 +373,7 @@ def compute_victim_si_field(pcb_data,
 
     if not exclude_nids:
         # No same-interface aggressor: reuse the cached union field directly.
-        return _get_union_field(pcb_data, config, classes)
+        return _get_union_field(pcb_data, config, classes, fp=_fp)
 
     # Rare path: this victim shares an interface with an aggressor -- compute
     # its field with that aggressor excluded.
