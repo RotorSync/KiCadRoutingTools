@@ -191,7 +191,8 @@ def measure(state, edge_bands=None) -> Tuple:
     Two measured lessons live in this order. Run 4 demoted the AGGREGATE
     overlap_area below hpwl (it had vetoed a 44 mm hpwl homecoming over
     +0.73 mm^2 of courtyard kiss; run 2 measured it POSITIVELY correlated
-    with distance-to-truth, r = +0.72 -- courtyards carry their own margin
+    with distance-to-truth -- DISTANCE, not routed blocking
+    (docs/placement-predictors.md) -- r = +0.72; courtyards carry their own margin
     and human boards have a nonzero floor). Run 5 then shipped two 0402s
     STACKED because nothing above hpwl could see them: the stack-pair COUNT
     is the non-gameable per-pair channel (corpus-calibrated ZERO on all 33
@@ -1642,7 +1643,8 @@ def _body_contained(state, a: str, pos_a, b: str, pos_b) -> bool:
 
     This charges CONTAINMENT, not a kiss. Two courtyards touching is not a
     defect and is not priced here; that ordering decision (run-4, r=+0.72 of
-    courtyard overlap with distance-to-truth) is untouched, and `measure()`
+    courtyard overlap with distance-to-truth, never with routed blocking) is
+    untouched, and `measure()`
     still carries `overlap` as its last tiebreak below hpwl.
 
     A part whose footprint draws no `.Fab` outline is UNJUDGED: this returns

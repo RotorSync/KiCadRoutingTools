@@ -199,7 +199,8 @@ def main():
               'courtyard/body kisses are being charged -- run-4 regression')
 
     print('the containment fix did NOT re-promote courtyard in the gate')
-    # run-4 measured courtyard overlap at r=+0.72 with distance-to-truth and
+    # run-4 measured courtyard overlap at r=+0.72 with distance-to-truth (not
+    # with routed blocking -- docs/placement-predictors.md) and
     # demoted it below hpwl deliberately. Containment is a hard predicate,
     # not a gate term, so the tuple must be untouched.
     check('the gate tuple is still 7 terms ending hpwl, overlap',

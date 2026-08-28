@@ -69,7 +69,9 @@ a clean-looking report.
 > `hpwl_after <= hpwl_before` AND PAD-PAD conflicts did not rise AND the
 > assembly channel's blocking pairs did not rise, or the result is
 > discarded. `crossings` is REPORTED, never gated: it correlates POSITIVELY
-> with distance-to-truth (r = +0.78), so a verifier failing a placement on
+> with distance-to-truth (r = +0.78 -- that is DISTANCE, not routed
+> `blocking`; no predictor here has been correlated with `blocking`, see
+> `docs/placement-predictors.md`), so a verifier failing a placement on
 > it rejects exactly the correct homecomings. Then intersect `moved[].reference` with the advisor's
 > high-confidence findings and with `locked_refs`: any overlap is a FAIL.
 > **Do not judge by how much moved** — "lots moved, looks broken" and "barely

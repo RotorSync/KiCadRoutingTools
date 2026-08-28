@@ -972,7 +972,9 @@ def pair_channel_widths(pcb_data, *, clearance: float,
     in the channel -- the run-2 corridor law's inputs, measured instead of
     declared (Corridor.width_mm has only ever been an intent input).
 
-    The corridor is for the PARTS (measured, r=+0.41..+0.90 on 8/8 boards):
+    The corridor is for the PARTS (measured against THE GAP A HUMAN LEFT,
+    r=+0.41..+0.90 on 8/8 boards -- never against routed `blocking`, which no
+    predictor here has been correlated with; see docs/placement-predictors.md):
     each row reports the gap and the small parts whose bodies sit inside
     the channel rectangle between the two anchors."""
     from placement.legality import graded_parts_from_file, rect_gap
