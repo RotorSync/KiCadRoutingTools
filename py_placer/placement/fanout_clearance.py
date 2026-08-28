@@ -2501,7 +2501,7 @@ class _Repair:
                 the cap's seed pose against post-nudge via positions
                 (#779). Measured on orangecrab_ext_pll at the one in-repo
                 configuration that relocates barrels: 43 of 65 caps held a
-                relocated barrel and 6 produced a different seed-half
+                relocated barrel and 7 produced a different seed-half
                 number -- discarded only because that board declares no
                 floor, so best() emitted nothing.
 
@@ -2646,6 +2646,24 @@ class _Repair:
 
         Costs nothing on a run that moved nothing: the map is empty, the
         comprehension is skipped, and every lookup would have missed.
+
+        WHAT THIS DOES **NOT** FIX, stated because the swap looks more
+        complete than it is. Only the COORDINATES are seed-era; the
+        MEMBERSHIP of cap_vias[ref] is still a post-nudge view, because
+        refresh_cap_vias re-prunes at CURRENT positions. A barrel inside
+        the cap's reach at the seed that moved OUT of it is gone from the
+        list, and no coordinate swap can bring back an entry that is not
+        there. #775's `the prune is EXACT` bound does not cover this
+        caller: it was derived for the pose the list was pruned at.
+
+        Measured on orangecrab_ext_pll at the relocating configuration:
+        it HAPPENS, once -- C59's net-19 barrel, seed gap 3.7469 against a
+        4.0326 threshold, landing gap 4.2060 -- and it costs nothing,
+        because that pair charges 0.0000 at the seed pose anyway. The
+        margin is max_displacement_cap (3.0mm shipped) against a sub-mm
+        nudge, and it is USER-SHRINKABLE: --max-displacement-cap, and a
+        GUI spin whose minimum is 0.0. So this is a bound worth knowing
+        rather than a defect that has fired.
         """
         by_net: Dict[int, float] = {}
         vias = self.cap_vias[ref]
@@ -2653,7 +2671,8 @@ class _Repair:
         # tuple as every other caller does
         at = None
         if seed_pos and self._via_seed_xy:
-            at = [self._via_seed_xy.get(id(t), (t, t[0], t[1]))[1:]
+            _sx = self._via_seed_xy
+            at = [_sx[id(t)][1:] if id(t) in _sx else (t[0], t[1])
                   for t in vias]
         effs = self._via_effs(ref, cap, vias)
         if effs is None:

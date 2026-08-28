@@ -92,8 +92,8 @@ from kicad_parser import parse_kicad_pcb  # noqa: E402
 from placement import fanout_clearance as FC  # noqa: E402
 from placement.fanout_clearance import _Repair  # noqa: E402
 from test_736_fanout_clearance_regrade_view import (  # noqa: E402
-    CAP_XY, CLEAR, DECL_CLASS, DECL_LC, VIA_CLEAR, V_DRILL, V_SIZE,
-    _board, _stub)
+    CAP_XY, CLEAR, DECL_CLASS, DECL_LC, VIA_CLEAR, VIA_DEEP, V_DRILL,
+    V_SIZE, _board, _stub)
 
 BOARD = os.path.join(_ROOT, 'kicad_files', 'orangecrab_ext_pll.kicad_pcb')
 # the one tracked configuration that relocates barrels
@@ -123,31 +123,63 @@ class TestTheSeedPositionsAreRecorded(unittest.TestCase):
                          'the real-board rig stopped relocating barrels, so '
                          'every arm in this file is vacuous')
 
-    def test_one_entry_per_move(self):
-        self.assertEqual(len(self.st._via_seed_xy), N_MOVES)
+    def test_one_entry_per_TUPLE_REPLACED(self):
+        """Not per move HANDED IN, and relocate_vias' own docstring
+        draws the distinction: its return counts tuples replaced, and a
+        move can match nothing (several test files inject a via after
+        construction) or -- in principle -- two coincident same-net
+        tuples. They coincide on this board; asserting the engine's own
+        count rather than the move list is what keeps that an assumption
+        the arm states instead of one it hides.
+        """
+        self.assertEqual(len(self.st._via_seed_xy), N_MOVES,
+                         'entries != moves on this board, so the 1:1 '
+                         'assumption below has broken')
 
     def test_each_entry_holds_its_tuple(self):
-        """A bare id can be recycled by the very next tuple the builder makes,
-        and the entry would then describe someone else's barrel -- the hazard
-        the radius map's own note already records."""
-        live = {id(t) for t in self.st.vias}
+        """A bare id can be recycled by the very next tuple the builder
+        makes, and the entry would then describe someone else's barrel --
+        the hazard the radius map's own note already records.
+
+        DELIBERATELY NOT asserting that every key is still live. A barrel
+        relocated TWICE leaves the intermediate entry behind on purpose,
+        exactly as _via_radius_by_id does -- 'a fact about a nudged board
+        rather than a leak', in that map's own words. An earlier draft of
+        this arm required liveness and would have failed the engine for
+        behaving correctly the first time a board double-hopped; it passed
+        only because orangecrab happens not to.
+        """
         for key, rec in self.st._via_seed_xy.items():
             self.assertEqual(len(rec), 3)
             self.assertEqual(id(rec[0]), key,
                              'the entry does not hold the tuple it is keyed '
                              'on, so its id can be recycled')
-            self.assertIn(key, live,
-                          'the entry describes a tuple that is no longer on '
-                          'the board')
     # MUTATION: store (sx, sy) without the tuple.
 
     def test_the_recorded_position_is_where_the_barrel_WAS(self):
+        """A SUBSET, not an equality. Under a two-hop the second
+        entry's seed is the ORIGINAL, so the first hop's `old` never
+        appears as a recorded position -- correct behaviour that an
+        equality would report as 'the map holds landing positions', which
+        is backwards. Equality holds on this board and the arm below says
+        so separately, so nothing is lost by stating the weaker relation
+        that is actually invariant.
+        """
         st, moved = self.st, self.res['via_moves']
         olds = {(round(ox, 6), round(oy, 6)) for ox, oy, _s in moved}
+        lands = {(round(s['x'], 6), round(s['y'], 6))
+                 for _ox, _oy, s in moved}
         got = {(round(r[1], 6), round(r[2], 6))
                for r in st._via_seed_xy.values()}
+        self.assertTrue(got <= olds,
+                        'the map holds a position no move started from: '
+                        '%s' % sorted(got - olds))
+        self.assertFalse(got & (lands - olds),
+                         'the map holds a LANDING position: %s'
+                         % sorted(got & (lands - olds)))
         self.assertEqual(got, olds,
-                         'the map holds landing positions, not seed ones')
+                         'no barrel double-hopped on this board, so the '
+                         'subset above should be an equality here')
 
 
 class TestTheSeedHalfUsesThem(unittest.TestCase):
@@ -238,6 +270,62 @@ class TestTheDisclosureOnADeclaringBoard(unittest.TestCase):
             self.assertEqual(st.required_rows(), [])
 
 
+class TestTheDisclosureCHANGESEndToEnd(unittest.TestCase):
+    """THE BEHAVIOURAL ARM, and the one this file shipped without.
+
+    The first draft asserted the wiring with a source grep -- `assertIn(
+    "both(self._via_shortfalls, {'seed_pos': True})", src)` -- and its
+    header claimed no end-to-end arm was available, because the tracked
+    board discloses nothing and the declaring rig relocates nothing. An
+    adversarial review showed that was false: the two halves compose. Take
+    the DECLARING rig, relocate its barrel by hand exactly as the double-hop
+    arm below already does, and `required_rows` itself moves.
+
+    THE SHIFT IS LOAD-BEARING and was measured rather than picked. At 0.60mm
+    the barrel still grazes C1 at its LANDING, so the pre-fix grading reports
+    the same row and the arm cannot discriminate. At 1.00mm it clears the
+    landing but not the seed, which is exactly the case #779 is about: the
+    seed-era graze is real and the post-nudge view cannot see it.
+    """
+
+    SHIFT = 1.0
+
+    def _rows(self, clear_map):
+        with _stub(DECL_CLASS) as path:
+            pcb, _v = _board(VIA_DEEP, 'F.Cu', second_cap=True, lc=DECL_LC)
+            st = _Repair(pcb, path, CLEAR, 0.1, 0.55, 1.0, 2.0, 0.3, 'C',
+                         set())
+            t = st.vias[0]
+            st.relocate_vias([(t[0], t[1], {'net_id': t[2],
+                                            'x': t[0] + self.SHIFT,
+                                            'y': t[1]})])
+            st.refresh_cap_vias()
+            if clear_map:
+                # a faithful simulation of the pre-#779 engine: without the
+                # map the swap is skipped and the seed half grades the
+                # post-nudge coordinates, which is precisely the old code
+                st._via_seed_xy.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                return st.required_rows()
+
+    def test_the_seed_era_graze_is_DISCLOSED(self):
+        rows = self._rows(clear_map=False)
+        self.assertTrue(any(str(r[1]).startswith('via') for r in rows),
+                        'required_rows reports no via row for a barrel that '
+                        'grazed at the seed: %r' % (rows,))
+
+    def test_and_the_PRE_FIX_grading_would_have_missed_it(self):
+        """The control. Without it the arm above passes on a rig where
+        the row would have appeared anyway, and proves nothing."""
+        self.assertEqual(
+            [r for r in self._rows(clear_map=True)
+             if str(r[1]).startswith('via')], [],
+            'the pre-fix grading reports the via row too, so this rig does '
+            'not discriminate and the arm above is not a measurement')
+    # MUTATION: revert the via kind to `both(self._via_shortfalls)`; drop
+    # either coordinate swap; record the landing instead of the seed.
+
+
 class TestASecondRelocationKeepsTheORIGINALSeed(unittest.TestCase):
     """`relocate_vias` can move one barrel twice in a call -- its own docstring
     says so -- and the second hop must not overwrite the seed with the first
@@ -265,8 +353,14 @@ class TestASecondRelocationKeepsTheORIGINALSeed(unittest.TestCase):
 
 
 class TestInertWhereNothingMoved(unittest.TestCase):
-    """A run that relocates nothing must be byte-identical: the map is empty,
-    so `seed_pos=True` and the old behaviour agree by construction."""
+    """A run that relocates nothing is byte-identical: the map is
+    empty, so `seed_pos=True` and the old behaviour agree by
+    construction.
+
+    DOCUMENTATION, NOT DETECTION, and labelled so rather than left to look
+    like a guard. With an empty map both calls take the identical branch,
+    so no mutation in the battery can flip this arm -- it records the
+    inertness claim the commit message makes, and nothing more."""
 
     def test_no_map_means_no_difference(self):
         with _stub() as path:

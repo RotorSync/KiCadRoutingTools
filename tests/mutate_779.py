@@ -71,7 +71,8 @@ T725 = os.path.join(_TESTS, 'test_725_fanout_clearance_pad_floors.py')
 
 _RESOLVE = ("        at = None\n"
             "        if seed_pos and self._via_seed_xy:\n"
-            "            at = [self._via_seed_xy.get(id(t), (t, t[0], t[1]))[1:]\n"
+            "            _sx = self._via_seed_xy\n"
+            "            at = [_sx[id(t)][1:] if id(t) in _sx else (t[0], t[1])\n"
             "                  for t in vias]\n")
 _RECORD = ("                    _sd = self._via_seed_xy.get(id(t))\n"
            "                    self._via_seed_xy[id(moved)] = (\n"
@@ -150,9 +151,9 @@ ROWS = [
      (T779,), 'SURVIVED'),
 
     ('the-resolve-uses-a-generator-not-a-list', 'fc',
-     "            at = [self._via_seed_xy.get(id(t), (t, t[0], t[1]))[1:]\n"
+     "            at = [_sx[id(t)][1:] if id(t) in _sx else (t[0], t[1])\n"
      "                  for t in vias]\n",
-     "            at = list(self._via_seed_xy.get(id(t), (t, t[0], t[1]))[1:]\n"
+     "            at = list(_sx[id(t)][1:] if id(t) in _sx else (t[0], t[1])\n"
      "                      for t in vias)\n",
      (T779,), 'SURVIVED'),
 ]
