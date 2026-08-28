@@ -278,6 +278,17 @@ ROWS = [
      '',
      (T703,), 'KILLED'),
 
+    # ---- the floor a shuffle control forced --------------------------------
+    ('the-min-boards-floor-is-removed', 'rs',
+     "    passes = (n_boards >= MIN_SIGN_BOARDS\n",
+     "    passes = (n_boards >= 1\n",
+     (T703,), 'KILLED'),
+
+    ('the-min-boards-floor-drops-to-two', 'rs',
+     "MIN_SIGN_BOARDS = 3\n",
+     "MIN_SIGN_BOARDS = 2\n",
+     (T703,), 'KILLED'),
+
     # ---- INERT PROBES, which must change nothing ---------------------------
     # A battery with no expected survivors cannot distinguish "my tests are
     # thorough" from "my tests fail on any edit at all". These two are real

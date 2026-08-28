@@ -87,6 +87,12 @@ MIN_N = 3
 #: A leave-one-out span needs each subset to still clear MIN_N.
 MIN_N_FOR_LOO = MIN_N + 1
 
+#: Boards required before `sign_test` will report `passes_sign_rule`. Same
+#: value and same reason as `test_placement_ab.MIN_TRIAL_BOARDS`: a term on
+#: trial is judged on at least three DISTINCT boards. See `sign_test` for the
+#: shuffle-control measurement that forced it.
+MIN_SIGN_BOARDS = 3
+
 
 class StatsRefusal(ValueError):
     """A named refusal, raised where a bare TypeError would read as a crash.
@@ -458,7 +464,19 @@ def sign_test(rhos_by_board: Mapping[str, BoardRho]) -> Dict:
     # house rule is a change to the acceptance bar, and this repo's own
     # doctrine is that a bar moves on a measurement, not on a docstring.
     # `--shuffle-control` is what measures whether this bar is honest.
-    passes = (n_boards >= 1
+    #
+    # AND >= MIN_SIGN_BOARDS, which a shuffle control forced. With
+    # `n_boards >= 1` the rule is `consistent >= max(1, 0) == 1`, so a
+    # predictor defined on ONE board passes whatever that board says.
+    # Measured on the #703 study: permuting the truth WITHIN each board 200
+    # times, `cross_side_stacks` -- constant on three of four boards, so
+    # defined on one -- passed this rule in 100% of the shuffles. Every
+    # predictor defined on all four passed in 13-17%. A rule that a
+    # signal-free predictor clears every single time is not a rule.
+    #
+    # Three is `test_placement_ab.MIN_TRIAL_BOARDS`, for the same reason it is
+    # three there: a term on trial is judged on at least three DISTINCT boards.
+    passes = (n_boards >= MIN_SIGN_BOARDS
               and consistent >= max(1, n_boards - 1)
               and min(len(pos), len(neg)) == 0)
     med = NAN
@@ -479,6 +497,7 @@ def sign_test(rhos_by_board: Mapping[str, BoardRho]) -> Dict:
         'p_one_sided': None if one_sided != one_sided else round(one_sided, 4),
         'p_denominator': n_dir,
         'passes_sign_rule': passes,
+        'below_min_boards': n_boards < MIN_SIGN_BOARDS,
         'coin_flip_null': (None if not n_boards
                            else f'1 in {2 ** n_boards}'),
     }
@@ -500,6 +519,12 @@ def format_sign_test(name: str, st: Mapping) -> List[str]:
             f'    p(two-sided) = {st["p_two_sided"]}  '
             f'[one-sided {st["p_one_sided"]}]  over n = {st["p_denominator"]} '
             f'board(s) that pointed a direction -- NOT over the planned count')
+    if st.get('below_min_boards'):
+        lines.append(
+            f'    NO VERDICT: {st["boards_defined"]} board(s) produced a '
+            f'defined rho and the rule needs {MIN_SIGN_BOARDS}. A predictor '
+            f'defined on one board passes a >= N-1 rule whatever that board '
+            f'says -- measured at 100% under a within-board shuffle.')
     lines.append(f'    median rho {fmt(st["median_rho"])}   '
                  f'sign rule (>= N-1 one way, 0 the other): '
                  f'{"PASSES" if st["passes_sign_rule"] else "fails"}   '
@@ -735,6 +760,25 @@ def _self_test(force: bool = False) -> int:
     br = board_rho(rows, 'x', 'headline')
     ok(br.n == 3 and 'dropped' in (br.reason or ''), 12,
        f'a null predictor must be dropped and NAMED: n={br.n} {br.reason!r}')
+
+    # 12b. the MIN_SIGN_BOARDS floor, which a shuffle control forced
+    for nb in (1, 2):
+        st = sign_test({f'b{i}': BoardRho(0.9, 20) for i in range(nb)})
+        ok(not st['passes_sign_rule'], 12,
+           f'{nb} board(s) all agreeing must NOT pass: a >= N-1 rule is '
+           f'vacuous at N<{MIN_SIGN_BOARDS} (measured: 100% under shuffle)')
+        ok(st['below_min_boards'], 12,
+           f'and the result SAYS it is below the floor, at N={nb}')
+        ok(any('NO VERDICT' in ln for ln in format_sign_test('x', st)), 12,
+           'and the printed form leads with NO VERDICT')
+    st = sign_test({f'b{i}': BoardRho(0.9, 20) for i in range(3)})
+    ok(st['passes_sign_rule'] and not st['below_min_boards'], 12,
+       'three agreeing boards is the floor, and it passes')
+    # A board with an UNDEFINED rho does not count toward the floor.
+    st = sign_test({'a': BoardRho(0.9, 20), 'b': BoardRho(0.9, 20),
+                    'c': BoardRho(NAN, 20, 'predictor constant')})
+    ok(not st['passes_sign_rule'] and st['below_min_boards'], 12,
+       'a NaN board does not help reach the floor -- 2 defined of 3 attempted')
 
     # 13. the renderings the review found uncovered
     ok(fmt(None).strip() == 'none', 13,

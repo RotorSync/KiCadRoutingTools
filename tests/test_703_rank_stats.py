@@ -402,6 +402,27 @@ def t_sign_test_arithmetic():
     st = rs.sign_test(brs([0.5, 0.0, 0.0]))
     check(not st['passes_sign_rule'],
           'TWO neutral boards of three fall below N-1 and fail')
+    # MIN_SIGN_BOARDS. Forced by a shuffle control on the real #703 rows:
+    # `cross_side_stacks` is constant on three of four boards, so it is defined
+    # on ONE -- and with a `>= max(1, N-1)` rule it passed 100% of 200
+    # within-board shuffles. A rule a signal-free predictor always clears is
+    # not a rule.
+    for nb in (1, 2):
+        st = rs.sign_test(brs([0.9] * nb))
+        check(not st['passes_sign_rule'],
+              f'{nb} agreeing board(s) do NOT pass -- the rule is vacuous '
+              f'below {rs.MIN_SIGN_BOARDS}')
+        check(st['below_min_boards'],
+              f'and the result flags below_min_boards at N={nb}')
+        check(any('NO VERDICT' in ln for ln in rs.format_sign_test('x', st)),
+              f'and the printed form says NO VERDICT at N={nb}')
+    st = rs.sign_test(brs([0.9, 0.9, 0.9]))
+    check(st['passes_sign_rule'] and not st['below_min_boards'],
+          'three agreeing boards is the floor and passes')
+    st = rs.sign_test({'a': rs.BoardRho(0.9, 20), 'b': rs.BoardRho(0.9, 20),
+                       'c': rs.BoardRho(rs.NAN, 20, 'predictor constant')})
+    check(not st['passes_sign_rule'] and st['below_min_boards'],
+          'a NaN board does not count toward the floor (2 defined of 3)')
     check(rs.sign_test({})['boards_defined'] == 0, 'an empty mapping is legal')
 
 
