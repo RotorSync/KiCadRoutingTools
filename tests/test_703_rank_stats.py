@@ -24,6 +24,41 @@ of the `--fast` loop, where a broken kernel should be caught in a second rather
 than fifteen minutes later.
 
     python3 -X utf8 tests/test_703_rank_stats.py
+
+WHAT THE BATTERY MEASURED (`python3 tests/mutate_703.py`, 18 rows against
+`tests/stress/rank_stats.py`). The count is how many of THIS file's checks the
+mutation trips; every row was also caught by the kernel's own `_self_test`.
+
+    nan-becomes-zero                             KILLED   3
+    constant-side-becomes-zero                   KILLED   3
+    uncorrected-d2-formula                       KILLED   5
+    ties-get-sequential-ranks                    KILLED   7
+    tie-detection-grows-a-tolerance              KILLED   2
+    min-n-lowered-to-two                         KILLED   4
+    sign-test-accepts-a-sequence                 KILLED   3
+    per-board-buckets-a-missing-key              KILLED   2
+    nan-boards-join-the-denominator              KILLED   4
+    saturated-is-reported-as-measurable          KILLED   3
+    a-constant-truth-is-not-named-as-saturation  KILLED   2
+    the-rule-tolerates-one-wrong-board           KILLED   2
+    fmt-rho-drops-the-LOO-span                   KILLED   3
+    fmt-renders-NaN-as-zero                      KILLED   2
+    rank-accepts-a-None                          KILLED   2
+    board-rho-coerces-a-null-to-zero             KILLED   4
+    a-comment-names-the-dependent-variable       SURVIVED 0   (expected: inert)
+    fmt-default-width-widens                     SURVIVED 0   (expected: inert)
+
+    18 rows: 16 killed, 2 survived (2 of them expected), 0 broken
+
+READ THE COUNT COLUMN, NOT THE VERDICT COLUMN. The FIRST run of this battery
+also said "16 killed, 2 survived, 0 broken" -- and every one of those kills was
+`t_self_test` raising. It ran first, its AssertionError escaped, the file
+aborted, and none of the checks below it ever executed. The verdicts were
+identical and the coverage was zero. What changed is the attribution: the
+self-test now runs LAST and catches, so a non-zero count in the column above is
+this file's own checks firing. `tie-detection-grows-a-tolerance` at 2 and
+`per-board-buckets-a-missing-key` at 2 are the thinnest rows here, and that is
+worth knowing about them.
 """
 import inspect
 import math
