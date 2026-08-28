@@ -9,8 +9,15 @@ inert. So the edits live here, as data, next to the numbers they produced.
 
 Every row carries an EXPECTATION. Some mutations are deliberately inert, and an
 inert row recorded as an expected survivor is a finding, while an inert row
-quietly deleted is a hole. `writeback-spends-the-flag-not-the-priced-value` is
-the one here, and its reasoning is written beside it.
+quietly deleted is a hole.
+
+THERE IS NO EXPECTED SURVIVOR IN THIS TABLE TODAY, and saying so is the
+point of the paragraph. It named `writeback-spends-the-flag-not-the-priced-
+value` -- a row that is not in ROWS and was already absent at the #768
+branch tip that shipped this prose. So the file described a hole it did not
+have, which is the same failure as an inert row deleted, one level up:
+prose about the table rotting instead of the table. If a row here ever does
+go inert, record it as SURVIVED with its reason and name it here again.
 
 SEVEN targets, four more than any previous copy: the change spans the model
 (`legality.py`), the engine (`fanout_clearance.py`), the CLI main
@@ -79,6 +86,11 @@ T768 = os.path.join(_TESTS, 'test_768_cap_clearance_ceiling.py')
 TDLG = os.path.join(_TESTS, 'gui_parity',
                     'test_768_cap_ceiling_real_dialog.py')
 T697 = os.path.join(_TESTS, 'test_697_placement_pad_clearance.py')
+# #780: the only gate that drives an optimize_caps step END TO END, from
+# the plan through the real dialog to the engine kwargs. It is what still
+# kills the standalone row once the two source greps are made specific.
+T772 = os.path.join(_TESTS, 'gui_parity',
+                   'test_772_cap_params_reach_engine.py')
 T725 = os.path.join(_TESTS, 'test_725_fanout_clearance_pad_floors.py')
 
 # The disclosure block, quoted once because three rows touch it.
@@ -96,8 +108,15 @@ _HOLE_KW = "                hole_clearance=_hc,\n"
 _GUI_CEILING = ("                netclass_ceiling="
                 "fanout_config.get('clearance_ceiling'),\n")
 
-_PLAN_UNTICK = """            if step["action"] == "optimize_caps" and not (
-                    step.get("params") or {}).get("clearance"):
+# RE-ANCHORED (#780). The predicate grew a second shape -- a FANOUT step
+# that switches the inline cap pass on runs the same pass -- so the old
+# five-line quote matched ZERO times and the row reported BROKEN. Quote
+# the guard as it now stands; deleting it is still the mutation.
+_PLAN_UNTICK = """            _p = step.get("params") or {}
+            _runs_caps = (step["action"] == "optimize_caps"
+                          or (step["action"] == "fanout"
+                              and _p.get("optimize_caps")))
+            if _runs_caps and not _p.get("clearance"):
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 if _cc is not None and _cc.GetValue():
                     _cc.SetValue(False)
@@ -244,10 +263,28 @@ ROWS = [
      "netclass_ceiling=fanout_config.get('clearance_ceiling'),",
      "netclass_ceiling=fanout_config.get('clearance'),",
      (TDLG,), 'KILLED'),
+    # RE-ANCHORED AND RE-GRADED (#780). The inline cap config gained the
+    # same pair of lines at a DEEPER indent, and 12 spaces + the text is a
+    # substring of 16 spaces + the text -- so the bare line matched TWICE
+    # and the runner reported BROKEN. Anchor on the standalone pair's
+    # NEIGHBOUR instead, which the inline copy separates with a comment.
+    #
+    # T768 and TDLG were also both VACUOUS against this row until #780:
+    # T768's arm stripped the indentation, so the inline copy satisfied it,
+    # and TDLG's standalone section assembled its own cfg rather than
+    # driving run_cap_optimization. Both are fixed in the same commit
+    # range; T772 is added because it drives the step end to end.
     ('gui-standalone-cfg-drops-the-key', 'gui',
-     "            'clearance_ceiling': shared.get('clearance_ceiling'),\n",
+     "            'clearance_ceiling': shared.get('clearance_ceiling'),\n"
+     "            'fix_drc_settings': shared.get('fix_drc_settings', True),\n",
+     "            'fix_drc_settings': shared.get('fix_drc_settings', True),\n",
+     (T768, TDLG, T772), 'KILLED'),
+    # #780's own half of the same defect, on the INLINE dict. Its only
+    # behavioural killer is TDLG's section 2, which drives _run_bga_fanout.
+    ('gui-inline-cfg-drops-the-key', 'gui',
+     "                'clearance_ceiling': shared.get('clearance_ceiling'),\n",
      '',
-     (T768, TDLG), 'KILLED'),
+     (TDLG,), 'KILLED'),
     ('fanout-tab-exports-the-RESOLVED-clearance-as-the-ceiling', 'swig',
      "                'clearance_ceiling': (self.clearance.GetValue()",
      "                'clearance_ceiling': (self._effective_clearance()",

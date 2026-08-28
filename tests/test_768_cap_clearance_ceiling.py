@@ -76,9 +76,19 @@ Conventions (from #725/#731/#732/#733/#737/#750/#756 and CLAUDE.md): REAL parser
 dataclasses; every assertion names the single-line MUTATION that must kill it,
 with the count the battery measured; assert you are ON the branch before
 asserting about it; every refusal paired with an acceptance that still happens.
-The battery ships as `tests/mutate_768.py`. Measured, 28 rows:
+The battery ships as `tests/mutate_768.py`. Measured, 31 rows:
 
-    27 KILLED, 1 SURVIVED (expected), 0 BROKEN
+    31 KILLED, 0 SURVIVED, 0 BROKEN
+
+RE-MEASURED AT #780, AND THE PREVIOUS NUMBER WAS ALREADY WRONG. It said
+28 rows / 27 KILLED / 1 expected SURVIVOR; the branch that shipped it had
+30 rows and no survivor -- the row it named
+(`writeback-spends-the-flag-not-the-priced-value`) is not in ROWS and was
+not in ROWS then either. #780 adds one row, takes the total to 31, and
+re-derives the whole line from a run rather than editing the old one to
+agree. Two rows in that run reported BROKEN before being re-anchored, both
+because #780 moved text a row quoted; a BROKEN row exits the battery
+non-zero, which is how they were found rather than assumed.
 
 Seven of those rows exist because a CLI/GUI parity review found the GUI gate
 reading the WRONG control (`fix_drc_settings`, a box that clamps no net class at
@@ -985,11 +995,39 @@ class TestTheGUICarriesTheSameSwitch(unittest.TestCase):
         rather than passing them through, so a key it does not list reads as
         its `.get` default however correct the gate is. That is how the first
         cut of this change was inert on the plan-executor path while looking
-        right inline -- the #693 shape the parity ledger records."""
+        right inline -- the #693 shape the parity ledger records.
+
+        THE INDENT IS PART OF THE ASSERTION (#780). This arm used to strip
+        it, and when the INLINE config gained the same two lines one block
+        deeper, the inline copy satisfied an arm named for the standalone
+        path -- deleting the standalone pair outright left it green. A
+        source grep that cannot tell two call sites apart is not a guard on
+        either of them.
+        """
         src = self._src(self.GUI)
-        for key in ("'clamp_netclasses': shared.get('clamp_netclasses', False),",
-                    "'clearance_ceiling': shared.get('clearance_ceiling'),"):
-            self.assertIn(key, src)
+        for key in ("\n            'clamp_netclasses': "
+                    "shared.get('clamp_netclasses', False),",
+                    "\n            'clearance_ceiling': "
+                    "shared.get('clearance_ceiling'),"):
+            self.assertIn(key, src,
+                          'the STANDALONE cfg (run_cap_optimization, one '
+                          'indent shallower than the inline one) must '
+                          'carry it')
+
+    def test_the_inline_path_carries_it_too(self):
+        """#780: `_run_bga_fanout` builds its own dict as well, and did not.
+
+        Named separately from the arm above rather than folded into it,
+        because one assertion covering two call sites is what let the
+        standalone one go dark. Neither of these can see a WRONG value --
+        that is the real-dialog gate's job, and both call sites are driven
+        there now."""
+        src = self._src(self.GUI)
+        self.assertIn("\n                'clearance_ceiling': "
+                      "shared.get('clearance_ceiling'),", src,
+                      'the INLINE cap config must carry the ceiling; '
+                      'without it the checkbox path runs the OMITTED '
+                      'branch whatever the operator ticked')
 
     def test_the_real_dialog_gate_exists_and_is_registered(self):
         """A behavioural claim this file cannot make must be made SOMEWHERE."""

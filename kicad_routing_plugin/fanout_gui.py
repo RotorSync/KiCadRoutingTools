@@ -1717,6 +1717,31 @@ class FanoutTab(wx.Panel):
                 # Advanced cap-placement knobs (#130) so the inline checkbox
                 # path honours them too, not just defaults.
                 **{k: v for k, v in config.items() if k.startswith('cap_')},
+                # #780: ...and the #768 netclass CEILING, which is NOT a
+                # cap_* key and so is not swept up by the line above.
+                # _optimize_decoupling_caps reads `clearance_ceiling` off
+                # THIS dict, and the standalone path
+                # (run_cap_optimization) has always supplied it from
+                # `shared` -- this one did not, so the INLINE cap pass ran
+                # #768's OMITTED branch whatever the operator typed and
+                # ticked. Measured on the real headless dialog before this
+                # existed: Min Clearance override CHECKED at 0.2 ->
+                # get_shared_params carried clearance_ceiling=0.2 and the
+                # engine still received netclass_ceiling=None.
+                #
+                # `clamp_netclasses` rides along for parity with the
+                # standalone dict, which has carried it since #768.
+                # NOTHING ON THIS TAB READS IT -- grepped: the signal,
+                # differential and planes tabs each consume their own copy
+                # as `clamp_nondefault_netclasses`, and this tab has no
+                # such writeback (#782). It is carried rather than dropped
+                # because it is precisely the argument that writeback will
+                # need, and because the two values coming from different
+                # places is how they came apart here in the first place --
+                # but it is inert today, and an earlier draft of this
+                # comment implied otherwise.
+                'clamp_netclasses': shared.get('clamp_netclasses', False),
+                'clearance_ceiling': shared.get('clearance_ceiling'),
                 # Shared "Add teardrops" checkbox (#489 section 9).
                 'add_teardrops': shared.get('add_teardrops', False),
                 # #693: shared "Fix DRC settings after routing" checkbox --
@@ -2057,6 +2082,19 @@ class FanoutTab(wx.Panel):
                 # there, the GUI priced every pair at the ceiling and clamped no
                 # class at all -- pricing on the GIVEN branch and writing back
                 # on the OMITTED one, which is #768 pointing the other way.
+                #
+                # AND HALF OF THAT SURVIVES THE CORRECT GATE (#782), stated
+                # here because the paragraph above reads as though choosing
+                # the right switch fixed it. It fixed WHICH runs are priced
+                # at the ceiling; it did not add the writeback. With the
+                # override ticked this tab still prices non-Default classes
+                # at min(class, ceiling) and lowers none of them --
+                # update_live_drc_floors writes the DEFAULT class only, and
+                # this tab never calls fix_project_for_output the way the
+                # signal, differential and planes tabs do. A plan run is
+                # covered by ai_plan's end-of-run writeback; both
+                # INTERACTIVE paths are not. On a single-class board -- most
+                # boards -- there is nothing to clamp and no difference.
                 #
                 # Default False, not True: an absent key means the operator
                 # never ticked the override, and the safe reading of that is
