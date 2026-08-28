@@ -170,9 +170,28 @@ def t_formatter_cannot_emit_a_bare_rho():
           f'fmt_rho(NaN) says WHY, not +0.000: {s!r}')
     check(rs.fmt(rs.NAN).strip() == 'n/a', 'fmt(NaN) renders n/a')
     check(rs.fmt(0.0).strip() == '+0.000', 'fmt(0.0) still renders a real zero')
-    # There must be no way to get a value-only rendering out of the module.
-    src = inspect.getsource(rs.fmt_rho)
-    check('LOO' in src, 'fmt_rho itself is what carries the span')
+    check(rs.fmt(None).strip() == 'none',
+          f'fmt(None) is a THIRD rendering, distinct from n/a and from a '
+          f'number: {rs.fmt(None)!r}')
+    # Called with no span, fmt_rho must SAY there is no span rather than print
+    # a token that looks complete. The earlier 'LOO n/a' read like a measured
+    # absence; 'not computed' reads like what it is.
+    check('LOO not computed' in rs.fmt_rho(0.5),
+          f'fmt_rho with no span says so: {rs.fmt_rho(0.5)!r}')
+    check(repr(rs.BoardRho(0.5, 4, None, 0.4, 0.6)).startswith('rho=+0.500 ['),
+          'BoardRho.__repr__ delegates to fmt_rho rather than printing a float')
+    # The claim is about HUMAN-facing renderings, and this asserts the scope of
+    # that claim rather than a stronger one that is false: `fmt` is a general
+    # number formatter and `as_dict()['rho']` is deliberately a bare float so a
+    # machine can read it. An earlier draft claimed the module could not emit a
+    # bare rho at all, which an adversarial review falsified with `rs.fmt(rho)`.
+    d = rs.board_rho([{'board_key': 'b', 'predictors': {'x': i},
+                       'truth': {'headline': i * i}} for i in range(4)],
+                     'x', 'headline').as_dict()
+    check(isinstance(d['rho'], float),
+          'as_dict.rho is a bare float ON PURPOSE, for machine reading')
+    check(d['display'].startswith('rho=') and 'LOO' in d['display'],
+          f'and as_dict.display is what a document quotes: {d["display"]!r}')
 
 
 def t_named_refusals_not_typeerrors():
@@ -208,22 +227,63 @@ def t_anti_pooling_is_a_type_contract():
         check(False, 'sign_test accepted a list -- pooling is reachable')
     except rs.StatsRefusal:
         check(True, 'sign_test refuses a sequence at runtime')
-    # No public function may take a flat multi-board row list.
-    offenders = []
-    for name, fn in vars(rs).items():
-        if name.startswith('_') or not callable(fn) or not inspect.isfunction(fn):
-            continue
-        if name in ('per_board',):
+    # EVERY public function taking `rows` must REFUSE a multi-board pile.
+    #
+    # The first version of this check read
+    #     if 'rows' in ps and name not in ('board_rho', 'classify_board')
+    # which whitelisted precisely the two functions that violated the claim, so
+    # it could not fail -- and `board_rho` on the six recorded runs returned the
+    # pooled +0.339 the module docstring calls the trap. An adversarial review
+    # found it in one line. The replacement is behavioural: it enumerates the
+    # functions and CALLS each with a pile, so a new one is covered the day it
+    # is written and no name can be exempted by editing a tuple.
+    pile = [{'board_key': b, 'predictors': {'x': c}, 'truth': {'headline': k}}
+            for b, c, _h, _hl, k, _v in rs.LEGACY_POOLED]
+    takes_rows, refused = [], []
+    for name, fn in sorted(vars(rs).items()):
+        if name.startswith('_') or not inspect.isfunction(fn):
             continue
         try:
             ps = inspect.signature(fn).parameters
         except (TypeError, ValueError):
             continue
-        if 'rows' in ps and name not in ('board_rho', 'classify_board'):
-            offenders.append(name)
-    check(not offenders,
-          f'no public fn but per_board/board_rho/classify_board takes `rows` '
-          f'(offenders: {offenders})')
+        if 'rows' not in ps:
+            continue
+        takes_rows.append(name)
+        if name == 'per_board':
+            continue          # per_board's whole job is to split the pile
+        args = [pile] + (['x', 'headline'] if name == 'board_rho' else [])
+        try:
+            fn(*args)
+        except rs.StatsRefusal:
+            refused.append(name)
+        except Exception as e:                                  # noqa: BLE001
+            check(False, f'{name}(pile) raised {type(e).__name__}, not '
+                         f'StatsRefusal: {e}')
+    check(takes_rows == ['board_rho', 'classify_board', 'per_board'],
+          f'the set of functions taking `rows` is what this check thinks it '
+          f'is: {takes_rows}')
+    check(sorted(refused) == ['board_rho', 'classify_board'],
+          f'every rows-taking fn but per_board REFUSES a 6-board pile '
+          f'(refused: {sorted(refused)})')
+    # The specific regression, named: this exact call used to return +0.339.
+    try:
+        rs.board_rho(pile, 'x', 'headline')
+        check(False, 'board_rho on the six recorded runs returned a POOLED rho')
+    except rs.StatsRefusal as e:
+        check('6 boards' in str(e),
+              f'board_rho names how many boards it was handed: {e}')
+    # per_board's grouping success path -- untested until an adversarial review
+    # showed a mutation bucketing every board into one group left this file
+    # entirely green.
+    groups = rs.per_board([{'board_key': 'a', 'i': 0}, {'board_key': 'b'},
+                           {'board_key': 'a', 'i': 1}])
+    check(sorted(groups) == ['a', 'b'],
+          f'per_board splits by board_key: {sorted(groups)}')
+    check(len(groups['a']) == 2 and len(groups['b']) == 1,
+          'per_board keeps every row, in its own board')
+    check([r.get('i') for r in groups['a']] == [0, 1],
+          'per_board preserves row order within a board')
 
 
 def _rows(vals, key='b', pred=None):

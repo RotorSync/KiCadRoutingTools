@@ -24,24 +24,43 @@ placement quality. This is not a hypothetical: on the recorded corpus,
 rho(crossings, vias) is **+0.714 pooled across six boards** and **-0.400 within
 the one recorded slate of one board** -- opposite signs, same two quantities.
 
-So there is no function in this module that accepts a flat, multi-board list of
-rows. ``per_board`` is the only way in, ``board_rho`` takes one board's rows,
-and ``sign_test`` takes a *mapping* keyed by board. A caller who wants a pooled
-number has to write the loop themselves and own it. ``tests/test_703_rank_stats``
-asserts this by introspection, so the guard is tested rather than intended.
+So no function here will compute a correlation over rows from more than one
+board. ``per_board`` is the way in; ``board_rho`` and ``classify_board`` call
+``_one_board`` and REFUSE a pile spanning several ``board_key`` values; and
+``sign_test`` takes a *mapping* keyed by board and refuses a sequence. A caller
+who wants a pooled number has to strip the board keys first, which is a thing
+you cannot do by accident.
 
-THE FORMATTER CANNOT EMIT A BARE RHO
-------------------------------------
+The first version of this file only *claimed* that, and an adversarial review
+falsified it in one line: ``board_rho`` never read ``board_key``, so handing it
+the six recorded runs returned ``rho=+0.339 [LOO +0.053..+0.632, K=6]`` -- the
+exact pooled number this docstring calls the trap. The introspection check that
+was supposed to catch it whitelisted ``board_rho`` and ``classify_board`` by
+name, so it could not fail. A guard that is documented and not executed is the
+same shape of defect as an r-value quoted without its dependent variable, which
+makes it a poor thing to leave in this particular file.
+
+RHO DOES NOT REACH A READER WITHOUT ITS SCOPE
+---------------------------------------------
 The failure #703 is about is a number getting quoted without its scope: nine
 sites in this repo cite ``r = +0.780`` and none of them says the dependent
-variable was distance-to-truth. Prose cannot prevent that recurring, so
-``fmt_rho`` returns ONE atomic token carrying the leave-one-out span and K:
+variable was distance-to-truth. So every rendering built for a HUMAN carries the
+leave-one-out span and K in one atomic token:
 
     rho=+0.339 [LOO +0.053..+0.632, K=6]
 
-Copy-pasting that into a doc carries its own instability with it. The LOO span
-on the recorded corpus is +0.053..+0.632 -- dropping any single board moves the
-headline by up to 12x -- and that instability IS the finding, not a footnote.
+``fmt_rho`` is that renderer, ``BoardRho.__repr__`` delegates to it, and
+``BoardRho.as_dict()['display']`` carries it into any document generated from
+the rows. Copy-pasting the token carries the instability with it: the LOO span
+on the recorded corpus is +0.053..+0.632 around a headline of +0.339, so
+dropping any single board moves it by 12x, and that instability IS the finding.
+
+What this does NOT claim, because an earlier draft did and it was false:
+``fmt`` is a general number formatter and will happily print a bare float, and
+``as_dict()['rho']`` is deliberately a bare number so a machine can read it.
+The guarantee is about the human-facing renderings, not about arithmetic being
+unable to produce a float. ``fmt_rho`` called without a span says
+``[LOO not computed]`` rather than falling silent about it.
 
 p-VALUES: TWO-SIDED, AND WHY THE RESEARCH NOTE'S 0.11 IS NOT REPRODUCED
 -----------------------------------------------------------------------
@@ -216,7 +235,7 @@ def fmt_rho(rho: float, lo: float = NAN, hi: float = NAN,
         return f'rho=n/a [{reason or "not measurable"}' + (
             f', K={k}]' if k is not None else ']')
     span = (f'LOO {fmt(lo, 0)}..{fmt(hi, 0)}' if lo == lo and hi == hi
-            else 'LOO n/a')
+            else 'LOO not computed')
     kk = f', K={k}' if k is not None else ''
     return f'rho={rho:+.3f} [{span}{kk}]'
 
@@ -276,6 +295,29 @@ def per_board(rows: Sequence[Mapping]) -> Dict[str, List[Mapping]]:
     return out
 
 
+def _one_board(rows: Sequence[Mapping], fn: str) -> Optional[str]:
+    """Refuse a row pile spanning more than one board. Returns the board key.
+
+    This is the anti-pooling guard, EXECUTED rather than documented. Handing
+    the six recorded runs to ``board_rho`` used to return the pooled +0.339
+    that this module's own docstring names as the trap, because nothing read
+    ``board_key``. Rows with no ``board_key`` at all are allowed through, so a
+    caller can still rank two bare columns for a unit test -- what is refused is
+    the specific mistake of ranking several boards' rows as if they were one
+    board's variants.
+    """
+    keys = {r.get('board_key') for r in rows if r.get('board_key')}
+    if len(keys) > 1:
+        raise StatsRefusal(
+            f'{fn}() was given rows from {len(keys)} boards '
+            f'({", ".join(sorted(keys)[:6])}). Every correlation here is '
+            f'computed WITHIN one board: pooling across boards measures board '
+            f'size, and on this repo\'s own corpus it flips the sign of '
+            f'rho(crossings, vias) from -0.400 to +0.714. Use per_board() '
+            f'first.')
+    return next(iter(keys)) if keys else None
+
+
 def _column(rows: Sequence[Mapping], group: str, key: str) -> List:
     return [(r.get(group) or {}).get(key) for r in rows]
 
@@ -289,23 +331,32 @@ def board_rho(rows: Sequence[Mapping], predictor: str, dependent: str,
     variant is recorded null (never 0), and a null cannot be ranked. The
     resulting n is reported, so a board whose effective K collapsed says so.
     """
+    _one_board(rows, 'board_rho')
     pv, dv = [], []
     dropped = 0
+    dropped_nan = 0
     for p, d in zip(_column(rows, predictor_group, predictor),
                     _column(rows, dependent_group, dependent)):
         if p is None or d is None:
             dropped += 1
             continue
         if isinstance(p, float) and p != p:
-            dropped += 1
+            dropped_nan += 1
             continue
         if isinstance(d, float) and d != d:
-            dropped += 1
+            dropped_nan += 1
             continue
         pv.append(p)
         dv.append(d)
     n = len(pv)
-    note = f', {dropped} row(s) dropped for a null value' if dropped else ''
+    _bits = ([f'{dropped} row(s) dropped for a null value'] if dropped else [])
+    # A NaN value and an absent one are different facts: a null is "this
+    # predictor was never computed here", a NaN is "it was computed and came
+    # back undefined". Reporting both as "null" misnames the cause in the one
+    # string a reader has to go on.
+    _bits += ([f'{dropped_nan} row(s) dropped for a NaN value']
+              if dropped_nan else [])
+    note = (', ' + '; '.join(_bits)) if _bits else ''
     if n < MIN_N:
         return BoardRho(NAN, n, f'n={n} < {MIN_N}{note}')
     side = constant_side(pv, dv)
@@ -332,6 +383,7 @@ def classify_board(rows: Sequence[Mapping], dependent: str = 'headline',
     ``test_placement_ab.py`` already encodes: a term with no effect on 3 of 4
     boards must not read as a clean sweep.
     """
+    _one_board(rows, 'classify_board')
     vals = [v for v in _column(rows, dependent_group, dependent)
             if v is not None and not (isinstance(v, float) and v != v)]
     if len(vals) < MIN_N:
@@ -433,8 +485,8 @@ def format_sign_test(name: str, st: Mapping) -> List[str]:
     a criterion nobody printed. So the denominator is never implicit here.
     """
     lines = [
-        f'{name}: {len(st["positive"])}+ / {len(st["negative"])}- / '
-        f'{len(st["zero"])}0 over {st["boards_defined"]} board(s) with a '
+        f'{name}: {len(st["positive"])} pos / {len(st["negative"])} neg / '
+        f'{len(st["zero"])} zero over {st["boards_defined"]} board(s) with a '
         f'defined rho ({st["boards_attempted"]} attempted)']
     if st['p_two_sided'] is not None:
         lines.append(
@@ -630,6 +682,28 @@ def _self_test(force: bool = False) -> int:
     else:
         ok(False, 10, 'a NaN column was ranked silently')
 
+    # 11. the anti-pooling guard, EXECUTED rather than intended. An adversarial
+    #     review falsified the earlier claim in one line, so the case that
+    #     catches it is the pooled fixture itself: board_rho over the six
+    #     recorded runs used to return exactly +0.339.
+    multi = [{'board_key': b, 'predictors': {'x': c},
+              'truth': {'headline': k}}
+             for b, c, _h, _hl, k, _v in LEGACY_POOLED]
+    for name, fn in (('board_rho', lambda: board_rho(multi, 'x', 'headline')),
+                     ('classify_board', lambda: classify_board(multi))):
+        try:
+            fn()
+        except StatsRefusal as e:
+            ok('6 boards' in str(e), 11,
+               f'{name} must say how many boards it was given: {e}')
+        else:
+            ok(False, 11,
+               f'{name} accepted rows from 6 boards -- it would return the '
+               f'pooled +0.339 this module calls the trap')
+    # ... and the same rows, one board at a time, are still accepted
+    one = [r for r in multi if r['board_key'] == 'castor']
+    ok(board_rho(one, 'x', 'headline').n == 1, 11,
+       'rows from a single board are still accepted')
     # 11. the anti-pooling guard, tested rather than intended
     try:
         sign_test([_br(0.5), _br(0.5), _br(0.5)])       # type: ignore[arg-type]
@@ -654,6 +728,41 @@ def _self_test(force: bool = False) -> int:
     br = board_rho(rows, 'x', 'headline')
     ok(br.n == 3 and 'dropped' in (br.reason or ''), 12,
        f'a null predictor must be dropped and NAMED: n={br.n} {br.reason!r}')
+
+    # 13. the renderings the review found uncovered
+    ok(fmt(None).strip() == 'none', 13,
+       f'fmt(None) must be distinguishable from n/a and from a number: '
+       f'{fmt(None)!r}')
+    ok('LOO not computed' in fmt_rho(0.5), 13,
+       f'fmt_rho with no span must SAY there is no span: {fmt_rho(0.5)!r}')
+    ok(repr(BoardRho(0.5, 4, None, 0.4, 0.6)).startswith('rho=+0.500 ['), 13,
+       'BoardRho.__repr__ delegates to fmt_rho')
+    st0 = sign_test({})
+    lines = format_sign_test('empty', st0)
+    ok(all('p(two-sided)' not in ln for ln in lines), 13,
+       'an empty mapping prints no p-value line at all')
+    ok(' zero ' in lines[0] and 'pos' in lines[0], 13,
+       f'the zero count is labelled, not glued to a digit: {lines[0]!r}')
+    st3 = sign_test({'a': BoardRho(0.0, 4), 'b': BoardRho(0.0, 4),
+                     'c': BoardRho(0.0, 4)})
+    ok('3 zero' in format_sign_test('z', st3)[0], 13,
+       f'three zero boards must not render as "30": '
+       f'{format_sign_test("z", st3)[0]!r}')
+
+    # 14. board_rho's remaining arms
+    br = board_rho(_rows([0, 1]), 'x', 'headline')
+    ok(br.rho != br.rho and br.reason == 'n=2 < 3', 14,
+       f'n below MIN_N is named with the number: {br.reason!r}')
+    br = board_rho([{'board_key': 'b', 'predictors': {'x': 1},
+                     'truth': {'headline': 1}} for _ in range(4)],
+                   'x', 'headline')
+    ok('predictor AND truth constant' in (br.reason or ''), 14,
+       f'both-constant is its own reason: {br.reason!r}')
+    rows_nan = _rows([0, 1, 2, 3])
+    rows_nan[0]['predictors']['x'] = NAN
+    br = board_rho(rows_nan, 'x', 'headline')
+    ok('NaN value' in (br.reason or '') and 'null' not in (br.reason or ''),
+       14, f'a NaN value is not reported as a null one: {br.reason!r}')
 
     _SELF_TESTED[0] = True
     return n

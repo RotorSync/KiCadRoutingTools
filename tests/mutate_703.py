@@ -204,6 +204,61 @@ ROWS = [
      "            p, d = (p or 0), (d or 0)\n",
      (T703,), 'KILLED'),
 
+    # ---- the anti-pooling guard, EXECUTED --------------------------------
+    # These four rows exist because an adversarial review falsified the first
+    # version of the claim: `board_rho` never read `board_key`, so the six
+    # recorded runs handed to it returned the pooled +0.339 the module docstring
+    # names as the trap -- and the introspection check meant to catch that
+    # whitelisted `board_rho` and `classify_board` by name, so it could not
+    # fail. A guard with no row here is a guard nobody has attacked.
+    ('board-rho-drops-the-one-board-guard', 'rs',
+     "    _one_board(rows, 'board_rho')\n", '',
+     (T703,), 'KILLED'),
+
+    ('classify-board-drops-the-one-board-guard', 'rs',
+     "    _one_board(rows, 'classify_board')\n", '',
+     (T703,), 'KILLED'),
+
+    ('the-one-board-guard-only-warns', 'rs',
+     "    keys = {r.get('board_key') for r in rows if r.get('board_key')}\n"
+     "    if len(keys) > 1:\n",
+     "    keys = {r.get('board_key') for r in rows if r.get('board_key')}\n"
+     "    if False:\n",
+     (T703,), 'KILLED'),
+
+    # The one the review found by mutation, which the battery did not carry:
+    # bucketing every board into a single group leaves `per_board` returning
+    # one pile, which is the pooling this module exists to prevent.
+    ('per-board-buckets-every-board-into-one', 'rs',
+     "        out.setdefault(key, []).append(r)\n",
+     "        out.setdefault('all', []).append(r)\n",
+     (T703,), 'KILLED'),
+
+    # ---- renderings that misreport their own scope -------------------------
+    ('fmt-rho-hides-a-missing-span', 'rs',
+     "            else 'LOO not computed')\n",
+     "            else '')\n",
+     (T703,), 'KILLED'),
+
+    # The zero COUNT glued to its own marker digit: three zero boards rendered
+    # as "30". In a module whose thesis is that a number must not be
+    # misreadable, that is on topic.
+    ('zero-count-glued-to-its-marker', 'rs',
+     "        f'{len(st[\"zero\"])} zero over {st[\"boards_defined\"]} board(s) with a '\n",
+     "        f'{len(st[\"zero\"])}0 over {st[\"boards_defined\"]} board(s) with a '\n",
+     (T703,), 'KILLED'),
+
+    ('a-NaN-value-is-reported-as-a-null-one', 'rs',
+     "            dropped_nan += 1\n"
+     "            continue\n"
+     "        if isinstance(d, float) and d != d:\n"
+     "            dropped_nan += 1\n",
+     "            dropped += 1\n"
+     "            continue\n"
+     "        if isinstance(d, float) and d != d:\n"
+     "            dropped += 1\n",
+     (T703,), 'KILLED'),
+
     # ---- INERT PROBES, which must change nothing ---------------------------
     # A battery with no expected survivors cannot distinguish "my tests are
     # thorough" from "my tests fail on any edit at all". These two are real
