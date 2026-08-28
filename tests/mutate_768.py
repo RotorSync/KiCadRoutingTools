@@ -101,8 +101,15 @@ _HOLE_KW = "                hole_clearance=_hc,\n"
 _GUI_CEILING = ("                netclass_ceiling="
                 "fanout_config.get('clearance_ceiling'),\n")
 
-_PLAN_UNTICK = """            if step["action"] == "optimize_caps" and not (
-                    step.get("params") or {}).get("clearance"):
+# RE-ANCHORED (#780). The predicate grew a second shape -- a FANOUT step
+# that switches the inline cap pass on runs the same pass -- so the old
+# five-line quote matched ZERO times and the row reported BROKEN. Quote
+# the guard as it now stands; deleting it is still the mutation.
+_PLAN_UNTICK = """            _p = step.get("params") or {}
+            _runs_caps = (step["action"] == "optimize_caps"
+                          or (step["action"] == "fanout"
+                              and _p.get("optimize_caps")))
+            if _runs_caps and not _p.get("clearance"):
                 _cc = getattr(self.dialog, 'clearance_check', None)
                 if _cc is not None and _cc.GetValue():
                     _cc.SetValue(False)
