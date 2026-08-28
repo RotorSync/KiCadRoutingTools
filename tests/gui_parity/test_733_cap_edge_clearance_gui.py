@@ -103,22 +103,45 @@ def main():
     def shared():
         return dlg.fanout_tab.get_shared_params()
 
-    # ON THE GATE: the key must EXIST, or every assertion below reads None from
-    # a dict that simply never carried it and the file passes vacuously.
+    # THESE TWO ARMS WERE RED, and had been since the #733 FOLLOW-UP.
+    #
+    # They asserted that ticking the Basic tab's SIGNAL edge control makes
+    # get_shared_params carry `cap_board_edge_clearance` -- true when this
+    # file was written, and deliberately false since `cd623938` gave the cap
+    # margin its own control on the BGA panel and stopped the shared params
+    # emitting the key at all (swig_gui.py's comment says so in as many
+    # words). Its green sibling test_733_cap_edge_control_real_dialog.py
+    # asserts the exact inverse. So the gate was not merely stale: it was
+    # demanding the behaviour another gate forbids.
+    #
+    # Measured on `fix/775-fanout-clearance-via-prune`, before any change:
+    #     FAIL get_shared_params carries cap_board_edge_clearance
+    #     FAIL checked 0.8 -> the typed value travels -- None
+    #     VERDICT: 2 FAILURE(S)
+    #
+    # RE-AIMED rather than deleted. The decoupling is still worth a change
+    # detector; it just points the other way now -- the signal control must
+    # NOT be able to move the cap margin.
     dlg.edge_clearance_check.SetValue(True)
     dlg.board_edge_clearance.SetValue(0.8)
     s = shared()
-    check('get_shared_params carries cap_board_edge_clearance',
-          'cap_board_edge_clearance' in s,
-          'the key is absent -- the operator override never reaches the engine')
-    check('checked 0.8 -> the typed value travels',
-          s.get('cap_board_edge_clearance') == 0.8,
-          repr(s.get('cap_board_edge_clearance')))
+    check('get_shared_params does NOT carry cap_board_edge_clearance',
+          'cap_board_edge_clearance' not in s,
+          'the shared SIGNAL control is feeding the cap PLACEMENT margin '
+          'again -- the #733 follow-up decoupled them on purpose')
+    check('a signal override of 0.8 leaves the cap knob alone',
+          dlg.fanout_tab.bga_options.get_config()
+          .get('cap_board_edge_clearance') is None,
+          repr(dlg.fanout_tab.bga_options.get_config()
+               .get('cap_board_edge_clearance')))
 
     dlg.edge_clearance_check.SetValue(False)
     s = shared()
-    cap, sig = s.get('cap_board_edge_clearance'), s.get('board_edge_clearance')
-    check('unchecked -> None, so the ENGINE resolves it', cap is None, repr(cap))
+    cap = dlg.fanout_tab.bga_options.get_config().get(
+        'cap_board_edge_clearance')
+    sig = s.get('board_edge_clearance')
+    check('the cap knob at its own default -> None, so the ENGINE resolves it',
+          cap is None, repr(cap))
     check('...and the engine then answers the placement default',
           resolve_cap_edge_clearance(board, cap)
           == (CAP_EDGE_CLEARANCE, 'fixed default'))

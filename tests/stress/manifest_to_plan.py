@@ -448,14 +448,40 @@ CAP_FLAG_PARAMS = {
     '--displacement-growth': 'cap_displacement_growth',
     '--max-passes': 'cap_max_passes',
     '--cap-prefix': 'cap_prefix',
-    # #733. NOT a cap_* name: its GUI home is the SHARED Basic-tab edge control,
-    # which ai_plan._GEOMETRY_OVERRIDE_CHECKS already maps by this exact name
-    # ('board_edge_clearance' -> 'edge_clearance_check'), so a plan carrying it
-    # ticks the override box and the value reaches the engine. Only an EXPLICIT
-    # flag needs carrying: an omitted one now resolves to the same number on
-    # both fronts (placement/fanout_clearance.resolve_cap_edge_clearance).
-    '--board-edge-clearance': 'board_edge_clearance',
+    # #772. This row used to say 'board_edge_clearance', with a comment
+    # claiming ai_plan's _GEOMETRY_OVERRIDE_CHECKS 'already maps by this exact
+    # name ... so a plan carrying it ticks the override box and the value
+    # reaches the engine'. That became FALSE the moment the #733 FOLLOW-UP
+    # gave the cap margin its own control: the Basic tab's Min Edge Clearance
+    # is the SIGNAL copper-to-edge keep-out, a different quantity that only
+    # shares a flag SPELLING across two independent tools, and
+    # get_shared_params stopped emitting cap_board_edge_clearance in the same
+    # change. Measured on the real headless dialog: `--board-edge-clearance
+    # 0.85` set the SIGNAL control, TICKED its override (which then leaked
+    # into the next step's routing), and the cap engine received None.
+    #
+    # The right name is the CONTROL's name -- the rule the nine rows above
+    # already follow. An explicit 0 needs no special case: the spin maps 0 to
+    # None and resolve_cap_edge_clearance applies the same
+    # non-positive-is-unset rule to an explicit CLI value, so both fronts land
+    # on the same resolved margin. Only an EXPLICIT flag needs carrying; an
+    # omitted one resolves identically on both fronts.
+    '--board-edge-clearance': 'cap_board_edge_clearance',
+    # #772: the cap pass snaps its candidate positions to this and reads it
+    # off the Basic tab via get_shared_params. Without a row, a recorded
+    # --grid-step was dropped and the step ran at whatever the previous one
+    # left behind.
+    '--grid-step': 'grid_step',
 }
+# Deliberately NOT mapped, and why:
+#   --default-via-size  a FALLBACK for vias whose size cannot be read, not
+#       geometry this pass places. Its only same-named GUI home is the Basic
+#       tab's via_size, and landing there would tick the via-size override
+#       (leaking a via floor into the next step) AND feed
+#       PlanExecutor._write_drc_floors, which writes via_size into the
+#       project.
+#   --lock              nargs='+' extra locked refs; the GUI has no control.
+#   --verbose           console verbosity, not a routing parameter.
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sense
 
 
