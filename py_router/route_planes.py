@@ -2530,6 +2530,8 @@ def _fence_ring_points(pcb_data: PCBData, inset: float,
     board fences EVERY outline (#304) -- else the bounding box. Interior
     cutouts are not fenced. An inset that swallows a narrow board region
     simply yields no ring there (shapely negative buffer)."""
+    from deps_hint import require_shapely
+    require_shapely()
     from shapely.geometry import Polygon
     bi = pcb_data.board_info
     rings = [o for o in (getattr(bi, 'board_outlines', None) or [])

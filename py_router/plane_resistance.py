@@ -15,6 +15,10 @@ from __future__ import annotations
 
 import math
 from typing import List, Dict, Tuple, Optional
+# shapely is required for plane resistance geometry; a raw ModuleNotFoundError
+# gives the user no hint about what to install (Issue 3).
+from deps_hint import require_shapely
+require_shapely()
 from shapely.geometry import Polygon as ShapelyPolygon, LineString, Point
 from shapely.validation import make_valid
 

@@ -255,6 +255,10 @@ _PARAM_CONTROL_ALIASES = {
     # the repair step is gone. Their per-action blocks note them instead.)
     # #381 D3: route_diff's polarity-swap allowlist.
     'polarity_swap_nets': 'polarity_swap_nets_text',
+    # route_diff's explicit-pair escape hatch (--explicit-pair): a flat list of
+    # 'POS NEG' net-name tokens -> the diff tab's text control, which parses
+    # them back into pairs.
+    'explicit_pairs': 'explicit_pairs_text',
     # #381 D5: route.py options that previously fell to "no control, ignored"
     # (so a plan-replayed #284-class rip-existing / ordering / keepout chain
     # silently routed at the reset defaults instead of the recorded values).

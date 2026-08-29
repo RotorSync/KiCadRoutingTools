@@ -179,6 +179,7 @@ def get_dialog_settings(dialog):
         'chamfer_extra': dialog.differential_tab.chamfer_extra.GetValue(),
         'centerline_setback': dialog.differential_tab.centerline_setback.GetValue(),
         'polarity_swap_nets_text': dialog.differential_tab.polarity_swap_nets_text.GetValue(),
+        'explicit_pairs_text': dialog.differential_tab.explicit_pairs_text.GetValue(),
         'gnd_via_check': dialog.differential_tab.gnd_via_check.GetValue(),
         'intra_match_check': dialog.differential_tab.intra_match_check.GetValue(),
         'ac_couple_check': dialog.differential_tab.ac_couple_check.GetValue(),
@@ -609,6 +610,9 @@ def restore_dialog_settings(dialog, settings):
         # Migrate the pre-#279 boolean: True -> allow all pairs, False -> none.
         dialog.differential_tab.polarity_swap_nets_text.SetValue(
             '*' if settings['fix_polarity_check'] else '')
+    if 'explicit_pairs_text' in settings:
+        dialog.differential_tab.explicit_pairs_text.SetValue(
+            settings['explicit_pairs_text'])
     if 'gnd_via_check' in settings:
         dialog.differential_tab.gnd_via_check.SetValue(settings['gnd_via_check'])
     if 'intra_match_check' in settings:

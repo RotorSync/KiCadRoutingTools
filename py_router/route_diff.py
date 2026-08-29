@@ -206,6 +206,15 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
                 return_results: bool = False,
                 pcb_data=None,
                 net_clearances: dict = None,
+                # Explicitly named diff pairs (net-name pairs, e.g. [('TDP1',
+                # 'TDN1')]). These bypass name-pattern matching entirely: the
+                # strict parser (extract_diff_pair_base) is arguably correct to
+                # reject names like TDP1/TDN1 (polarity letter MID-name, index
+                # after), but the operator needs an escape hatch without
+                # rewriting the chain. Both nets must exist; normal diff-pair
+                # routing still applies. Repeatable: pass as many pairs as
+                # needed.
+                explicit_pairs: Optional[List[Tuple[str, str]]] = None,
                 # Net-name globs to PROTECT for this run (reason 'user', #521):
                 # rip machinery skips matches, and they persist to the output
                 # .kicad_pro so later steps honor them without the flag.
@@ -234,6 +243,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
         diff_pair_intra_match: Enable intra-pair P/N length matching (default: False)
         ac_couple_match: End-to-end length-match AC-coupled diff pairs split by series
             DC-blocking caps, matching the concatenated P vs N path (#196) (default: False)
+        explicit_pairs: List of (positive_net, negative_net) name pairs to route as
+            differential pairs WITHOUT name-pattern matching. Each pair's nets must
+            exist on the board; normal diff-pair routing applies. Escape hatch for
+            names the strict parser rejects (e.g. TDP1/TDN1 -- polarity letter
+            mid-name, index after). Repeatable.
         return_results: If True, return results data instead of writing to file
         pcb_data: Optional pre-parsed PCBData (if None, loads from input_file)
 
@@ -540,6 +554,43 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
 
     # Find differential pairs from all provided nets
     diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
+
+    # Explicitly named pairs (--explicit-pair): bypass name-pattern matching
+    # entirely. The strict parser is arguably correct to reject names like
+    # TDP1/TDN1 (polarity letter MID-name, index after), but the operator needs
+    # an escape hatch without rewriting the chain. Both nets must exist; normal
+    # diff-pair routing still applies. Repeatable.
+    if explicit_pairs:
+        _net_by_name = {n.name: n for n in pcb_data.nets.values() if n.name}
+        for _p_name, _n_name in explicit_pairs:
+            _p_net = _net_by_name.get(_p_name)
+            _n_net = _net_by_name.get(_n_name)
+            if _p_net is None or _n_net is None:
+                _missing = [nm for nm in (_p_name, _n_name)
+                            if nm not in _net_by_name]
+                print(f"  WARNING: explicit pair ({_p_name}, {_n_name}) skipped -- "
+                      f"net(s) not on this board: {', '.join(_missing)}")
+                continue
+            _key = f"{_p_name}/{_n_name}"
+            if _key in diff_pairs:
+                continue  # already resolved by pattern matching
+            # A net already claimed by a pattern-matched pair must not be
+            # re-claimed by an explicit pair (would double-route it).
+            _claimed = {nid for p in diff_pairs.values()
+                        for nid in (p.p_net_id, p.n_net_id)}
+            if _p_net.net_id in _claimed or _n_net.net_id in _claimed:
+                print(f"  WARNING: explicit pair ({_p_name}, {_n_name}) skipped -- "
+                      f"a net is already part of a pattern-matched pair")
+                continue
+            _pair = DiffPairNet(base_name=_key,
+                                p_net_id=_p_net.net_id,
+                                n_net_id=_n_net.net_id,
+                                p_net_name=_p_name,
+                                n_net_name=_n_name)
+            diff_pairs[_key] = _pair
+        print(f"  Explicit pairs: {len(diff_pairs)} total pair(s) after merging "
+              f"{len(explicit_pairs)} explicit pair(s)")
+
     diff_pair_net_ids = set()  # Net IDs that are part of differential pairs
 
     # Detect AC-coupled XNets (#196): differential pairs split into two base-named
@@ -1888,6 +1939,12 @@ Examples:
                         help="End-to-end length-match AC-coupled differential pairs split by series DC-blocking "
                              "caps (#196): auto-detect the cap chain, match the concatenated P path vs the N path, "
                              "and place the compensating meanders on whichever segment has room. Off by default.")
+    parser.add_argument("--explicit-pair", action="append", nargs=2, metavar=("POS_NET", "NEG_NET"),
+                        dest="explicit_pairs",
+                        help="Route an explicitly named differential pair (POS_NET NEG_NET) WITHOUT "
+                             "name-pattern matching. Escape hatch for names the strict parser rejects "
+                             "(e.g. TDP1 TDN1 -- polarity letter mid-name, index after). Both nets must "
+                             "exist; normal diff-pair routing applies. Repeatable: pass once per pair.")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=defaults.MAX_RIPUP,
@@ -2201,6 +2258,7 @@ Examples:
                 diff_chamfer_extra=args.diff_chamfer_extra,
                 diff_pair_intra_match=args.diff_pair_intra_match,
                 ac_couple_match=args.ac_couple_match,
+                explicit_pairs=args.explicit_pairs,
                 debug_memory=args.debug_memory,
                 mps_reverse_rounds=args.mps_reverse_rounds,
                 mps_layer_swap=args.mps_layer_swap,
@@ -2230,10 +2288,15 @@ Examples:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
-        # #521: record this step's protection-worthy nets (routed diff pairs,
-        # matched groups) and impedance declarations in the output project so
-        # later steps refuse to rip the former and redo the latter at the same
-        # widths.
+
+    # #521: record this step's protection-worthy nets (routed diff pairs,
+    # matched groups) and impedance declarations in the output project so
+    # later steps refuse to rip the former and redo the latter at the same
+    # widths. Deliberately NOT gated on --no-fix-drc-settings/--skip-routing:
+    # protection recording is independent of DRC-floor fixing -- a step that
+    # routes pairs under --no-fix-drc-settings must still protect them, or a
+    # later bulk step rips the coupled copper (#521 carry gap).
+    if args.output_file and os.path.isfile(args.output_file):
         try:
             from protected_nets import (consume_protection_candidates,
                                         consume_impedance_specs,

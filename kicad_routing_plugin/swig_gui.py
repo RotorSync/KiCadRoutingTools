@@ -2731,6 +2731,9 @@ class RoutingDialog(wx.Dialog):
         # #381 D3: reset to EMPTY (deny all swaps) to match tab creation and the
         # CLI deny-by-default (#279); '*' here silently widened plan-replay swaps.
         self.differential_tab.polarity_swap_nets_text.SetValue("")
+        # Explicit pairs default EMPTY (no explicit pairs), matching tab
+        # creation and the CLI (--explicit-pair absent).
+        self.differential_tab.explicit_pairs_text.SetValue("")
         # #381 D2: diff GND return vias default ON, matching tab creation
         # (differential_gui.py) and the CLI (route_diff.py's negative flag
         # --no-gnd-vias defaults gnd_via_enabled True). Resetting to False here

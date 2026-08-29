@@ -143,6 +143,10 @@ LIST_FLAGS = {
     # allowlist survives as a list param that ai_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
+    # route_diff's explicit-pair escape hatch (repeatable, nargs=2 'POS NEG').
+    # A flat list of net-name tokens accumulates across occurrences; the GUI
+    # control parses them back into pairs.
+    '--explicit-pair': 'explicit_pairs',
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
@@ -304,7 +308,10 @@ def parse_command(argv):
             while i < len(argv) and not argv[i].startswith('--'):
                 vals.append(_num(argv[i]))
                 i += 1
-            lists[a] = vals
+            # Repeatable flags (--explicit-pair) must ACCUMULATE across
+            # occurrences, not overwrite -- a recorded chain passing several
+            # pairs would otherwise keep only the last one.
+            lists[a] = lists.get(a, []) + vals
         elif a in ('--group', '--group-scope', '--group-by'):
             # #459 placement blocks: these must land as TOP-LEVEL step keys,
             # not in params. ai_plan's route action reads step["group"] /

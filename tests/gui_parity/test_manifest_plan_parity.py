@@ -73,6 +73,8 @@ LIST_FLAGS = {
     '--rip-existing-nets': 'rip_existing_nets',
     '--polarity-swap-nets': 'polarity_swap_nets',
     '--coplanar-nets': 'coplanar_nets',
+    # route_diff's explicit-pair escape hatch (repeatable, nargs=2 'POS NEG').
+    '--explicit-pair': 'explicit_pairs',
 }
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not
@@ -286,6 +288,7 @@ _MUST_RESOLVE = {
     'impedance', 'ordering', 'direction', 'time_matching',
     'keepout', 'guide_corridor', 'length_match_groups', 'swappable_nets',
     'polarity_swap_nets', 'qfn_track_width', 'qfn_clearance',
+    'explicit_pairs',
 }
 
 

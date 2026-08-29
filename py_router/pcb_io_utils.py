@@ -28,6 +28,11 @@ def passthrough_copy(input_file: str, output_file: str) -> bool:
 
     Returns ``True`` if a copy was made, ``False`` if it was skipped (no output
     path, or source and destination are the same file).
+
+    The sibling `.kicad_pro` (DRC floor + #521 protected nets) and `.kicad_dru`
+    (custom rules) are carried over the same way (#441: never cp a board without
+    its project). A bare board copy strands the project, so the next chain step
+    reads no floor/protections and stamps stock defaults over tighter copper.
     """
     if not output_file:
         return False
@@ -38,4 +43,16 @@ def passthrough_copy(input_file: str, output_file: str) -> bool:
     if same:
         return False
     shutil.copyfile(input_file, output_file)
+    # #441: carry the sibling project + custom-rules file so a chained pipeline
+    # keeps the DRC floor and #521 protected nets. Only when the source sibling
+    # exists; never clobber an existing output sibling (the caller's own writeback
+    # may have just created/updated it).
+    for _ext in (".kicad_pro", ".kicad_dru"):
+        _src = os.path.splitext(input_file)[0] + _ext
+        _dst = os.path.splitext(output_file)[0] + _ext
+        if os.path.isfile(_src) and not os.path.exists(_dst):
+            try:
+                shutil.copyfile(_src, _dst)
+            except OSError:
+                pass
     return True

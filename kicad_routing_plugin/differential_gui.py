@@ -619,6 +619,24 @@ class DifferentialTab(wx.Panel):
                                         "vs N path across the caps, not each side alone (#196)")
         options_sizer.Add(self.ac_couple_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
+        # Explicitly named diff pairs (--explicit-pair): net-name pairs that
+        # bypass name-pattern matching entirely. Escape hatch for names the
+        # strict parser rejects (e.g. TDP1/TDN1 -- polarity letter mid-name,
+        # index after). Comma/space-separated "POS NEG" pairs; both nets must
+        # exist; normal diff-pair routing applies. Repeatable.
+        explicit_row = wx.BoxSizer(wx.HORIZONTAL)
+        explicit_row.Add(wx.StaticText(self, label="Explicit pairs (POS NEG):"),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        self.explicit_pairs_text = wx.TextCtrl(self, value="", size=(180, -1))
+        self.explicit_pairs_text.SetToolTip(
+            "Explicitly named diff pairs to route WITHOUT name-pattern matching, "
+            "as 'POS NEG' pairs separated by commas or spaces (e.g. 'TDP1 TDN1, "
+            "TDP2 TDN2'). Both nets of each pair must exist on the board; normal "
+            "diff-pair routing applies. Escape hatch for names the strict parser "
+            "rejects (polarity letter mid-name, index after).")
+        explicit_row.Add(self.explicit_pairs_text, 1, wx.ALIGN_CENTER_VERTICAL)
+        options_sizer.Add(explicit_row, 0, wx.EXPAND | wx.ALL, 5)
+
         self.hide_short_check = wx.CheckBox(self, label="Hide short routes")
         self.hide_short_check.SetValue(True)
         self.hide_short_check.SetToolTip(
@@ -990,6 +1008,7 @@ class DifferentialTab(wx.Panel):
                 gnd_via_enabled=config.get('gnd_via_enabled', True),
                 diff_pair_intra_match=config.get('diff_pair_intra_match', False),
                 ac_couple_match=config.get('ac_couple_match', False),
+                explicit_pairs=config.get('explicit_pairs'),
                 enable_layer_switch=config.get('enable_layer_switch', True),
                 debug_lines=config.get('debug_lines', False),
                 verbose=config.get('verbose', False),
@@ -1426,6 +1445,28 @@ class DifferentialTab(wx.Panel):
         patterns = [t for t in _split_net_list(text.replace(',', ' ')) if t]
         return patterns or None
 
+    def get_explicit_pairs(self):
+        """Parse the explicit-pairs field into a list of (pos, neg) name pairs.
+
+        Comma/space-separated 'POS NEG' pairs; empty field -> None (no explicit
+        pairs), matching route_diff.py's --explicit-pair semantics. Net names
+        may contain spaces (#493), so pairs are split on commas first, then each
+        pair's two halves on whitespace.
+        """
+        text = self.explicit_pairs_text.GetValue()
+        # Split on commas first (a pair boundary), then whitespace within a pair.
+        tokens = [t for t in text.replace(',', ' ').split() if t]
+        if len(tokens) % 2 != 0:
+            # Odd token count: a net name with a space was split. Fall back to
+            # treating every other token as a pair boundary is unsafe -- warn
+            # and return what parses cleanly.
+            print("  WARNING: explicit pairs field has an odd number of tokens; "
+                  "pairs must be 'POS NEG' (comma/space separated)")
+        pairs = []
+        for i in range(0, len(tokens) - 1, 2):
+            pairs.append((tokens[i], tokens[i + 1]))
+        return pairs or None
+
     def get_config(self):
         """Get the differential pair configuration."""
         setback = self.centerline_setback.GetValue()
@@ -1447,6 +1488,7 @@ class DifferentialTab(wx.Panel):
             'gnd_via_enabled': self.gnd_via_check.GetValue(),
             'diff_pair_intra_match': self.intra_match_check.GetValue(),
             'ac_couple_match': self.ac_couple_check.GetValue(),
+            'explicit_pairs': self.get_explicit_pairs(),
         }
 
     def _on_diff_geom_override_check(self, event):

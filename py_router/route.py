@@ -6363,9 +6363,15 @@ For differential pair routing, use route_diff.py:
                 **drc_fix_kwargs(args))
         except Exception as e:
             print(f"  (skipped DRC-settings fix: {e})")
-        # #521: record this step's protection-worthy nets (matched groups) and
-        # impedance declarations in the output project so later chain steps
-        # refuse to rip the former and redo the latter at the same widths.
+
+    # #521: record this step's protection-worthy nets (matched groups) and
+    # impedance declarations in the output project so later chain steps
+    # refuse to rip the former and redo the latter at the same widths.
+    # Deliberately NOT gated on --no-fix-drc-settings/--skip-routing: protection
+    # recording is independent of DRC-floor fixing -- a step that routes under
+    # --no-fix-drc-settings must still protect its matched groups, or a later
+    # bulk step rips them (#521 carry gap).
+    if args.output_file and os.path.isfile(args.output_file):
         try:
             from protected_nets import (consume_protection_candidates,
                                         consume_impedance_specs,

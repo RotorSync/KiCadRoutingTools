@@ -795,6 +795,8 @@ def _pad_web_polygon(pad):
     """Shapely polygon of a pad's copper for the connection_width erosion test
     (mirrors tests/stress/classify_connection_width.py). None for no-copper
     NPTH pads or degenerate sizes."""
+    from deps_hint import require_shapely
+    require_shapely()
     from shapely.geometry import Point, box
     import shapely.affinity as aff
     if getattr(pad, 'pad_type', None) == 'np_thru_hole':

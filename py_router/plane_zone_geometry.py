@@ -13,6 +13,10 @@ import numpy as np
 from geometry_utils import UnionFind
 from routing_constants import POLYGON_BUFFER_DISTANCE, POLYGON_EDGE_TOLERANCE
 from scipy.spatial import Voronoi
+# shapely is required for zone geometry; a raw ModuleNotFoundError gives the
+# user no hint about what to install (Issue 3).
+from deps_hint import require_shapely
+require_shapely()
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.ops import unary_union
 from shapely.validation import make_valid
