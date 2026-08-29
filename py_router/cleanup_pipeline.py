@@ -518,8 +518,16 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         _b4a, _b4b = beautify_pad_entry_redo(
             pcb_data, config=config, scope_net_ids=_sub_scope,
             skip_net_ids=_skip)
-        _b_removed = list(_b_removed) + list(_b2a) + list(_b3a) + list(_b4a)
-        _b_added = list(_b2b) + list(_b3b) + list(_b4b)
+        # Pass 2b sub-pass 4: stub repair (Class B off-center pad/via landings
+        # extended to center, same-net gap-pair completion, safe spur trim).
+        # Conservative like the others: exact-clearance-gated incl keepout/edge,
+        # per-net connectivity-gated, skips protected/impedance nets.
+        from beautify_stub_repair import beautify_stub_repair
+        _b5a, _b5b = beautify_stub_repair(
+            pcb_data, config=config, scope_net_ids=_sub_scope,
+            skip_net_ids=_skip)
+        _b_removed = list(_b_removed) + list(_b2a) + list(_b3a) + list(_b4a) + list(_b5a)
+        _b_added = list(_b2b) + list(_b3b) + list(_b4b) + list(_b5b)
         if keep_input_copper:
             # Input-file copper is read-only (chained flows whose earlier
             # stages author escape stubs must still see them verbatim): PASS A
