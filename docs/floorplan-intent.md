@@ -91,6 +91,99 @@ knowingly.)
 }
 ```
 
+### Every key, and what happens to one you misspell
+
+An unknown key is **refused at load time, at every level** — not dropped. A
+typo'd key that is silently ignored is a constraint the author believes they
+set and the grader never checks, which is the same failure `block_unresolved`
+exists to prevent, one level down. The message names the key that was wrong and
+lists the ones that were accepted:
+
+```
+edge_connectors[0]: unknown key(s) max_setback. Known: class, context, edge,
+max_setback_mm, note, observed_overhang_mm, overhang_capped, overhang_mm, ref,
+source, suspect, suspect_reason
+```
+
+| object | keys |
+|---|---|
+| top level | `schema`, `kind`, `board`, `units`, `min_reader`, `envelope`, `defaults`, `blocks`, `keepouts`, `edge_connectors`, `decaps`, `must_lock`, `legality_budget`, `health`, `severity`, `overlap_waivers`, `context` |
+| `envelope` | `rect`, `tolerance_mm` |
+| `defaults` | `zone_tolerance_mm` |
+| `blocks[]` | `name`, `group`, `refs`, `zone`, `side`, `exclusive`, `tolerance_mm`, `note`, `context` |
+| `keepouts[]` | `name`, `rect`, `circle`, `sides`, `allow`, `note`, `context` |
+| `edge_connectors[]` | `ref`, `edge`, `overhang_mm`, `max_setback_mm`, `class`, `note`, `context`, and the emitter-written `source`, `suspect`, `suspect_reason`, `overhang_capped`, `observed_overhang_mm` |
+| `edge_connectors[].overhang_mm` | `min`, `max` |
+| `decaps` | `max_distance_mm`, `exempt`, `search_radius_mm` |
+| `legality_budget` | `overlap_area`, `oob_count`, `oob_amount` (`oob_area` refused — see below) |
+| `health` | `bus_corridors`, `classes`, `block_displacement_mm`, `ignore_net_ids`, `max_fanout`, `zoned_blocks`, `affinity_exempt_nets`, `affinity_exempt_net_ids` |
+| `health.bus_corridors[]` | `name`, `nets`, `width_mm` |
+| `severity` | any of the 12 rule names below |
+| `overlap_waivers[]` | `pair`, `reason`, `context` |
+| `must_lock` | a list of reference globs (no nested keys) |
+
+`severity` keys are checked too. The settable names are the nine rules —
+`envelope`, `zone_containment`, `zone_side`, `zone_exclusive`, `keepout`,
+`edge_connector`, `decap_distance`, `must_lock`, `legality` — plus the three
+findings raised outside the rule loop: `intent_zone_outside_envelope`,
+`intent_zone_overlap`, `block_unresolved`. `{"decap_distanc": "warn"}` is a
+demotion that never happens, so it is refused rather than accepted.
+
+### `context` is the slot for everything that is not a claim
+
+`context` is **deliberately open** — free-form keys, at the top level and on
+every `blocks[]`, `keepouts[]`, `edge_connectors[]` and `overlap_waivers[]`
+entry. Nothing reads it and no rule grades it; it is where a run records why a
+claim is what it is:
+
+```jsonc
+{ "ref": "J1", "edge": "east",
+  "context": { "why": "the mating face is on the east wall of the enclosure",
+               "rejected_alternative": "north, blocked by the display window" } }
+```
+
+It is open for the same reason everything else is strict. With nowhere to put
+reasoning, it drifts into the graded keys — a recorded run had
+`edge_connectors[]` entries carrying `band_basis`, `why`, `why_not_repaired`
+and `rejected_alternative`, which every consumer ignored. `note` is not the
+place either: it is grepped for the substring `SUSPECT`, so appending prose to
+it can change behaviour. A `context` value must still be an object; the keys
+inside it are yours.
+
+### Versioning: `schema` is the format, `min_reader` is the vocabulary
+
+`schema` is matched **exactly**, so bumping it invalidates every existing
+intent file at once — far too blunt for "this build learned a new field".
+
+So field-level compatibility is a second number. `READER_VERSION` (currently
+`1`) is what this build can act on, and an intent sets `min_reader` when a
+claim must not be silently ignored:
+
+```jsonc
+{ "schema": 1, "kind": "floorplan-intent", "min_reader": 2, ... }
+```
+
+A build whose `READER_VERSION` is lower **refuses the file** rather than
+grading it without the claim — checked before anything else is read, because
+grading it halfway is the same wrong answer as grading it fully. A build older
+than the field itself refuses `min_reader` as an unknown top-level key, which
+is the same answer.
+
+The policy, and what each half is for. Refusing unknown keys already covers
+**new** fields: an older build does not know the key, so it refuses the file
+outright and says which key it did not understand. That is loud, automatic,
+and needs no `min_reader`.
+
+What refusal cannot see is a key an older build *does* know:
+
+- its accepted **values** widened (a new `edge` direction, a new `class`);
+- its **meaning** changed, so an old build acts on it differently;
+- a **default** changed, so the same file grades differently than intended.
+
+Those are what `min_reader` is for, and the file's author is the only one who
+can know it applies. `READER_VERSION` bumps in the commit that makes such a
+change, and files depending on it declare `min_reader`.
+
 ### `refs` is the primitive, not `group`
 
 Sheet group keys are opaque uuid paths — KiCad's `Sheetname` property is absent
@@ -129,7 +222,7 @@ for it, and the reason is printed:
 | `zone_side` | a member is on the other face | `legality.footprint_side` |
 | `zone_exclusive` | a non-member intrudes on a reserved zone | `rect_overlap_area` |
 | `keepout` | any part enters a keep-out, unless in `allow` | courtyard **and** through-hole rect |
-| `edge_connector` | overhang outside `[min,max]`, or the wrong edge | `BoardOutlineGate.rect_outside_amount` |
+| `edge_connector` | overhang outside `[min,max]`, or the wrong edge; a `connector_affinity` entry seated more than 3 mm from every edge fires at **warn** whatever the configured severity | `BoardOutlineGate.rect_outside_amount`, `edge_clearance` |
 | `decap_distance` | a decoupling cap is too far from its own IC | `groups.decap_tethers` |
 | `must_lock` | a declared-critical part is not locked in the file | `parser.extract_locked_refs` |
 | `legality` | overlap or off-board parts exceed a budget | `QuenchState.legality_metrics` |
@@ -324,3 +417,39 @@ This is the same spatial incoherence that makes sheet blocks useless for
 Parts already overhanging the outline are recorded as `edge_connectors` by
 observation, which is what stops `oob_count` reporting a card edge or USB shell
 as a defect forever.
+
+With `--declare-classes`, connector-family parts that claim no edge (headers,
+JST, terminal blocks; `part_class` calls them `connector_affinity`) are also
+recorded, with `"class": "connector_affinity"` and **no `edge`** (naming one
+would be an invention). The grade then flags such a part seated more than
+3 mm from every edge at `warn` only, because legitimately interior connectors
+exist; write `max_setback_mm` or `edge` on the entry to make it a real claim
+at the configured severity.
+
+These entries are **declarations, not seat claims**, and the placement engines
+do not act on them. `edge_connectors` therefore holds two populations, and
+`Intent.edge_claims()` is the split: it drops `connector_affinity` and is what
+`place_seed` (which LOCKS edge refs for its polish quench), `place_reconstruct`
+(banded off-outline allowance, exchange-stage exclusion) and
+`reconstruct.classify` (the anchor tier) read. The `edge_connector` **rule**
+reads the whole key, because flagging an interior pose is the entry's only
+purpose. Writing `max_setback_mm` or `edge` on an entry changes its class-based
+severity, not its membership -- to hand a part the edge-part treatment in the
+engines, declare it with an edge class.
+
+The `overlap_area` budget is **withheld** when the emitting board carries a
+blocking body pair, or an unwaived courtyard interpenetration past the
+blocking floors: baking the number would bless the board it was measured on.
+`context.budget_withheld` names each withheld key and why, so a reader can tell
+"withheld" from "forgot"; declare the budget by hand if the overlap is by
+design.
+
+A withheld key is **abstained at grade time, not passed**. `check_floorplan
+--intent` reads `context.budget_withheld`, reports every withheld key that the
+intent does not also declare under `N legality budget key(s) NOT DERIVABLE --
+not graded, not passed`, and carries them as `budget_abstained` in `--json` and
+as `budget_abstained` / `budget_abstained_keys` in `JSON_SUMMARY`. When the
+whole budget is empty the `legality` rule does not run at all, and its skip
+reason names the withholding rather than saying only "the intent declares no
+legality_budget". Declaring the key by hand overrides the note: a declared
+budget is graded.

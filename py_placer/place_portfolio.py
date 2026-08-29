@@ -97,18 +97,21 @@ Examples:
                         "using it. Prices the LENGTH each foreign airwire cuts "
                         "through a corridor declared in the intent's "
                         "health.bus_corridors, at W per mm. 0 = off (default), "
-                        "and at 0 no corridor is built at all. The A/B "
-                        "(tests/test_placement_ab.py) measured it on three "
-                        "boards: it does move parts, but the re-derived "
-                        "bus_foreign_crossings improved on only ONE of the "
-                        "three and hpwl got worse on ulx3s. The optimizer "
+                        "and at 0 no corridor is built at all. It is not "
+                        "adopted because it does not pass the A/B's own rule "
+                        "(improve on N-1 boards, regress on none): it buys the "
+                        "re-derived bus_foreign_crossings by walking parts out "
+                        "of the intent's zones, so one of the three boards "
+                        "marks REGRESS on intent errors. The optimizer also "
                         "minimises against corridors frozen at construction "
                         "while the grader re-derives them from the final poses "
                         "-- and since a corridor is defined by the bus's own "
-                        "pads, moving parts moves the corridor, so the gain "
-                        "does not transfer. Read the cut as a DIAGNOSTIC "
-                        "instead: 'check_floorplan --intent --health' reports "
-                        "cut_mm and cover per corridor")
+                        "pads, moving parts moves the corridor. The numbers "
+                        "are measured, not quoted here: run "
+                        "tests/test_placement_ab.py, or read "
+                        "tests/placement_ab_baseline.json. Read the cut as a "
+                        "DIAGNOSTIC instead: 'check_floorplan --intent "
+                        "--health' reports cut_mm and cover per corridor")
     p.add_argument("--intent", default=None, metavar="JSON",
                    help="Floorplan intent: hard gate (error-free grade "
                         "required) plus the health signals in the rank key")
@@ -710,4 +713,10 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_portfolio.py', sys.argv):
+        sys.exit(main())

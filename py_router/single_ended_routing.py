@@ -493,7 +493,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     per foreign net. base_clearance should be the moving net's own floor
     (max(global, own class)). Inert when net_clearances is None.
 
-    #549: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
+    #735: `track_clearances` (config.track_clearances, {obstacle_net_id: mm})
     folds the SAME way, raise-only on top of the class value -- this channel is
     seg-vs-seg ONLY, which is exactly what this helper measures, so a caller
     passing it here must NOT pass it to the pad/via helpers (KiCad's
@@ -521,7 +521,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     d = _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by) - hw
     if net_clearances or track_clearances:
         # #436: fold each foreign net's class-excess into its distance.
-        # #549: the track-rule value raises the same per-foreign requirement.
+        # The track-rule value raises the same per-foreign requirement (#735).
         fnid = nid[near]
         _nc = net_clearances or {}
         _tc = track_clearances or {}
@@ -588,21 +588,29 @@ def _seg_foreign_via_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
 
 
 def _foreign_hole_capsules(pcb_data):
-    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r) numpy
-    arrays, one row per pad whose drill carries no copper ring (mechanical /
-    mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
+    """Cached NPTH (no-copper) drill capsules: (net_id, ax, ay, bx, by, r, lc)
+    numpy arrays, one row per pad whose drill carries no copper ring (mechanical
+    / mounting holes -- np_thru_hole, or a pad with no copper layer). The pad /
     segment / via distance trio all measure to COPPER, so they never see these
     holes; but a track crossing one is a real fab short (check_drc's track-hole
     rule, issue #233), gated by the higher NPTH-to-track floor. Holes are
     through, so the distance is layer-agnostic. Round drills degenerate to a
     zero-length capsule (a=b). Rebuilt when the board's pad count changes (pads
-    are static during routing, so this almost never refires)."""
+    are static during routing, so this almost never refires).
+
+    `lc` is the hole pad's OWN resolved `local_clearance` (#760). check_drc
+    grades this same geometry at `max(npth_clr, lc)` (#326/#505), so a consumer
+    that prices every hole at one flat floor decides below what the grader
+    requires on a pad carrying an override above the fab floor (corpus: ulx3s
+    AUDIO1, drill 1.700, override 0.400 vs the 0.20 floor). Callers opt in via
+    `_seg_foreign_hole_dist(..., base_clearance=...)`; the array is inert for
+    the 0.0 that every other corpus NPTH pad carries."""
     from check_drc import _pad_has_no_copper
     from kicad_parser import pad_drill_capsule
     sig = sum(len(p) for p in pcb_data.pads_by_net.values())
     cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
     if cache is None or cache[0] != sig:
-        nid, ax, ay, bx, by, r = [], [], [], [], [], []
+        nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []
         for pad_net, pads in pcb_data.pads_by_net.items():
             for pad in pads:
                 if (getattr(pad, 'drill', 0) or 0) > 0 and _pad_has_no_copper(pad):
@@ -610,22 +618,32 @@ def _foreign_hole_capsules(pcb_data):
                     nid.append(pad_net)
                     ax.append(p1x); ay.append(p1y); bx.append(p2x); by.append(p2y)
                     r.append(hr)
+                    lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
         cache = (sig, (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
                        np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
-                       np.asarray(by, dtype=float), np.asarray(r, dtype=float)))
+                       np.asarray(by, dtype=float), np.asarray(r, dtype=float),
+                       np.asarray(lc, dtype=float)))
         pcb_data._foreign_hole_cap_cache = cache
     return cache[1]
 
 
 def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
-                           window=_FOREIGN_PAD_WINDOW):
+                           window=_FOREIGN_PAD_WINDOW, base_clearance=None):
     """Min edge distance from a segment to any OTHER-net NPTH drill hole (the
     hole analogue of _seg_foreign_via_dist). Exact segment-to-capsule distance
     minus the hole radius; a negative result (segment over the hole) is returned
     as-is. Own-net holes are excluded (a track legitimately reaches its own
     mounting-hole pad). 1e9 when there are no foreign holes. `window` (mm):
-    per-call scan radius."""
-    nid, hax, hay, hbx, hby, hr = _foreign_hole_capsules(pcb_data)
+    per-call scan radius.
+
+    #760: with `base_clearance` (the caller's flat NPTH floor), each hole's own
+    `local_clearance` EXCESS over that floor is subtracted from its distance --
+    the same trick #436 uses for foreign net-class clearance, so the single
+    returned number stays directly comparable against the flat floor while
+    honoring check_drc's per-hole `max(npth_clr, lc)`. Omitted (the default)
+    keeps every existing caller bit-identical, so the sites #617 deliberately
+    left flat stay flat."""
+    nid, hax, hay, hbx, hby, hr, hlc = _foreign_hole_capsules(pcb_data)
     if nid.size == 0:
         return 1e9
     R = window
@@ -637,6 +655,8 @@ def _seg_foreign_hole_dist(pcb_data, net_id, x1, y1, x2, y2,
         return 1e9
     ax, ay, bx, by, rr = hax[near], hay[near], hbx[near], hby[near], hr[near]
     d = _seg_capsule_axis_dist(x1, y1, x2, y2, ax, ay, bx, by) - rr
+    if base_clearance is not None:
+        d = d - np.maximum(0.0, hlc[near] - base_clearance)
     return float(np.min(d))
 
 
@@ -3170,7 +3190,7 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     KICAD_POUR_LAUNCH=0 disables; {} when off or unavailable.
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
+    if not env_knobs.POUR_LAUNCH:
         return {}
     # Same-invocation memo: Phase 1 and Phase 3 call this back-to-back with
     # the IDENTICAL pad_components object (main_result carries it), and every
@@ -3193,10 +3213,10 @@ def _pour_launch_region_cells(pcb_data, net_id, pad_info, pad_components,
     _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm
     _NBEST = 12
     try:
-        _FRAG_MM = float(_os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+        _FRAG_MM = env_knobs.POUR_LAUNCH_FRAG
     except ValueError:
         _FRAG_MM = 1.0
-    _COPPER_RUNGS = _os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+    _COPPER_RUNGS = env_knobs.POUR_LAUNCH_COPPER
     _DEEP_MM = 0.5
     out = {}
     _bare_kept = 0
@@ -3308,7 +3328,7 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     disables; ([], []) when off, no zones, or unavailable.
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1':
+    if not env_knobs.POUR_LAUNCH:
         return [], []
     try:
         from plane_fill_model import get_zone_model
@@ -3323,7 +3343,7 @@ def _pour_launch_pair_anchors(pcb_data, net_id, sources, targets,
     _RUNGS = (1.0, 2.5, 6.0, 15.0)   # mm, same ladder as the multipoint side
     _NBEST = 12
     try:
-        _FRAG_MM = float(_os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0') or 0)
+        _FRAG_MM = env_knobs.POUR_LAUNCH_FRAG
     except ValueError:
         _FRAG_MM = 1.0
     _DEEP_MM = 0.5
@@ -3668,7 +3688,7 @@ def route_multipoint_main(
         print(f"  Existing copper joins {len(pad_info)} terminals into "
               f"{num_components} group(s)")
     if net_id in (getattr(pcb_data, '_zone_blob_fallback_nets', None) or ()):
-        # #549: the strict grouping above fell back to zone-outline credit
+        # strict view: the grouping above fell back to zone-outline credit
         # for a zone with no fill model (scipy absent / oversize) -- the
         # fragment view for this net is DEGRADED, disclose it.
         print("  (fragment view degraded to zone-outline credit: no fill "
@@ -3723,7 +3743,7 @@ def route_multipoint_main(
             'tap_edges_failed': 0,
             'tap_pads_connected': len(pad_info),
             'tap_pads_total': len(pad_info),
-            # #549 A-2: the STRICT component count behind this verdict --
+            # #578: the STRICT component count behind this verdict --
             # with the planner on the strict view, an "already connected"
             # return now really means one fragment per outline.
             'strict_fragments': num_components,
@@ -5006,7 +5026,7 @@ def _trim_after_fill_via(path, coord, layer_names, pcb_data, net_id):
     Returns (possibly-truncated path, end_original override or None).
     """
     import os as _os
-    if _os.environ.get('KICAD_POUR_LAUNCH', '1') != '1' or len(path) < 4:
+    if not env_knobs.POUR_LAUNCH or len(path) < 4:
         return path, None
     try:
         from plane_fill_model import get_fill_models

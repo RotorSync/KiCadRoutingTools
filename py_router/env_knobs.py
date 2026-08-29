@@ -104,12 +104,30 @@ def refresh() -> None:
     g['PHASE3_SPAN_FIRST'] = _s('KICAD_PHASE3_SPAN_FIRST', '0') == '1'
     g['PHASE3_SPAN_ALPHA'] = _f('KICAD_PHASE3_SPAN_ALPHA', 5.0)
     g['PHASE3_SPAN_BETA'] = _f('KICAD_PHASE3_SPAN_BETA', 2.0)
+    # In-loop stub-debris trim (default ON, KICAD_STUB_DEBRIS_TRIM=0
+    # reverts): when a route commits, immediately prune the unused
+    # branches of its own pre-existing stub tree AND any via they leave
+    # dangling, so the freed cells are routable by the very next net --
+    # sweep_dead_ends does the same board-wide but only at cleanup,
+    # after every net has already routed around the debris (and it never
+    # touches input vias at all).
+    g['STUB_DEBRIS_TRIM'] = _on_default('KICAD_STUB_DEBRIS_TRIM')
     g['IMPEDANCE_NECKDOWN'] = (_s('KICAD_IMPEDANCE_NECKDOWN', '1').strip().lower()
                                not in ('0', 'false', 'no', 'off'))
     # #648 oracle source union: kicad-cli DRC gates the demand set, the
     # exact-fill source carries the geometry. =0 restores the pure exact
     # source for A/B.
     g['ORACLE_UNION'] = _s('KICAD_ORACLE_UNION', '1') != '0'
+    # #650 in-run DRC floor sync: before anything grades the board mid-run,
+    # lower the output's sibling .kicad_pro to the COPPER floors this run
+    # routed to, so the in-run audit fills the pours the way the SHIPPED
+    # board will. Until this, that sibling was the input's (seeded by
+    # seed_project_for_output) and its looser declared floors pulled the
+    # pours back further than the shipped board's -- measured on orangecrab:
+    # 57 reported opens vs the 46 that ship (GND 19 vs 11), all of it
+    # rules.min_hole_clearance 0.25 -> 0.0889. =0 restores the old staleness
+    # for A/B.
+    g['INRUN_FLOOR_SYNC'] = _s('KICAD_INRUN_FLOOR_SYNC', '1') != '0'
     # #667 net-tie band pricing (mm-equivalent cost per band cell,
     # DIFFERENTIAL: the own-pad approach stays free, off-pad corridor
     # cells are priced). Measured INERT on cynthion at 0.5 and 5.0 --
@@ -329,7 +347,7 @@ def refresh() -> None:
     g['PLANE_MAP_PARITY'] = _truthy('KICAD_PLANE_MAP_PARITY')
     g['SETTLE_DEBUG'] = _truthy('KICAD_SETTLE_DEBUG')
     g['LEGACY_GATE_ORACLE'] = _truthy('KICAD_LEGACY_GATE_ORACLE')
-    # #549 D: route.py's end-of-run oracle summary check (one staged
+    # route.py's end-of-run oracle summary check (one staged
     # kicad-cli DRC per run). Now OPT-IN (KICAD_ORACLE_SUMMARY=1), reverted
     # from default-on: it was billed as "strictly additive -- only ADDS
     # failure disclosure", but it also APPENDS to failed_multipoint, which
@@ -341,6 +359,37 @@ def refresh() -> None:
     # and it silently breaks A/B comparability. Disclosure is fine to make
     # environment-dependent; copper is not. See issue #675.
     g['ORACLE_SUMMARY'] = _opt_in('KICAD_ORACLE_SUMMARY')
+    # #648's third link-source branch (exact-fill -> kicad-cli -> raster).
+    # OPT-IN on purpose: a silent fallback would make the oracle run off a
+    # different source depending on whether KiCad is installed, i.e. make
+    # COPPER environment-dependent -- the exact failure #675 reverted the B-1
+    # check for. Opt in and you accept a weaker source knowingly.
+    g['RASTER_ORACLE'] = _opt_in('KICAD_RASTER_ORACLE')
+    # HOT knobs (measured, not guessed): on splitflap_driver one route reads
+    # KICAD_VIA_RUNG 902 times and KICAD_POUR_LAUNCH 316 -- they sit inside
+    # per-net / per-endpoint loops, which is exactly the "hammers the environ
+    # dict from hot paths" this module exists for. Every other bare-read knob
+    # in the tree measured 1-2 reads per run and is left at its call site.
+    # Parse semantics preserved: VIA_RUNG is a =='2' string test with default
+    # '2' (so '1' or anything else disarms), the POUR_LAUNCH pair are =='1'
+    # tests with default '1' (default ON, any other value disables), and
+    # POUR_LAUNCH_FRAG keeps its `or 0` empty-value rule -- see below for the
+    # one deliberate deviation.
+    g['VIA_RUNG_2'] = os.environ.get('KICAD_VIA_RUNG', '2') == '2'
+    g['POUR_LAUNCH'] = os.environ.get('KICAD_POUR_LAUNCH', '1') == '1'
+    g['POUR_LAUNCH_COPPER'] = os.environ.get('KICAD_POUR_LAUNCH_COPPER', '1') == '1'
+    # NOT _f(): the call site was `float(get(name, '1.0') or 0)`, so an
+    # EMPTY value means 0.0 (threshold disabled) where _f would hand back the
+    # 1.0 default -- silently re-enabling a threshold someone turned off,
+    # which is precisely the "stricter parse disables a recorded workflow"
+    # this module's docstring warns about. Preserved exactly. The one
+    # deliberate difference: garbage used to raise ValueError mid-route, and
+    # now falls back to the default; a crash is nobody's workflow.
+    _plf = os.environ.get('KICAD_POUR_LAUNCH_FRAG', '1.0')
+    try:
+        g['POUR_LAUNCH_FRAG'] = float(_plf or 0)
+    except ValueError:
+        g['POUR_LAUNCH_FRAG'] = 1.0
     g['NO_GATE_ORACLE'] = _truthy('KICAD_NO_GATE_ORACLE')
     g['GATE_DEBUG'] = _truthy('KICAD_GATE_DEBUG')
     g['NO_SWEEP_PLATED'] = _truthy('KICAD_NO_SWEEP_PLATED')

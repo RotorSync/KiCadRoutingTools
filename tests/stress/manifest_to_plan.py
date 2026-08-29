@@ -151,8 +151,12 @@ LIST_FLAGS = {
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
-    # #284/#521: rip-existing and protect allowlists (nargs='+' globs). Both
-    # route to TextCtrls via ai_plan's alias table.
+    # #284: the rip-existing allowlist (nargs='+' globs), routed to a TextCtrl
+    # via ai_plan's alias table. #521's `--protect-nets` was REMOVED from every
+    # tool in 53a5a16e and is deliberately absent here: it had no LIST_FLAGS
+    # entry, so the conversion loop would have raised KeyError on any manifest
+    # carrying it. Protection is now recorded in the .kicad_pro by the step that
+    # routes a matched group or diff pair, not passed as a flag.
     '--rip-existing-nets': 'rip_existing_nets',
     # bga_fanout's future-pour declaration (NET:LAYER[,LAYER...] specs,
     # nargs='+'). Review parity finding 5: a recorded manifest carrying the
@@ -219,6 +223,13 @@ IGNORE_FLAGS = {'--output', '--summary-json', '--schematic-dir', '--report',
 # but its GUI home is the QFN panel's own control (see TOOL_FLAG_PARAMS, #381 D7).
 TOOL_FLAG_ALIASES = {
     'bga_fanout.py': {'--width': '--track-width'},
+    # Both fanout CLIs now accept BOTH spellings (they used to disagree, which
+    # cost a recorded run and a replay a wasted step each). Normalize qfn's
+    # --track-width to --width HERE, before TOOL_FLAG_PARAMS is consulted --
+    # otherwise it falls through to the global FLAG_PARAMS['--track-width'] and
+    # lands on the Basic-tab track_width instead of the QFN panel's own
+    # control, which is precisely the #381 D7 bug the override below fixes.
+    'qfn_fanout.py': {'--track-width': '--width'},
 }
 
 # Per-tool flag -> plan-param overrides (win over the global FLAG_PARAMS).
@@ -430,7 +441,7 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets', '--pair'):
+              '--rip-existing-nets', '--pair'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step
@@ -445,6 +456,14 @@ def parse_command(argv):
 # (in its manifest position, i.e. after the fanout it followed), for parity with a
 # live-generated plan. Flag -> fanout-tab cap-placement control name:
 CAP_FLAG_PARAMS = {
+    # #768. NOT a cap_* name, for the same reason --board-edge-clearance below
+    # is not: its GUI home is the SHARED Basic-tab clearance control, which is
+    # what fanout_gui's cap step reads. Absent from this table, a recorded
+    # `place_fanout_clearance.py ... --clearance 0.1` silently lost its
+    # clearance on conversion, and the GUI re-derived a different one -- on the
+    # one parameter whose two branches decide whether the step clamps the
+    # project at all.
+    '--clearance': 'clearance',
     '--capture-radius': 'cap_capture_radius',
     '--near-margin': 'cap_near_margin',
     '--step': 'cap_step',
@@ -453,7 +472,40 @@ CAP_FLAG_PARAMS = {
     '--displacement-growth': 'cap_displacement_growth',
     '--max-passes': 'cap_max_passes',
     '--cap-prefix': 'cap_prefix',
+    # #772. This row used to say 'board_edge_clearance', with a comment
+    # claiming ai_plan's _GEOMETRY_OVERRIDE_CHECKS 'already maps by this exact
+    # name ... so a plan carrying it ticks the override box and the value
+    # reaches the engine'. That became FALSE the moment the #733 FOLLOW-UP
+    # gave the cap margin its own control: the Basic tab's Min Edge Clearance
+    # is the SIGNAL copper-to-edge keep-out, a different quantity that only
+    # shares a flag SPELLING across two independent tools, and
+    # get_shared_params stopped emitting cap_board_edge_clearance in the same
+    # change. Measured on the real headless dialog: `--board-edge-clearance
+    # 0.85` set the SIGNAL control, TICKED its override (which then leaked
+    # into the next step's routing), and the cap engine received None.
+    #
+    # The right name is the CONTROL's name -- the rule the nine rows above
+    # already follow. An explicit 0 needs no special case: the spin maps 0 to
+    # None and resolve_cap_edge_clearance applies the same
+    # non-positive-is-unset rule to an explicit CLI value, so both fronts land
+    # on the same resolved margin. Only an EXPLICIT flag needs carrying; an
+    # omitted one resolves identically on both fronts.
+    '--board-edge-clearance': 'cap_board_edge_clearance',
+    # #772: the cap pass snaps its candidate positions to this and reads it
+    # off the Basic tab via get_shared_params. Without a row, a recorded
+    # --grid-step was dropped and the step ran at whatever the previous one
+    # left behind.
+    '--grid-step': 'grid_step',
 }
+# Deliberately NOT mapped, and why:
+#   --default-via-size  a FALLBACK for vias whose size cannot be read, not
+#       geometry this pass places. Its only same-named GUI home is the Basic
+#       tab's via_size, and landing there would tick the via-size override
+#       (leaking a via floor into the next step) AND feed
+#       PlanExecutor._write_drc_floors, which writes via_size into the
+#       project.
+#   --lock              nargs='+' extra locked refs; the GUI has no control.
+#   --verbose           console verbosity, not a routing parameter.
 CAP_BOOL_FLAGS = {'--no-rotate': ('cap_allow_rotation', False)}  # inverted sense
 
 

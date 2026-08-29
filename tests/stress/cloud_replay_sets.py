@@ -959,12 +959,36 @@ def main():
                     help="proceed even if the baseline wave was built from a dirty tree")
     ap.add_argument("--no-baseline", action="store_true",
                     help="skip baseline checks and the compare stage entirely")
+    ap.add_argument("--with-kicad", action="store_true", default=True,
+                    help="(DEFAULT since 2026-08-23) build the image WITH KiCad "
+                         "(kicad/kicad:10.0.0) so the oracle legs actually run. "
+                         "Use --no-kicad to opt out.")
+    ap.add_argument("--no-kicad", dest="with_kicad", action="store_false",
+                    help="build WITHOUT KiCad (the old default). Every oracle leg "
+                         "is then DEAD, not degraded -- oracle_reconnect returns "
+                         "available=False as soon as find_kicad_cli() is None, so a "
+                         "change acting only through the finalize audit / #589 "
+                         "re-audit / oracle-summary check A/Bs as a PERFECT NULL that "
+                         "reads as a measurement (#650). Only use it when you know "
+                         "the change cannot touch an oracle leg and you want the "
+                         "cheaper image. NOTE the arm label loses its -kc suffix, "
+                         "so such an arm is not comparable with a KiCad one.")
     args = ap.parse_args()
 
     sets = expand_sets(args.sets)
     stress = Path(args.stress_dir).expanduser()
     if not stress.is_dir():
         raise SystemExit(f"stress dir not found: {stress}")
+    if args.with_kicad:
+        # The results volume RESUMES by arm name, and arm = label + sha. Two
+        # waves at the SAME commit that differ only by the image would collide
+        # there -- the no-KiCad rows would be re-used for the KiCad arm and the
+        # two engines reported as one, the exact "the baseline was not the
+        # baseline" failure arm_name() exists to prevent. Suffix the label so
+        # they can never share an arm.
+        if not args.label.endswith("-kc"):
+            args.label += "-kc"
+        os.environ["KICAD_SWEEP_WITH_KICAD"] = "1"
     if not args.out:
         args.out = str(stress / f"cloud_{args.label}_{git_sha()}")
     if not args.workdir:
@@ -980,6 +1004,7 @@ def main():
     print(f"stress    : {stress}")
     print(f"out       : {args.out}")
     print(f"stages    : {', '.join(stages)}")
+    print(f"image     : {'kicad/kicad:10.0.0 (oracle legs LIVE)' if args.with_kicad else 'debian_slim (no KiCad -- oracle legs are no-ops)'}")
 
     plan = stage_plan(args, sets, stress) if "plan" in stages else {}
     if args.dry_run:

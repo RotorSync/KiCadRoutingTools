@@ -191,7 +191,8 @@ def measure(state, edge_bands=None) -> Tuple:
     Two measured lessons live in this order. Run 4 demoted the AGGREGATE
     overlap_area below hpwl (it had vetoed a 44 mm hpwl homecoming over
     +0.73 mm^2 of courtyard kiss; run 2 measured it POSITIVELY correlated
-    with distance-to-truth, r = +0.72 -- courtyards carry their own margin
+    with distance-to-truth -- DISTANCE, not routed blocking
+    (docs/placement-predictors.md) -- r = +0.72; courtyards carry their own margin
     and human boards have a nonzero floor). Run 5 then shipped two 0402s
     STACKED because nothing above hpwl could see them: the stack-pair COUNT
     is the non-gameable per-pair channel (corpus-calibrated ZERO on all 33
@@ -306,7 +307,9 @@ def classify(state, intent=None, anchor_extent='auto') -> Tiers:
     else:
         thr = float(anchor_extent)
     t.threshold = round(thr, 3)
-    edge_refs = ({c['ref'] for c in intent.edge_connectors}
+    # edge_claims(): forcing a connector_affinity part into the anchor tier
+    # would let a class declaration reshape the reconstruction.
+    edge_refs = ({c['ref'] for c in intent.edge_claims()}
                  if intent is not None else set())
     t.edge = edge_refs & set(state.parts)   # run-4 F2: kept, not discarded
     t.anchors = {r for r in free
@@ -1414,11 +1417,27 @@ def airwire_cluster_vectors(state, *, cluster_tol: float = 1.5,
     vectors should CLUSTER on the damage while a healthy design's long
     airwires point in unrelated directions.
 
-    They do not. Measured over the 33 in-repo boards and two recorded
-    perturbed ones, at the endorsed filters (nets of 2-4 pads, airwires over
-    8mm, three agreeing within 1.5mm):
+    They do not. Measured over the in-repo boards and two recorded perturbed
+    ones, at the endorsed filters (nets of 2-4 pads, airwires over 8mm, three
+    agreeing within 1.5mm) -- which are this function's defaults, so the
+    numbers below are what a plain call returns:
 
-        healthy boards firing          6 of 33, with support up to 112
+        healthy boards firing          18 of 22, with support up to 112
+
+    That count is over the boards git TRACKS under kicad_files/ (22), which is
+    the only fixed set: the directory also fills with generated boards, so a
+    plain glob of it gives 22 / 27 / 33+ depending on how used the working copy
+    is (see run_utils.corpus_boards). On the 33-entry glob it is 29 of 33.
+
+    The line originally recorded here said `6 of 33`, and that number could not
+    be reproduced -- not by today's code, and not by the code of the commit
+    that wrote it (f5cee877, 0812), which already measured 18 of 22 and 29 of
+    33 at these defaults on the same 22 tracked boards. It is corrected rather
+    than deleted because the refutation does not depend on it and is only
+    STRENGTHENED: the finding is "healthy boards fire", and far more of them
+    fire than was recorded. How `6` was obtained is unknown; the test below
+    now RE-MEASURES rather than grepping this text for a substring, so a
+    number in this docstring can no longer disagree with the code silently.
         a board translated by (4.5, -2.4), |v| = 5.1
                                        top cluster (6.7, 21.4), support 28
                                        -- not the damage, and not close
@@ -1624,7 +1643,8 @@ def _body_contained(state, a: str, pos_a, b: str, pos_b) -> bool:
 
     This charges CONTAINMENT, not a kiss. Two courtyards touching is not a
     defect and is not priced here; that ordering decision (run-4, r=+0.72 of
-    courtyard overlap with distance-to-truth) is untouched, and `measure()`
+    courtyard overlap with distance-to-truth, never with routed blocking) is
+    untouched, and `measure()`
     still carries `overlap` as its last tiebreak below hpwl.
 
     A part whose footprint draws no `.Fab` outline is UNJUDGED: this returns

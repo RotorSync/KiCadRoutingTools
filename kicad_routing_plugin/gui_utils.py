@@ -29,6 +29,20 @@ def set_ui_status_mirror(fn):
 _LAST_UI_YIELD = 0.0
 
 
+def save_board_via_ui_thread(path, board, timeout_s=None):
+    """Plugin-side alias for :func:`ui_thread.save_board_on_ui_thread` (#688).
+
+    The implementation is ENGINE-side because the engine makes worker-thread
+    pcbnew calls of its own (the live-fill provider in
+    ``kicad_parser.build_pcb_data_from_board``), so the guard cannot live only
+    here. See that module for the py-spy evidence and the reasoning.
+    """
+    from ui_thread import save_board_on_ui_thread, SAVE_BOARD_UI_TIMEOUT_S
+    return save_board_on_ui_thread(
+        path, board,
+        SAVE_BOARD_UI_TIMEOUT_S if timeout_s is None else timeout_s)
+
+
 def ui_thread_status(status_text, progress_bar, message):
     """Show `message` for work running ON the wx main thread.
 
@@ -624,7 +638,7 @@ def default_netclass(board):
 def update_live_drc_floors(board, *, clearance=None, track_width=None,
                            via_size=None, via_drill=None,
                            hole_to_hole=None, edge_clearance=None,
-                           log=None):
+                           nondefault_clamp_mm=None, log=None):
     """Per-step live DRC floor update -- the GUI twin of the CLI's
     per-step fix_project_for_output (#160). KiCad holds project settings in
     memory, so only the design-settings API affects a DRC run right after a
@@ -637,6 +651,29 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
       nominal width/via floor, and a floor of 0.127 still flags a
       legitimate 0.089 tap -- 48 of the 51 'violations' in Andy's bitaxe
       DRC.rpt were this class.
+
+    ``nondefault_clamp_mm`` (#782) additionally clamps every NON-Default net
+    class's clearance down to that value. THE PRESENCE OF A VALUE IS THE SWITCH,
+    exactly as `--clearance` is on the CLI: None means the run honoured the
+    board's classes and they are preserved; a number means the run was given a
+    ceiling, priced every class at min(class, ceiling), and the classes must be
+    lowered to match or KiCad grades correct copper against a class the run never
+    used (#439/#768).
+
+    Pass the CEILING, not the effective clearance. They differ whenever the
+    board's Default sits below the ceiling -- flat_hierarchy is Default 0.2 /
+    Wide 0.4, so an operator ceiling of 0.3 prices Wide at 0.3 while the
+    effective clearance is 0.2. Clamping to 0.2 would ship a class BELOW the
+    value the pass was priced at, which is #768's own shape in the safe
+    direction, and it is still #768's shape.
+
+    RETURNS the list of non-Default clamp change strings (empty when nothing was
+    clamped, which includes every call that passes no ceiling). Returned rather
+    than logged from in here on purpose: the caller decides how to disclose a
+    change to the board's declared spec, and routing that through this
+    function's `log` would have meant handing it a logger the fanout tab
+    deliberately does not pass -- which would have added the generic
+    "floors relaxed" line to every fanout run as a side effect of a clamp fix.
 
     Best-effort: never raises."""
     # #521: manual (non-plan) runs consume the engine-noted protection
@@ -656,6 +693,7 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
             persist_impedance_specs(_pro, consume_impedance_specs())
     except Exception:
         pass
+    _clamped = []
     try:
         import pcbnew
         # mm_to_iu, NOT pcbnew.FromMM: FromMM TRUNCATES (#493). Measured on this
@@ -758,12 +796,26 @@ def update_live_drc_floors(board, *, clearance=None, track_width=None,
                           via_drill, min_drill)
         except Exception:
             pass
+        # #782: the NON-Default classes. Delegated, never re-implemented -- this
+        # is the same clamp `apply_targets_to_board` applies for the signal /
+        # differential / planes tabs, and a second copy here is the bug class
+        # #736/#747/#775 each fixed once in the placement engine.
+        if nondefault_clamp_mm is not None:
+            try:
+                from fix_kicad_drc_settings import (
+                    clamp_nondefault_netclasses_on_board)
+                _clamped = clamp_nondefault_netclasses_on_board(
+                    board, {'min_clearance': float(nondefault_clamp_mm)})
+            except Exception as _nde:                          # noqa: BLE001
+                _clamped = [f'(non-Default net-class clamp skipped: {_nde})']
         if log:
             log("Live DRC floors relaxed to this step's routed values "
                 "(clamped to actual board minima)\n")
+        return _clamped
     except Exception as e:
         if log:
             log(f"(live DRC floor update skipped: {e})\n")
+    return _clamped
 
 
 def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
@@ -771,6 +823,8 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    grid_step, track_via_clearance=None,
                                    hole_to_hole_clearance=None,
                                    layer_clearances=None,
+                                   layers=None, layer_costs=None,
+                                   power_net_widths=None,
                                    progress_callback=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
@@ -807,10 +861,24 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                         or 0) / 1e6
         except Exception:
             _edge_mm = 0.0
+        # #658 (audit finding): this config used to be BARE -- no layers, no
+        # layer_costs, no power_net_widths -- so the weld router here ran at
+        # UNIFORM layer economics while the CLI finalize priced them, and the
+        # #658 forbidden-layer guards inside oracle_reconnect were inert.
+        # Costs are soft, so a weld that MUST cross a plane layer still can.
+        # Omitted values fall back to the dataclass defaults, so an older
+        # caller that passes none behaves exactly as before.
+        _cfg_kw = {}
+        if layers:
+            _cfg_kw['layers'] = list(layers)
+        if layer_costs:
+            _cfg_kw['layer_costs'] = list(layer_costs)
+        if power_net_widths:
+            _cfg_kw['power_net_widths'] = dict(power_net_widths)
         ocfg = GridRouteConfig(
             clearance=clearance, track_width=track_width,
             via_size=via_size, via_drill=via_drill, grid_step=grid_step,
-            board_edge_clearance=_edge_mm)
+            board_edge_clearance=_edge_mm, **_cfg_kw)
         # #498: the temp save has no sibling .kicad_dru, so the oracle's own
         # auto-read finds nothing -- install the map explicitly (caller's
         # resolved map when given, else read the LIVE board's project file).

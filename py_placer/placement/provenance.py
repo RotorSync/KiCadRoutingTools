@@ -48,6 +48,13 @@ LEVER_REGISTRY = (
     'place_seed.py', 'place_optimize.py',
     'place_reconstruct.py', 'place_portfolio.py', 'place_route_loop.py',
     'place_fanout_clearance.py', 'converge.py',
+    # The ROUTER is a deliberate pose author: #666's scoped cap move calls
+    # `write_placed_output` to relocate a cap off a rescue via. Absent from
+    # this list it raised `UnaidedViolation` inside the funnel, route.py's
+    # own `except Exception` swallowed it, and the router SILENTLY SKIPPED a
+    # repair it performs everywhere else -- so an unaided work dir got a
+    # different router. It lives in py_router/, not py_placer/.
+    'route.py',
     # Staging tools author poses BY DESIGN -- that is what staging is.
     # `perturb.py` is a LIBRARY with no __main__; it is reached through
     # stage_blind, whose declaration covers it by the innermost-wins rule.
@@ -189,6 +196,7 @@ def record_write(input_file: str, output_file: str,
     # reformatting cannot fingerprint the moved block; without the split every
     # row would claim the whole board and the audit would be vacuous.
     moved = []
+    before = None
     try:
         from kicad_parser import parse_kicad_pcb
         before = parse_kicad_pcb(input_file).footprints
@@ -207,6 +215,27 @@ def record_write(input_file: str, output_file: str,
     except Exception:                            # noqa: BLE001
         moved = [p.get('reference') for p in placements]
 
+    # The POSE, not only the ref. A claim keyed on the ref alone says "the
+    # engine touched C1", which a later hand edit of C1 then inherits: the
+    # audit compares ref sets, finds C1 claimed, and grades CLEAN. Since a
+    # real run legitimately moves most of the board, ref-keyed claims make
+    # most of the board launderable, and the instrument is weakest exactly
+    # where the run is most active. Recording where each ref was PUT lets the
+    # audit compare the delivered geometry against the claim.
+    _written = {}
+    for p_ in placements:
+        _ref = p_.get('reference')
+        if not _ref:
+            continue
+        _fp = (before or {}).get(_ref) if isinstance(before, dict) else None
+        _written[_ref] = [
+            round(float(p_.get('new_x', getattr(_fp, 'x', 0.0) or 0.0)), 6),
+            round(float(p_.get('new_y', getattr(_fp, 'y', 0.0) or 0.0)), 6),
+            round(float(p_.get('new_rotation')
+                        if p_.get('new_rotation') is not None
+                        else (getattr(_fp, 'rotation', 0.0) or 0.0)) % 360.0,
+                  4)]
+
     row = {'t': time.time(), 'schema': SCHEMA,
            'path': os.path.abspath(output_file),
            'parent_sha256': (sha256_file(input_file)
@@ -214,6 +243,7 @@ def record_write(input_file: str, output_file: str,
            'lever': lever['lever'], 'lever_argv': lever['lever_argv'],
            'declared': True, 'caller': _caller(),
            'refs_written': sorted(p.get('reference') for p in placements),
+           'poses_written': _written,
            'refs_moved': sorted(r for r in moved if r)}
     if pending:
         row['_root'] = root

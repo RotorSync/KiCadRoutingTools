@@ -139,7 +139,7 @@ rotation, and an unlocked load-bearing rotation was never protected from the
 quench either. Explore rotations deliberately with
 `place_portfolio.py --strategy poses`.
 
-### The eviction rung (`--evict-depth`, #630)
+### The eviction rung (`--evict-depth`, #630, #699)
 
 A part with no legal pose is not necessarily a part with no **room**. Run 19
 measured the difference: three sweeps returned a bare *"no legal pose anywhere
@@ -152,9 +152,7 @@ So when a part cannot be seated, the seeder counts its poses with each nearby
 seated incumbent lifted in turn. That census runs at every depth and is what
 the JSON_SUMMARY's `no_pose_blockers` (`{ref: {blocker: poses_freed}}`)
 reports, next to `unseated_refs` (names, not just a count). `--evict-depth 0`,
-the default, stops there: *tell me what is in the way, move nothing*. The
-`--reseat` path carries the same keys (`no_pose_blockers`, `evictions`,
-`evictions_reverted`) for its scope; it runs at depth 0, so the counts are 0.
+the default, stops there: *tell me what is in the way, move nothing*.
 
 `--evict-depth 1` also trades: evict the incumbent that frees the most, seat
 the blocked part **first** against the lifted board, then put the blocker back
@@ -170,13 +168,89 @@ pile has an artificially short HPWL, so any gate that ranks it refuses every
 legal seat. A trade that fails puts both parts back and is recorded as
 reverted (`evictions` counts kept trades, `evictions_reverted` the others).
 
-Bounded on every axis: depth 1 (a blocker's own blocker is not chased), at
-most 8 candidates per part (a geometric superset, so a part outside the box
-frees zero poses by construction), one trade per part, and the census counts
-to a cap. Locked parts and declared edge connectors are never candidates. The
-rung only fires on a part that was going to be reported unseated, so a run
-that seats everything is unaffected at either depth. It is opt-in until an
-A/B row on three boards exists (`tests/test_placement_ab.py`).
+**`--evict-depth 2` lifts a PAIR (#699).** A rung that only ever lifts one
+neighbour records *"immovable"* for a part two neighbours jointly block, and
+that verdict is true only of the basin the board happens to be in — the
+reporting case censused 8 neighbours, none of which frees a pose alone, on a
+board whose truth arrangement seats the part by moving two of them together.
+Depth 2 asks the same question of pairs, and **only for a part no single lift
+helped**: the pair sweep cannot be pruned by the single-lift counts, because
+in the case it exists for every one of them is zero. The trade, the ordering
+and the acceptance rule are the same code, not a second copy — the blockers
+simply go back **hardest first** (descending courtyard extent), each with the
+not-yet-returned ones still excluded, since a lifted part has not moved and
+would otherwise veto from a pocket it is about to vacate. Nothing deeper is
+defined: depth 3 is refused rather than silently meaning 2.
+
+Bounded on every axis: **no recursion at either depth** (a blocker's own
+blocker is not chased), at most 8 candidates per part (a geometric superset,
+so a part outside the box frees zero poses by construction), at most
+`EVICT_MAX_PAIRS = 16` of the C(8,2) pairs — ordered by `(i + j)` over the
+nearest-first candidate list, so truncation drops the far-far pairs instead of
+starving one candidate of partners — **one trade per part** (a single lift
+that was useful but whose trade reverted does *not* fall back to a pair), and
+the census counts to a cap. Every one of those is a **count**, never a clock:
+a wall-clock budget would place the same board differently on a slow machine
+and a fast one (#621). What a cap drops is reported, not silently omitted.
+Locked parts and declared edge connectors are never candidates. The rung only
+fires on a part that was going to be reported unseated, so a run that seats
+everything is unaffected at any depth. It is opt-in until an A/B row on three
+boards exists (`tests/test_placement_ab.py`).
+
+**The verdict says WHY, not just who (#699).** `no_pose_blockers[ref] == {}`
+used to mean two different things with opposite answers for the reader —
+"nothing seated is near this part" and "everything near it is locked" — and at
+depth 0 a census that freed nothing printed nothing at all. Every unseated
+part the rung reaches now carries a `no_pose_verdict` and a `no_pose_census`,
+in the JSON_SUMMARY and as a NOTE:
+
+| verdict | what it means | what to do about it |
+| --- | --- | --- |
+| `no_movable_neighbour` | nothing seated is near enough to be in the way | the outline, the zone or the part's own size refuses it |
+| `immovable_given_frozen` | the only neighbours in the way are locked or declared edge connectors, **named with the decision that froze each** | relax that lock, or accept the pose |
+| `no_single_lift_frees` | movable neighbours censused; no single lift frees a pose | try `--evict-depth 2` |
+| `no_pair_lift_frees` | ...and no pair of them frees one either | the room is not there |
+| `blocker_available` | a lift *would* free a pose; the depth declined to move | raise `--evict-depth` |
+| `trade_reverted` | a trade was attempted and put back | read the recorded conjunct |
+| `seated_after_eviction` | not unseated after all | — |
+| `no_target_recorded` | the rung never got to ask (no recorded seat context) | — |
+
+`no_pose_census[ref]` carries the counts those verdicts came from — `boxed`,
+`movable`, `censused`, `frozen`, `truncated`, `baseline`, `pairs_total`,
+`pairs_censused`, `pairs_truncated`, `best_pair` — so a capped sweep can never
+read as a complete one. `movable` and `censused` are deliberately separate:
+the first is how many neighbours *could* have been censused, the second how
+many were, and quoting the first as the second is the inversion the whole
+disclosure exists to prevent.
+
+**On the `--reseat` path** the same flag applies and the same keys are
+carried. Depth ≥ 1 is the one exception to that pass's *"every other part is
+held fixed"* contract: it may trade out a seated **non-scope** neighbour, and
+those refs are named in `evicted`, in a NOTE, and in `moves`. They have to be
+in `moves` — that list is the whole of what gets written, so an evicted part
+left out of it is written at its **old** pose while the scope ref takes the
+pocket it vacated, which is overlapping copper reported as success. `evicted`
+names what reached the **written** board: a pass the gate refused wrote
+nothing, so it reports none even though `evictions` records the attempt.
+
+An evicted part is **exempt from the per-part prune sweep**, and that is what
+makes the trade atomic rather than a nicety. `prune_assignment` reverts a
+moved part whenever restoring its input pose strictly improves the gate tuple
+— `evidenced` gates only the *equal* case — and `GATE_TERMS` ranks `hpwl`
+above `overlap`, so putting an evicted blocker back into the pocket the trade
+just gave away scores as an improvement. Measured: prune restored a blocker
+inside the seated part's courtyard on hpwl 24.4 → 14.4, the licence then
+correctly refused the board prune had damaged, and a legal pair trade that
+would have taken `oob` 9.65 → 0 was thrown away whole. `exempt`'s own
+rationale — *"an edge-class seat is hpwl-worse BY DESIGN; pruning it back
+would undo the seat one stage later"* — is exactly this case.
+
+The pass additionally refuses any eviction that raised the board's stack count
+or overlap area (`eviction_licence_ok`): its ordinary gate compares `oob`
+lexicographically first, and `oob` moves hugely in this pass's own favour, so
+a new stack would sit below it unread. At depth 0 — the default, and what
+`place_reconstruct`'s reseat rung uses — nothing outside the scope is touched
+and the counts are 0.
 
 Requires an Edge.Cuts outline (exit 3 without one — the outline is spec-owned
 and will not be invented) and refuses a board that already looks placed
@@ -198,6 +272,18 @@ shared via connects ball + cap + plane). Caps move as little as possible
 that can't clear within the (auto-grown) displacement budget is reported
 unresolved for a manual nudge.
 
+The summary line reads `Moved N cap(s); resolved R/V initial violations;
+K unresolved`. Since #746 both counts are graded from the **same** board state,
+at the end of the pass: `resolved` means "was grazing at the seed and is clean
+now" and therefore credits the #313 via-nudge as well as the cap move, with
+`(F freed by via-nudge)` naming that share. `unresolved` means "grazing now",
+which is not a subset of the seed violators — copper the pass itself drew can
+break a cap that started clean, and when it does, a `Re-grazed by this pass's
+own connector copper:` line names those caps. Before #746 `resolved` was
+computed before the nudge and never refreshed, so a cap the nudge freed reached
+neither list, and a cap the sweep had cleaned before the pass re-grazed it
+reached both.
+
 It reads each via's actual size from the board, so the only setting that
 matters is `--clearance`, which must match the fanout / DRC floor:
 
@@ -208,12 +294,15 @@ python py_placer/place_fanout_clearance.py fanned.kicad_pcb capclean.kicad_pcb -
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--clearance` | 0.25 mm | DRC clearance; **set to the fanout/DRC floor** |
+| `--clearance` | the board's own Default net-class clearance, else 0.25 mm | Copper clearance **CEILING**, and the PRESENCE of the flag is the clamp switch -- the same two branches CLAUDE.md documents for `route.py` (#768). GIVEN: every class is priced at `min(class, this)` and the output `.kicad_pro` is clamped down to it. OMITTED: each pair is priced at its own net-class clearance and the classes are PRESERVED. Before #768 this step ran one branch for pricing and the other for the writeback in the same invocation, so `--clearance 0.1` on a board declaring 0.2 moved caps to satisfy 0.2 and then shipped a project saying 0.1 (measured on `glasgow_revC`, 19 pairs, and `ottercast_audio`, 79). Only the NETCLASS tier is capped: a `.kicad_dru` layer rule and a pad `local_clearance` still outrank the ceiling, because the writeback clamps neither and KiCad goes on enforcing both. `--clearance` is a copper-clearance ceiling only -- it no longer redefines `min_hole_clearance`, which the writeback now passes from the board's own declaration. A value below the layer-bucketed fab clearance floor (0.10 mm at <=2 copper layers, 0.09 mm at >=3) is DISCLOSED and honoured, not raised, because `check_drc` does not raise it either. |
 | `--cap-prefix` | `C,R` | Comma-separated reference prefix(es) for movable passives near a BGA (caps **and** resistors by default). Only 2-copper-pad parts move, so RN-style arrays are auto-excluded; paste-only apertures are ignored when counting pads. |
 | `--capture-radius` | 2 mm | Max distance over which a same-net ball attracts a pad |
 | `--max-displacement` / `--max-displacement-cap` | 2 / 3 mm | Initial and grown move budget per cap |
-| `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size |
+| `--default-via-size` | 0.3 mm | Fallback only, for vias with no readable size. Honoured by the grader **and** the via-nudge since #732; before that the nudge priced such a via at a hard-coded 0.5 and the two disagreed. |
+| `--board-edge-clearance` | the board's own `min_copper_edge_clearance` when it asks for MORE, else 0.55 mm | Copper-to-Edge.Cuts margin for a moved cap **and** for a via the #313 nudge relocates -- one number since #733, where the nudger gated its own emitted copper at the bare `--clearance` and parked it 0.30 mm inside the band the cap mover reserves. Resolved by the shared engine, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; TIGHTEN-only on an omitted flag, because `fix_project_for_output` pins this field up to the 0.20 fab floor on every board the chain writes. A given value is honoured as typed. |
 | `--lock` | – | Extra reference patterns to pin in place |
+| *(no flag)* track-scoped `.kicad_dru` rules | the board's own custom rules | What the #313 via-nudge charges between the connector copper it draws and a foreign **track**. KiCad stores a track-to-track requirement as a custom rule scoped to a net class (`A.Type=='track' && B.Type=='track' && A.NetClass=='X'`); netclasses cannot express it, and before #735 this pass could not read it, so on a declaring board it drew connectors closer to foreign copper than `check_drc` accepts -- an under-block, which ships the violation rather than refusing the landing. **RAISE-only** over the pair's already-resolved value, and **tracks only**: the cap-pad, board-pad and via arms are exempt by KiCad's own condition, not by omission. The board's value is a **PREFERENCE, not a gate**, the same shape as the drill floors above: the sweep runs every drill rung honouring the rule first and only falls back to the base requirement if nothing clears, saying so on stdout -- because a hard gate would abandon the via and leave the pad-via graze this pass exists to remove, which `check_drc` counts too. Resolved by the shared engine through the same `kicad_dru.track_pair_clearance` `check_drc` grades with, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; an unsaved GUI board has no path to read a `.kicad_dru` from and keeps the netclass value. No board in this repo ships a `.kicad_dru`, so the channel is inert on the whole tracked corpus. |
+| *(no flag)* drill-to-drill floors | the board's own `min_hole_to_hole` when it asks for MORE, else the fab tier's 0.20 (via-hole to via-hole) and 0.45 (via-hole to pad-hole) | What the #313 via-nudge charges when it relocates a barrel. Board-first and RAISE-only since #756; before that both were flat literals, so on a board declaring above 0.20 the pass parked a via at 0.20 while `check_drc` graded the same drill pair at the declared value and flagged it. Resolved by the shared engine off the board's sibling `.kicad_pro`, so the GUI plugin and `animate_fanout_clearance.py` get the same answer; an unsaved GUI board has no project to read and keeps the fab floors. The board's value is a PREFERENCE, not a gate: the nudge sweeps for a landing that clears it and falls back to the fab floor rather than abandoning the repair, so it can never place a via worse than it would have before. `--fab-tier` cannot move these floors (both tiers declare 0.20/0.45); a `--fab-overrides` file can, but note `place_fanout_clearance.py` accepts neither flag — the fab tier reaches this pass only as the process-wide value some other step set, which is how the GUI's Fanout tab supplies it. The pad-hole floor stays stricter than `check_drc`'s pad-drill arm (which grades at the single hole-to-hole value) by `max(d, 0.45) - max(0.20, d)` — 0.25 mm on a board declaring nothing, decaying to 0 at 0.45. Deliberate: 0.45 is the JLC fab minimum and nothing else in the repo enforces it. |
 
 On ulx3s U1 (22×22, 0.8 mm) this took the fanned board from 4 PAD-VIA to
 fully DRC-clean, tidying 19 caps toward same-net balls (all ≤1.9 mm). In the
@@ -585,6 +674,16 @@ parts worth knowing from here:
 - **`oob_area` cannot be budgeted.** It is measured against the bbox inset, so a
   part sitting entirely inside a cutout scores `0.0`. Refused at load time with
   that reason; use `oob_count` / `oob_amount`.
+- **An unknown key is refused at every level of the intent** (#710), and so is a
+  `severity` key that is not a rule name. Same reason as `block_unresolved`, one
+  level down: a typo'd key that is silently dropped is a constraint the author
+  believes they set and the grader never checks. `context` is the one exception,
+  open by design at the top level and on every entry, because provenance with
+  nowhere to go ends up in a key that IS graded.
+- **`schema` is the format number; `min_reader` is the field vocabulary.** An
+  intent sets `min_reader` when a claim must not be silently ignored, and a
+  build whose `READER_VERSION` is lower refuses the file instead of grading it
+  without the claim.
 
 One thing `--emit-intent` will not do: claim a `zone` for a sheet block. A
 schematic sheet is a *functional* grouping, so its members scatter and all ten of
@@ -829,7 +928,20 @@ re-seating 85/92 while leaving its zone targets unmoved):
 - **`legality.PartPads` / `LegalityContext` / `grade_pad_legality`** — the
   pad+drill layer. Gate currency: rotation-inflated AABB pad rects (the
   `_Cap.pad_rects` pattern; conservative — can falsely reject, never falsely
-  accept), NPTH drills inflated to `NPTH_TO_TRACK_CLEARANCE`, per-PAIR
+  accept), NPTH drills held off foreign copper at a STANDOFF FROM THE HOLE
+  WALL of `max(--clearance, NPTH_TO_TRACK_CLEARANCE, the board's declared
+  min_hole_clearance, the hole pad's own local_clearance)` — `check_drc`'s own
+  requirement (#730, #761). Resolved in ONE place, `PartPads.hole_keepouts`:
+  the stored `holes_local` radius is the growth ABOVE `--clearance` and the
+  consumer adds the clearance back, exactly as `fanout_clearance`'s cap gate
+  and `labels.py`'s silk test each do — before #761 legality added nothing, so
+  its modelled standoff collapsed to zero at and above the requirement.
+  `copper_holes=False` opts a SILK caller out of both copper terms (the pad
+  override and the board floor); the board floor arrives as a resolved FLOAT
+  (`resolve_npth_floor`), never a board pointer, and only at the two of six
+  `build_part_pads` call sites that read hole keep-outs. `holes_extent`
+  carries the same holes WITHOUT either copper term, so an author's keep-clear
+  can never push a part off the outline. Per-PAIR
   baselines from SEED poses ("never worse than the board you were handed"; a
   NEW different-net pad intersection is never admitted). Exact `check_drc`
   geometry runs once per CLI for reports, so summaries carry no AABB phantoms.
@@ -870,8 +982,10 @@ re-seating 85/92 while leaving its zone targets unmoved):
   individual mis-move smuggled inside a hugely-improving set (run 3's J7:
   31.6 mm from home, worse than its 15.8 mm input).
 - **`render_placement --legality`** (default ON) draws the defects the caption
-  used to only count: conflict rings/links, NPTH keepout circles, dashed-red
-  off-board pad extents; caption gains `pad-conflicts` / `hole-conflict`.
+  used to only count: conflict rings/links, NPTH keepout circles (the real
+  keep-out since #761 — it drew the bare drill at `--clearance >= 0.20`,
+  agreeing with the model's own blind spot), dashed-red off-board pad
+  extents; caption gains `pad-conflicts` / `hole-conflict`.
 
 Design lineage (see the session literature survey): Abacus/minimum-
 perturbation legalization (Spindler 2008; Brenner 2012; Kahng-Markov-Reda

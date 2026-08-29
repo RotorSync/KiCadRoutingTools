@@ -737,6 +737,7 @@ class RoutingDialog(wx.Dialog):
         val = rule if (rule and rule > 1e-9) else defaults.PLANE_EDGE_CLEARANCE
         return self._fab_floored('board_edge_clearance', val)
 
+
     def _effective_geometry_floor(self, name):
         """Geometry floor to route/grade with (#439 parity with the CLI):
         the dedicated control when its override checkbox is checked; otherwise
@@ -1770,10 +1771,44 @@ class RoutingDialog(wx.Dialog):
                 # Edge.Cuts keep-out for QFN escape stubs/vias (issue #288);
                 # 0 = fall back to the copper clearance inside generate_qfn_fanout.
                 'board_edge_clearance': self._effective_board_edge_clearance(),
+                # #733 follow-up: the cap repair's edge margin is NOT read from
+                # this dialog's shared "Min Edge Clearance" control. It is a
+                # placement margin, the signal keep-out above is a routing one,
+                # and they only share a CLI flag SPELLING across two independent
+                # tools. It lives on the BGA panel's Cap Placement box
+                # (fanout_tab.bga_options.cap_board_edge_clearance) and reaches
+                # the engine through the cap_* config spread. Absent here means
+                # the engine resolves it, exactly as an omitted CLI flag does.
                 # #489 section 9: the ONE shared "Add teardrops" checkbox now
                 # reaches fanout too -- it is the step where a track-to-via
                 # teardrop matters most.
                 'add_teardrops': self.add_teardrops_check.GetValue(),
+                # #693: the fanout tab's shared params were the ONE set that
+                # did not carry this, so its live-floor writeback had nothing
+                # to gate on. Unchecked must mean "change no DRC setting" on
+                # every tab, not just the ones that happened to pass it.
+                'fix_drc_settings': self.fix_drc_check.GetValue(),
+                # #768: and the same tab was the ONE that never carried the
+                # Min-Clearance override either. That control is the GUI's
+                # counterpart of "--clearance was GIVEN" -- ai_plan.py
+                # :1279-1282 spells the equivalence where it clamps ("only when
+                # this plan routed with a --clearance ceiling (the Min-Clearance
+                # override the executor checks when a step sets clearance)")
+                # -- and the cap pass needs it for exactly that:
+                # unchecked means the board's own classes stand, so they are
+                # what the pass must price at.
+                'clamp_netclasses': self.clearance_check.GetValue(),
+                # #768: the CEILING itself, and it must be the RAW override
+                # rather than `_effective_clearance()`. That helper already
+                # returns min(Default class, override), which is correct for the
+                # BASE and wrong for the ceiling: a class sitting BETWEEN the
+                # two would be capped to the Default class instead of to the
+                # number the operator typed. None when the box is unchecked,
+                # which gives this the same one-value contract `--clearance`
+                # has -- the presence of a value IS the switch.
+                'clearance_ceiling': (self.clearance.GetValue()
+                                      if self.clearance_check.GetValue()
+                                      else None),
                 # #581: one via-in-pad policy for every step (Basic tab).
                 # > 0 -> BGA under-pad escapes run dog-bone, QFN via-in-pad off.
                 'same_net_pad_clearance': self._same_net_pad_clearance_value(),
@@ -2414,6 +2449,30 @@ class RoutingDialog(wx.Dialog):
 
         self.reset_params_to_defaults()
 
+    def reset_cap_params_to_defaults(self):
+        """Reset ONLY the BGA panel's "Cap Placement (advanced)" knobs (#772).
+
+        Separate from reset_params_to_defaults because the plan executor
+        deliberately SKIPS the full per-step reset for an `optimize_caps` step
+        -- it must inherit the preceding fanout's clearance / grid / via, see
+        ai_plan._next_step -- while still needing the CAP knobs at the CLI
+        defaults when the step names any of them.
+
+        BGAOptionsPanel.CAP_PARAM_DEFAULTS is the single table; the full reset
+        delegates here rather than keeping a second copy, which is the shape
+        #772 exists to remove.
+        """
+        opts = getattr(getattr(self, 'fanout_tab', None), 'bga_options', None)
+        if opts is None:
+            return
+        for _name, _val in getattr(type(opts), 'CAP_PARAM_DEFAULTS', ()):
+            _ctl = getattr(opts, _name, None)
+            if _ctl is not None:
+                try:
+                    _ctl.SetValue(_val)
+                except Exception:
+                    pass
+
     def reset_params_to_defaults(self):
         """Reset every routing PARAMETER control to routing_defaults --
         selections and the log untouched. The plan executor calls this
@@ -2496,8 +2555,6 @@ class RoutingDialog(wx.Dialog):
                     ('check_previous', False),
                     ('no_inner_top', False),
                     ('optimize_caps', False),
-                    ('cap_allow_rotation', True),
-                    ('cap_max_passes', 30),
                     ('underpad_escape', False),
                     ('allow_via_in_pad', False),
                     ('plane_drop', True),    # #424 drops: default ON
@@ -2515,6 +2572,17 @@ class RoutingDialog(wx.Dialog):
                         _ctl.SetSelection(0)
                     except Exception:
                         pass
+            # #772: the ten "Cap Placement (advanced)" knobs. Only THREE
+            # were ever reset here -- optimize_caps above, plus
+            # cap_allow_rotation and cap_max_passes, which have moved into
+            # the shared table. The other eight -- capture radius, near
+            # margin, search step, max displacement, displacement cap,
+            # growth, board-edge margin, movable prefix -- were not, so an
+            # interactive tweak or a restored session setting survived
+            # every plan step. CLAUDE.md: "add it to
+            # reset_params_to_defaults ... or the param leaks between
+            # steps". Delegated so the table has exactly one home.
+            self.reset_cap_params_to_defaults()
             # #381 D7: QFN width/clearance controls live on qfn_options; reset
             # them to the QFN-tuned defaults so a plan step doesn't inherit a
             # prior step's value (the plan executor resets through here).
@@ -3361,15 +3429,49 @@ class RoutingDialog(wx.Dialog):
                     with tempfile.NamedTemporaryFile(
                             suffix='.kicad_pcb', delete=False) as _f:
                         _p = _f.name
-                    # aSkipSettings: the oracle leg needs the copper, not a
-                    # .kicad_pro. KiCad 10's implicit project-settings save
-                    # merges the pre-migration on-disk project JSON with its
-                    # migrated in-memory view and throws on any key whose
-                    # type changed (KiCad 9 wrote sheet_component_classes as
-                    # [], 10 holds an object) -- and with no C++ handler
-                    # above this worker thread, that throw aborts ALL of
-                    # KiCad. Snapshots must always skip the settings save.
-                    pcbnew.SaveBoard(_p, _b, aSkipSettings=True)
+                    # #688: this runs on the ROUTING WORKER thread, and
+                    # SaveBoard is a wx-backed C++ call -- calling it from
+                    # here deadlocked the whole plugin on Windows (py-spy
+                    # caught the worker inside SaveBoard while the UI thread
+                    # sat in ShowModal). save_board_via_ui_thread marshals it
+                    # to the main thread and, if that thread is not pumping,
+                    # times out and returns False so we degrade to the
+                    # post-apply oracle instead of hanging the session.
+                    #
+                    # aSkipSettings (inside the helper): the oracle leg needs
+                    # the copper, not a .kicad_pro. KiCad 10's implicit
+                    # project-settings save merges the pre-migration on-disk
+                    # project JSON with its migrated in-memory view and throws
+                    # on any key whose type changed (KiCad 9 wrote
+                    # sheet_component_classes as [], 10 holds an object) --
+                    # and with no C++ handler above this worker thread, that
+                    # throw aborts ALL of KiCad. Snapshots must always skip
+                    # the settings save.
+                    from .gui_utils import save_board_via_ui_thread
+                    if not save_board_via_ui_thread(_p, _b):
+                        # NamedTemporaryFile already created the file; the
+                        # engine only cleans up paths we hand back, so drop
+                        # it here rather than leaking one temp per run.
+                        try:
+                            os.unlink(_p)
+                        except OSError:
+                            pass
+                        return None
+                    # #627 (audit finding): aSkipSettings above means the
+                    # snapshot carries NO sibling .kicad_pro, so the oracle's
+                    # exact-fill refill of it falls back to pcbnew's STOCK
+                    # rules -- not the clamps this session applied in memory
+                    # via update_live_drc_floors. The GUI then prices its A*
+                    # off a different fill than the CLI does on the same
+                    # copper. gui_utils does this on the FALLBACK oracle path
+                    # already; the PRIMARY staging path (this one, the normal
+                    # case) was missing it.
+                    try:
+                        from kicad_parser import stage_live_project_rules
+                        stage_live_project_rules(_p, _b)
+                    except Exception as _e627:
+                        print(f"(could not stage live project rules for the "
+                              f"plane-finalize oracle: {_e627})")
                     return _p
                 except Exception as e:
                     print(f"(could not stage the live board for the "
@@ -3799,6 +3901,9 @@ class RoutingDialog(wx.Dialog):
                     hole_to_hole_clearance=_pfo.get(
                         'hole_to_hole_clearance'),
                     layer_clearances=_pfo.get('layer_clearances'),
+                    layers=_pfo.get('layers'),
+                    layer_costs=_pfo.get('layer_costs'),
+                    power_net_widths=_pfo.get('power_net_widths'),
                     progress_callback=(
                         lambda c, t, m: self._apply_status(
                             f"{m} ({c}/{t})" if t else m)))
@@ -3958,15 +4063,26 @@ class RoutingDialog(wx.Dialog):
         # Per-step live DRC floors (GUI twin of the CLI's per-step
         # fix_project_for_output): a DRC pressed right after this step must
         # grade at the routed floors, not stock constraints.
-        from .gui_utils import update_live_drc_floors
-        update_live_drc_floors(
-            board,
-            clearance=config.get('clearance'),
-            track_width=config.get('track_width'),
-            via_size=config.get('via_size'),
-            via_drill=config.get('via_drill'),
-            hole_to_hole=config.get('hole_to_hole_clearance'),
-            edge_clearance=config.get('board_edge_clearance'))
+        #
+        # #693: gated on the SAME "Fix DRC settings after routing" checkbox as
+        # the netclass/severity writeback above. It used to run unconditionally,
+        # so unchecking the box suppressed one writeback and left this one
+        # lowering the board's Board Setup floors anyway -- the reporter watched
+        # Minimum annular width change with the box unchecked. The CLI gates its
+        # twin (fix_project_for_output) on --no-fix-drc-settings; a twin honors
+        # the same switch. NOTE this also stops the copper-to-edge PIN-UP below,
+        # which is the one floor this raises: with the box unchecked the user
+        # owns their DRC settings, protective changes included.
+        if config.get('fix_drc_settings', True):
+            from .gui_utils import update_live_drc_floors
+            update_live_drc_floors(
+                board,
+                clearance=config.get('clearance'),
+                track_width=config.get('track_width'),
+                via_size=config.get('via_size'),
+                via_drill=config.get('via_drill'),
+                hole_to_hole=config.get('hole_to_hole_clearance'),
+                edge_clearance=config.get('board_edge_clearance'))
 
     def _add_via_to_board(self, board, via, get_layer_id):
         """Add a via to the pcbnew board."""

@@ -219,7 +219,11 @@ Examples:
     # set is part of the run's record.
     edge_bands = {}
     if intent is not None:
-        for c in intent.edge_connectors:
+        # edge_claims(): a connector_affinity entry declares a class, not a
+        # band. Reading the raw key gave every generic header the 2.0mm
+        # default allowance below, which is an off-outline licence nobody
+        # asked for.
+        for c in intent.edge_claims():
             if c['ref'] not in state.parts:
                 continue
             # EVERY banded entry keeps its allowance, suspect or not: with
@@ -317,7 +321,10 @@ Examples:
     # proxy would anchor them to their possibly-misplaced partners).
     edge_pref = {}
     if intent is not None:
-        for c in intent.edge_connectors:
+        # edge_claims(): the receptacle filter below already excluded the
+        # weak class, but every engine read goes through the one split so a
+        # future edit to this filter cannot re-open it.
+        for c in intent.edge_claims():
             # Receptacles ONLY (run-5): the edge metric is the right
             # objective for a part whose class says the mating face must
             # reach the edge. An edge-less ACTUATOR entry (a suspect
@@ -341,7 +348,7 @@ Examples:
     # under investigation, not a seat.
     excl_x = set(tiers.locked) | set(tiers.zero_net)
     if intent is not None:
-        for c in intent.edge_connectors:
+        for c in intent.edge_claims():   # seat claims only; see edge_claims
             ref = c['ref']
             if ref not in state.parts:
                 continue
@@ -645,7 +652,8 @@ Examples:
     _promote_staged(staged, args.output_file)
 
     out_pcb = parse_kicad_pcb(args.output_file)
-    final = grade_pad_legality(out_pcb, args.clearance)
+    final = grade_pad_legality(out_pcb, args.clearance,
+                               pcb_file=args.output_file)
     report['final'] = {k: final[k] for k in
                        ('pad_conflicts', 'pad_shortfall', 'hole_conflicts',
                         'oob_pad_count', 'oob_pad_amount', 'exact')}
@@ -666,7 +674,13 @@ Examples:
           f"{final['hole_conflicts']} hole conflict(s), "
           f"{final['oob_pad_count']} part(s) with pad copper off-board, "
           f"{body['blocking']} blocking body pair(s)")
-    _oc = __import__('placement.legality', fromlist=['x']).format_oob_clause(final)
+    _leg_mod = __import__('placement.legality', fromlist=['x'])
+    # #697: name the pairs graded above args.clearance and what raised them,
+    # before the count above is read as a violation of the announced floor.
+    _rq = _leg_mod.format_required_clause(final)
+    if _rq:
+        print(f"  above the {args.clearance}mm floor: {_rq}")
+    _oc = _leg_mod.format_oob_clause(final)
     if _oc:
         # Printed BEFORE the edge_connectors advice below, because that advice
         # tells the reader to declare a by-design overhang -- and this measure

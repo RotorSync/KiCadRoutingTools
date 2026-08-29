@@ -272,7 +272,7 @@ def _seg_foreign_hole_dist_batch(pcb_data, net_ids, x1s, y1s, x2s, y2s,
     nids_arr = np.asarray(net_ids)
     N = len(x1s)
     if arrays is None:
-        nid_h_, hax_, hay_, hbx_, hby_, hr_ = _foreign_hole_capsules(pcb_data)
+        nid_h_, hax_, hay_, hbx_, hby_, hr_, _hlc_ = _foreign_hole_capsules(pcb_data)
     else:
         (nid_h_, hax_, hay_, hbx_, hby_, hr_) = arrays
     if nid_h_.size == 0:

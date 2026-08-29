@@ -21,12 +21,24 @@ for p in (ROOT, os.path.join(ROOT, 'py_router'), os.path.join(ROOT, 'py_tools'))
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import fixture_boards  # noqa: E402
 from check_connected import reconcile_status_line as line  # noqa: E402
 
 # A board WITH ZONES on purpose: the whole ambiguity is zone-backed nets, and
 # a zone-less board only ever exercises the "not applicable" branch -- which
 # would let the two states this issue is about regress unnoticed.
-BOARD = os.path.join(ROOT, 'kicad_files', 'kit-out-plane-connected.kicad_pcb')
+#
+# #716: this pointed at `kit-out-plane-connected.kicad_pcb`, which is UNTRACKED
+# and has no fixture_boards recipe, so on any clone it was simply absent. The
+# three board-backed checks below then degraded to an empty result rather than
+# skipping -- `0 found: []` -- and the vacuity guard ("the fixture really has
+# zones") was the only thing saying the other two tested nothing. Repointed at a
+# TRACKED zoned board so the checks actually run. Verified: check_connected
+# reaches "ran, N KiCad link(s), agrees with copper grading" on it in ~2 s, i.e.
+# the real cross-check branch, not "not applicable". Do not repoint this at a
+# zone-less board (esp_prog.kicad_pcb, for one, reports "no zones") -- that
+# turns the file green while testing nothing, which is the state #716 found.
+BOARD = fixture_boards.ensure('lvds_converter_dualclk_gnd.kicad_pcb')
 passed = failed = 0
 
 

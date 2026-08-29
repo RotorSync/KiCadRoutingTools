@@ -1353,6 +1353,421 @@ class PairShortfall(NamedTuple):
 ZERO_SHORTFALL = PairShortfall(0.0, False, 0.0, False)
 
 
+# Local import at module scope would drag the whole DRC stack in at import
+# time (see the BoardOutlineGate note); bound once on first use instead of once
+# per pad, which is where the old inline copy had it.
+def _pad_has_no_copper(p):
+    global _PAD_HAS_NO_COPPER
+    if _PAD_HAS_NO_COPPER is None:
+        from check_drc import _pad_has_no_copper as _f
+        _PAD_HAS_NO_COPPER = _f
+    return _PAD_HAS_NO_COPPER(p)
+
+
+_PAD_HAS_NO_COPPER = None
+
+
+def _pad_carries_copper(p) -> bool:
+    """Does this pad put copper on a copper layer?
+
+    The predicate `PartPads` builds its pad list from, `_pad_with_copper` walks
+    its index with, and `PadClearanceModel` tests inertness by. It has to be ONE
+    function: they are the same two conditions, and they must agree or the
+    rect index stops addressing the pad. Measured when they did not: watchy
+    declares `local_clearance` on 8 NPTH pads that carry no copper, so a raw
+    scan of `fp.pads` reported the board as having overrides while its parts'
+    `max_floor` was 0.0 -- the board lost its inertness for nothing.
+    """
+    if _pad_has_no_copper(p):
+        return False
+    return any(str(l).endswith('.Cu') for l in (getattr(p, 'layers', None) or ()))
+
+
+class PadFloor(NamedTuple):
+    """One pad's required-clearance inputs, resolved once at build time.
+
+    `ncl` is its net's non-Default net-class clearance, `lc` its own (or its
+    footprint's, already resolved by the parser) `local_clearance` override,
+    and `layers` the copper layers its copper occupies -- carried only when the
+    board has .kicad_dru rules to scope, else None.
+    """
+    ncl: float
+    lc: float
+    layers: object = None
+
+
+class PadClearanceModel:
+    """The per-pair required clearance, resolved exactly as check_drc does.
+
+    #697: the placement census used to price every pad pair at one flat scalar,
+    so a board that could not pass DRC reported nothing to fix. Measured: a
+    fiducial keep-clear pad (`local_clearance` 1.016mm) 0.94mm from a connector
+    pad -- `check_drc` flagged it, while `grade_pad_legality` and
+    `place_reconstruct --stages legalize` both reported 0 conflict pairs.
+
+    The formula is check_drc's, and deliberately CALLS its code rather than
+    mirroring it (`check_drc.pads_shared_layer_clearance`, `pad_copper_layers`)::
+
+        base = max(global clearance, netclass(a), netclass(b))
+        eff  = <.kicad_dru layer rules over the SHARED copper layers>   # REPLACES
+        eff  = max(eff, lc_a, lc_b)                                     # override wins
+
+    #768: when the caller passes a `ceiling` -- a `--clearance` it will then
+    CLAMP the output project's classes down to -- the netclass term alone is
+    capped at it, in `for_board`'s map and nowhere else. The dru rules and the
+    pad overrides run afterwards and keep outranking it, because the writeback
+    does not touch either. `ceiling=None` (the default) is the documented
+    "--clearance OMITTED" branch and leaves every tier as it was, which is why
+    the two callers that write no project are untouched by it.
+
+    Note the override enters as a max over BOTH pads: check_drc needs a second
+    max at its own pad-pad call site for the same reason, because a pair is
+    equally in violation when only the SECOND pad carries the keep-clear.
+
+    `active` is False -- and every consumer then takes its original flat-scalar
+    path unchanged -- when the board declares no netclass, no dru rule and no
+    pad override. That is the common case, and the reason this cannot perturb
+    an ordinary board.
+
+    #735: the same `.kicad_dru`'s TRACK-scoped rules are carried too, in
+    `track_rules` / `net_classes`, and answered by `track_pair` -- which is a
+    separate resolver from `pair` and is **not** part of `active`. Both halves
+    of that are deliberate. A track rule binds `A.Type=='track' &&
+    B.Type=='track'`, so it can never price a pad pair, which is all `pair`
+    is asked for; and `active` is the switch consumers use to drop this object
+    entirely, so admitting a track-only board there would move
+    `grade_pad_legality`, `quench` and every broad phase in
+    `fanout_clearance` onto their resolved path to answer a question none of
+    them asks. The one caller that does ask reads `track_rules` for itself.
+    """
+
+    __slots__ = ('base', 'net_floor', 'layer_rules', 'board_copper',
+                 'active', 'notes', 'ceiling', '_pair_cache',
+                 'track_rules', 'net_classes')
+
+    def __init__(self, base: float, net_floor=None, layer_rules=None,
+                 board_copper=(), has_overrides: bool = False,
+                 ceiling: Optional[float] = None,
+                 track_rules=None, net_classes=None):
+        self.base = float(base)
+        # #768: the --clearance ceiling this model was built under, or None.
+        # Recorded rather than re-derived: `net_floor` is already capped by the
+        # time anyone can look at it, so a value equal to the ceiling and a
+        # value that was never above it are indistinguishable afterwards.
+        self.ceiling = None if ceiling is None else float(ceiling)
+        self.net_floor = dict(net_floor or {})
+        self.layer_rules = dict(layer_rules or {})
+        self.board_copper = list(board_copper or [])
+        # #735: the TRACK-scoped .kicad_dru channel and the class memberships
+        # that are its binding key. A separate tier from the three above, and
+        # deliberately NOT part of `active`: those three price the pair kinds
+        # every consumer of this model asks about, while a track rule binds
+        # track-vs-track and nothing else (KiCad's `A.Type=='track' &&
+        # B.Type=='track'`). Folding it in would move `grade_pad_legality`,
+        # `quench` and every broad phase in `fanout_clearance` off their inert
+        # path to answer a question none of them asks. The one consumer that
+        # DOES ask reads `track_rules` directly -- see `track_pair`.
+        self.track_rules = list(track_rules or [])
+        self.net_classes = dict(net_classes or {})
+        self.active = bool(self.net_floor or self.layer_rules or has_overrides)
+        self.notes = []
+        self._pair_cache = {}
+
+    # -- construction ---------------------------------------------------------
+    @classmethod
+    def for_board(cls, pcb_data, clearance: float, pcb_file: str = None,
+                  ceiling: Optional[float] = None):
+        """Resolve from the board's own sibling files.
+
+        Path discovery is the #498 rule: the caller's `pcb_file` when it has
+        one, else `PCBData.source_path` (engines whose signature carries no
+        input file). A missing sibling is a strict no-op, never an error -- the
+        model simply carries fewer sources.
+
+        `ceiling` (#768) caps the NETCLASS tier at a `--clearance` that will
+        be clamped into the output project. The test is whether THE RUN THIS
+        PRICES FOR writes that clamp, not whether this process does: pass it
+        when the clamp lands, leave it None otherwise, or the pass prices at a
+        class KiCad will still enforce.
+
+        The distinction is not pedantic -- `animate_fanout_clearance.py` passes
+        a ceiling and writes no project at all, because it exists to VISUALISE
+        `place_fanout_clearance.py` and must price identically or the GIF shows
+        a repair the tool does not perform. `grade_pad_legality` and `quench`
+        leave it None for the opposite reason: nothing downstream of them
+        clamps anything.
+        """
+        path = pcb_file or getattr(pcb_data, 'source_path', '') or ''
+        fps = getattr(pcb_data, 'footprints', None) or {}
+        has_overrides = any(
+            (getattr(p, 'local_clearance', 0.0) or 0.0) > 0.0
+            and _pad_carries_copper(p)
+            for fp in fps.values()
+            for p in (getattr(fp, 'pads', None) or ()))
+        board_copper = list(
+            getattr(getattr(pcb_data, 'board_info', None), 'copper_layers', None)
+            or [])
+        net_floor = {}
+        layer_rules = {}
+        track_rules = []
+        net_classes = {}
+        notes = []
+        if path:
+            nets = getattr(pcb_data, 'nets', None) or {}
+            try:
+                # check_drc's map, NOT the router's `net_clearance_map_by_id`.
+                # That one omits every net resolving only to Default and takes
+                # the MAX over all matching classes -- both correct for a
+                # router (a Default net routes at config.clearance;
+                # over-blocking is safe) and both wrong for a grader, which has
+                # to agree with check_drc pair for pair. Dropping Default
+                # re-created this very issue whenever an explicit --clearance
+                # sits BELOW the board's Default class, which check_assembly
+                # tells users they may pass; taking the max over glob
+                # memberships invented requirements check_drc grades clean.
+                from list_nets import net_clearance_map
+                by_name = net_clearance_map(
+                    path, [n.name for n in nets.values()
+                           if getattr(n, 'name', None)]) or {}
+                if ceiling is not None:
+                    # #768: --clearance is a CEILING on the netclass tier and
+                    # nothing above it. min() BEFORE the admission test below,
+                    # so a class at or under the ceiling still raises normally
+                    # and one above it collapses to the ceiling -- which is
+                    # `clearance` itself, so it never enters the map at all.
+                    #
+                    # Capped HERE and not in `pair_with_source` for two
+                    # reasons. This map IS this pass's netclass tier, and it is
+                    # the same place the router caps (route.py pre-caps the
+                    # netclass map before set_net_clearances installs it), so
+                    # the two halves of the toolchain do the same thing in the
+                    # same place. And the dru REPLACE and the pad override run
+                    # after it in `pair_with_source`, which is what keeps them
+                    # outranking the ceiling -- they must, because the project
+                    # writeback clamps neither.
+                    _capped = {}
+                    for _v in by_name.values():
+                        if _v > ceiling + 1e-9:
+                            _k = round(_v, 6)
+                            _capped[_k] = _capped.get(_k, 0) + 1
+                    if _capped:
+                        notes.append(
+                            'net classes capped at the %gmm --clearance '
+                            'ceiling: %s' % (ceiling, ', '.join(
+                                '%g -> %g (%d net%s)'
+                                % (_v, ceiling, _c, '' if _c == 1 else 's')
+                                for _v, _c in sorted(_capped.items()))))
+                    by_name = {n: min(v, ceiling) for n, v in by_name.items()}
+                # Same admission rule as check_drc: a class at or below the
+                # board-wide floor cannot raise anything, so it never enters.
+                net_floor = {nid: by_name[n.name]
+                             for nid, n in nets.items()
+                             if getattr(n, 'name', None) in by_name
+                             and by_name[n.name] > clearance}
+            except Exception as exc:                            # noqa: BLE001
+                net_floor = {}
+                notes.append('net classes unread (%s: %s)'
+                             % (type(exc).__name__, exc))
+            try:
+                from kicad_dru import read_board_layer_clearances
+                layer_rules, dru_notes = read_board_layer_clearances(
+                    path, board_copper)
+                notes.extend('.kicad_dru: ' + n for n in dru_notes)
+            except Exception as exc:                            # noqa: BLE001
+                layer_rules = {}
+                notes.append('.kicad_dru unread (%s: %s)'
+                             % (type(exc).__name__, exc))
+            # #735: the SAME .kicad_dru's track-scoped rules, plus the class
+            # memberships that bind them. `board_track_rules` is quiet by
+            # construction and never raises -- it answers ([], {}) for a
+            # missing file, an unparsable one, and the case where the rules
+            # parse but memberships cannot be read (keeping rules there would
+            # grade every pair as a NON-member, which is a different answer,
+            # not a degraded one; check_drc drops them for the same reason).
+            #
+            # NOTHING IS ADDED TO `notes` HERE, and that is deliberate twice
+            # over.
+            #
+            # The parse notes would DUPLICATE. `read_board_layer_clearances`
+            # and `read_board_track_clearances` are two calls into the same
+            # `kicad_dru._parse_dru`, differing only in the copper list they
+            # pass -- and no note site in that function depends on the copper
+            # list, so the two note lists come back byte-identical (measured
+            # on a six-rule dru). The layer read above already filed them.
+            #
+            # And a note SAYING WHICH RULES WERE HONOURED would be a lie in
+            # two of this constructor's three callers. `notes` reaches the
+            # operator as `pad clearance: ...` from `grade_pad_legality` and
+            # from the quench census, and NEITHER reads `track_rules` --
+            # a track rule binds no pad pair, which is the whole reason it is
+            # a separate tier. The pass that does honour it discloses it where
+            # it acts, in the nudger's own fallback line.
+            try:
+                from kicad_dru import board_track_rules
+                track_rules, net_classes = board_track_rules(pcb_data, path)
+            except Exception as exc:                            # noqa: BLE001
+                track_rules, net_classes = [], {}
+                notes.append('.kicad_dru track rules unread (%s: %s)'
+                             % (type(exc).__name__, exc))
+        model = cls(clearance, net_floor, layer_rules, board_copper,
+                    track_rules=track_rules, net_classes=net_classes,
+                    has_overrides=has_overrides, ceiling=ceiling)
+        model.notes = notes
+        return model
+
+    # -- per-pad --------------------------------------------------------------
+    def pad_floor(self, pad):
+        """This pad's clearance inputs.
+
+        `getattr` on local_clearance, never a bare attribute read: the placement
+        tests build duck-typed pad fakes that do not carry the field, and a hard
+        read would turn a missing attribute into a crash instead of the "no
+        override" it means.
+        """
+        lc = getattr(pad, 'local_clearance', 0.0) or 0.0
+        ncl = self.net_floor.get(getattr(pad, 'net_id', 0) or 0, 0.0)
+        layers = None
+        if self.layer_rules:
+            from check_drc import pad_copper_layers
+            layers = frozenset(pad_copper_layers(pad, self.board_copper))
+        return PadFloor(float(ncl), float(lc), layers)
+
+    def max_floor(self, floor) -> float:
+        """An UPPER BOUND on what this pad can require of any partner, for the
+        broad phases only. Never the requirement itself: a dru rule REPLACES, so
+        it can also LOWER the pair value below `base`, and a broad phase that
+        under-reaches drops real pairs (over-reaching only costs a test)."""
+        v = max(floor.ncl, floor.lc)
+        if self.layer_rules and floor.layers:
+            for l in floor.layers:
+                r = self.layer_rules.get(l)
+                if r is not None and r > v:
+                    v = r
+        return v
+
+    # -- the pair -------------------------------------------------------------
+    def pair(self, fa, fb) -> float:
+        """The required clearance between two pads (mm)."""
+        return self.pair_with_source(fa, fb)[0]
+
+    def pair_with_source(self, fa, fb):
+        """(required clearance in mm, what set it).
+
+        The source is recorded AT the assignment, never reconstructed from the
+        final value. Reconstruction is wrong under the dru's REPLACE semantics:
+        with netclass 0.5 and a layer rule replacing it to 0.3, the value 0.3
+        still satisfies `max(ncl) >= eff`, so an after-the-fact test attributes
+        it to the net class when the RULE set it. Disclosure is the whole point
+        of carrying this, so it has to be exact.
+
+        The empty source means "the board-wide floor" -- the same test
+        check_drc's `_mark_required` applies before disclosing anything.
+        """
+        eff = self.base
+        src = ''
+        if fa.ncl > eff:
+            eff, src = fa.ncl, 'netclass'
+        if fb.ncl > eff:
+            eff, src = fb.ncl, 'netclass'
+        if self.layer_rules:
+            key = (fa.layers, fb.layers, eff)
+            cached = self._pair_cache.get(key)
+            if cached is None:
+                from check_drc import pads_shared_layer_clearance
+                cached = pads_shared_layer_clearance(
+                    eff, self.layer_rules, fa.layers or (), fb.layers or ())
+                self._pair_cache[key] = cached
+            if cached != eff:
+                # REPLACE: a rule may raise OR lower, and either way it is the
+                # rule that decided the value.
+                eff, src = cached, 'layer rule'
+        if fa.lc > eff:
+            eff, src = fa.lc, 'pad override'
+        if fb.lc > eff:
+            eff, src = fb.lc, 'pad override'
+        if eff <= self.base + 1e-9:
+            # check_drc's `_mark_required` threshold exactly, not legality's
+            # 1e-6 EPS: a requirement between the two would be disclosed by one
+            # grader and not the other.
+            src = ''
+        return eff, src
+
+    # -- the TRACK-vs-track pair (#735) ---------------------------------------
+    def track_pair(self, net_a: int, net_b: int, resolved: float):
+        """(required mm, the TrackRule that raised it or None) for one pair of
+        TRACKS -- `resolved` raised by any binding `.kicad_dru` track rule.
+
+        A SEPARATE resolver from `pair`, not a flag on it, because this is the
+        only pair kind a track rule can bind: KiCad's condition is
+        `A.Type=='track' && B.Type=='track'`, so a pad or a via on either side
+        exempts the pair, and every other requirement this model answers has
+        one. Callers pass the value `pair()` already gave them: the rule is the
+        LAST tier and raise-only, exactly the order check_drc composes it in.
+
+        Keyed on NETS, never on floors, so it is correct to call with a
+        `resolved` that came from the flat fallback -- which is what happens on
+        a board whose only declaration IS a track rule, where the model is
+        `active is False` and no floor resolves at all.
+        """
+        if not self.track_rules:
+            return resolved, None
+        from kicad_dru import track_pair_clearance
+        return track_pair_clearance(self.track_rules,
+                                    self.net_classes.get(net_a, ()),
+                                    self.net_classes.get(net_b, ()), resolved)
+
+
+def resolve_npth_floor(pcb_data, pcb_file: str = None,
+                       notes: list = None) -> float:
+    """The board's copper-to-NPTH-hole FLOOR: the JLC fab floor, raised to the
+    board's own declared `min_hole_clearance` when it declares more (#761).
+
+    The one resolver, and it lives OUTSIDE `PartPads` on purpose. That class
+    takes a footprint and scalars and reads no board -- a contract
+    `tests/test_730_...py` pins, because six call sites build parts and a
+    board read inside would change what each of them means. So the board is
+    read here, once, by the caller that has one, and the resolved float is
+    passed down. That is exactly the shape `fanout_clearance` already uses
+    (`self.npth_floor`, fanout_clearance.py:664-666).
+
+    `check_drc`'s requirement is
+    `max(clearance, NPTH_TO_TRACK_CLEARANCE, hole_clearance, lc)`
+    (check_drc.py:2714, :2733); this supplies the middle two terms.
+
+    Measured over the 22 tracked boards: `flat_hierarchy` is the ONLY one
+    declaring above the fab floor (0.2500), and all 6 of its NPTH pads carry
+    `local_clearance` 0.0 -- so it is the single witness that this term fires
+    at all, and every other board resolves to 0.2000.
+
+    `pcb_file` follows the #498 rule every sibling here follows -- the
+    CALLER's path when it has one, else `PCBData.source_path`. It is not
+    decoration: a board staged into a temp dir and parsed from there carries a
+    `source_path` that is not the board the caller means, and flat_hierarchy
+    staged that way resolves 0.2000 where the real path resolves 0.2500 --
+    which is exactly the 2.3500 -> 2.4000 radius this term exists for.
+
+    Returns the plain fab floor when the board cannot be read, which is what a
+    caller with no board gets by default. `notes` collects WHY, if a list is
+    given: a silent fallback here drops the modelled floor by up to the
+    declared value and reports a byte-identical census, which is the shape of
+    silence this issue was filed about.
+    """
+    import routing_defaults as defaults
+    floor = float(defaults.NPTH_TO_TRACK_CLEARANCE)
+    if pcb_data is None:
+        return floor
+    try:
+        from obstacle_map import resolve_hole_clearance
+        return max(floor,
+                   float(resolve_hole_clearance(pcb_data, None, pcb_file)))
+    except Exception as e:                                       # noqa: BLE001
+        if notes is not None:
+            notes.append('copper-to-hole floor unresolved (%s: %s); the NPTH '
+                         'keep-out falls back to the %.2fmm fab floor'
+                         % (type(e).__name__, e, floor))
+        return floor
+
+
 class PartPads:
     """Pose-owning pad/hole model for one footprint.
 
@@ -1362,17 +1777,37 @@ class PartPads:
     transform. Half-extents fold `rect_rotation` into an axis-aligned bbox,
     exact for the axis-aligned pads that dominate placement and conservative
     for the rest.
+
+    With a `PadClearanceModel` (#697) each copper pad also carries its
+    required-clearance inputs in `pad_floors`, INDEX-ALIGNED with `pads_local`
+    and therefore with everything `pad_rects` emits. Without one -- the default,
+    and what the silk (labels.py) and extent-only (routability.py) consumers
+    pass -- `pad_floors` is empty and `max_floor` is 0.0, so every caller keeps
+    its original flat-scalar behaviour exactly.
+
+    `pad_rects`' 6-tuple is deliberately NOT widened to carry the floor: it is a
+    public shape (render_placement slices `r[:4]`, two test modules unpack it
+    positionally) and the rect index already addresses the pad.
+
+    NPTH holes are carried TWICE (#730), index-aligned: `holes_local` at the
+    copper KEEP-OUT radius that `hole_circles()` serves, and `holes_extent` at
+    the radius `extent_local()` needs. They differ only by the hole pad's own
+    `local_clearance`, and only when a caller asks for it -- but the two
+    questions are different in kind ("how close may copper come" versus "where
+    is this part"), and answering the second with the first lets an author's
+    keep-clear declaration push a part off the board outline.
     """
 
     __slots__ = ('ref', 'side', 'has_tht', 'seed_rot', 'pads_local',
-                 'holes_local', 'n_pads', '_pad_cache', '_hole_cache',
-                 '_ext_cache')
+                 'holes_local', 'holes_extent', 'n_pads', '_pad_cache',
+                 '_hole_cache', '_keepout_cache', '_ext_cache', 'pad_floors',
+                 'max_floor', 'clearance', 'hole_reach', 'holes_req')
 
-    def __init__(self, fp, clearance: float):
+    def __init__(self, fp, clearance: float, model=None,
+                 copper_holes: bool = True, npth_floor: float = None):
         # Local imports: check_drc pulls the whole DRC stack (see the
         # BoardOutlineGate note); kicad_parser is cheap but keeps the module's
         # import surface unchanged for existing consumers.
-        from check_drc import _pad_has_no_copper
         from kicad_parser import pad_drill_circles
         import routing_defaults as defaults
 
@@ -1380,22 +1815,133 @@ class PartPads:
         self.side = footprint_side(fp)
         self.has_tht = footprint_has_through_pads(fp)
         self.seed_rot = (fp.rotation or 0.0) % 360
+        # The flat clearance this part was built at. Stored (#761) because the
+        # NPTH keep-out radius is only complete WITH it -- see hole_keepouts --
+        # and a consumer that had to supply it separately is a consumer that
+        # can forget to, which is exactly how the keep-out came to be graded
+        # without one.
+        self.clearance = float(clearance)
         self.pads_local = []    # (off_x, off_y, half_x, half_y, net_id, pside)
         self.holes_local = []   # (off_x, off_y, radius) -- NPTH keepouts, inflated
-        npth_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE - clearance)
+        self.holes_extent = []  # ...the same holes at their EXTENT radius (#730)
+        self.holes_req = []     # ...and the REQUIREMENT each one resolved to (#761)
+        self.pad_floors = []    # PadFloor per copper pad, index-aligned (#697)
+        self.max_floor = 0.0    # upper bound on this part's pad requirements
+        # `copper_holes` gates the BOARD floor exactly as it gates the
+        # pad's own override, and for the same reason: a declared
+        # `min_hole_clearance` is a COPPER rule, and KiCad has no silk-to-hole
+        # rule at all.
+        #
+        # It is HARDENING, not a defect fix, and the commit that added it
+        # (#761) claimed otherwise -- corrected here rather than left
+        # standing. `labels.py:303`, the only `copper_holes=False` caller,
+        # passes no `npth_floor` at all, so silk took the flat fab floor with
+        # or without this gate; measured, silk output is byte-identical across
+        # the whole change. What the silk arm caught is a latent hole that any
+        # future silk caller supplying a floor would fall into, which is worth
+        # closing but is not what the commit said it was.  The arm still
+        # asserts against an OFFERED floor rather than the default, because
+        # that is the only way to see this branch at all.
+        _npth_floor = (defaults.NPTH_TO_TRACK_CLEARANCE
+                       if (npth_floor is None or not copper_holes)
+                       else max(defaults.NPTH_TO_TRACK_CLEARANCE,
+                                float(npth_floor)))
         for p in fp.pads:
-            if _pad_has_no_copper(p):
+            if not _pad_carries_copper(p):
                 # Copper-less drilled pad (NPTH mounting hole): the DRILL still
-                # removes copper closer than the NPTH-to-track floor. Inflation
-                # matches fanout_clearance's foreign-pad keepouts.
-                if (p.drill or 0) > 0:
+                # removes copper closer than the NPTH-to-track floor. A
+                # paste/mask-only aperture has neither copper nor a hole and
+                # simply drops out.
+                #
+                # The inflation matches fanout_clearance's foreign-pad
+                # keepouts -- and the inflation is only HALF of the rule
+                # (#761). What is stored here is the growth ABOVE `clearance`;
+                # the requirement is that radius PLUS `clearance`, which each
+                # sibling adds at its own gap test: fanout_clearance through
+                # `_pair_or_flat` (an NPTH tuple files floor `None`, so it
+                # hands back the flat scalar, fanout_clearance.py:894/1306),
+                # and labels.py by comparing against `silk_pad_clearance`
+                # (labels.py:399). legality compared this circle against RAW
+                # pad rects and added nothing, so its modelled standoff was
+                # `max(0, requirement - clearance)` -- which collapses to ZERO
+                # once `clearance` reaches the requirement, at 0.20 for a plain
+                # hole and 0.40 for ulx3s's AUDIO1. The inflation matched; the
+                # COMPARISON did not, and only the inflation was ever checked.
+                # `hole_keepouts()` is now the one place that composes both.
+                #
+                # #730: ...or closer than the pad's OWN `(clearance ...)`
+                # override, when that is larger. That is what KiCad enforces
+                # and what check_drc grades (`max(npth_clr, lc)`,
+                # check_drc.py:2733). PER-PAD, so it is computed per pad and no
+                # longer hoisted above the loop -- a footprint may carry
+                # several holes with different overrides, and a hoisted value
+                # would give them all the first one's answer. Raise-only:
+                # 20 of the 22 tracked boards carry no NPTH override at all,
+                # and watchy's 8 are 0.100, under the 0.20 fab floor, so it is
+                # the negative control rather than a second example. The board
+                # that moves is ulx3s -- AUDIO1's two 1.7mm holes at lc 0.400,
+                # radius 0.950 -> 1.150 at --clearance 0.1.
+                #
+                # `copper_holes` is False for a SILK caller and that is not a
+                # tuning knob. `hole_circles()` answers two different
+                # questions: legality's copper consumers want the override,
+                # and labels.py uses the same circles to keep a reference
+                # designator's INK off a drill. `local_clearance` is a copper
+                # rule -- KiCad has no silk-to-hole rule at all -- so applying
+                # it there would push ulx3s's labels 0.20mm further from
+                # AUDIO1 for a reason that does not exist. Naming the question
+                # in the signature rather than inferring it from `model`:
+                # measured, only two of the six `build_part_pads` call sites
+                # pass one (grade_pad_legality and quench), so a model gate
+                # would leave legality's own pad-overlap path, routability and
+                # seeder unfixed while looking principled -- and it would key
+                # a COPPER-vs-SILK question on an argument that answers a
+                # different one.
+                #
+                # The BOARD's declared min_hole_clearance, which
+                # check_drc's `npth_clr` carries, arrives as the resolved
+                # scalar `npth_floor` (#761) -- NOT as a board pointer. This
+                # class still reads no board; `resolve_npth_floor` does, once,
+                # in the caller that has one. It defaults to the fab floor, so
+                # a caller that passes nothing keeps exactly its previous
+                # answer.
+                if _pad_has_no_copper(p) and (p.drill or 0) > 0:
+                    _lc = ((getattr(p, 'local_clearance', 0.0) or 0.0)
+                           if copper_holes else 0.0)
+                    npth_grow = max(0.0, max(_npth_floor, _lc) - clearance)
+                    # ...and the SAME holes without the override, for extents.
+                    # `holes_local` is a copper KEEP-OUT and `extent_local` is
+                    # a question about where the part physically IS -- an
+                    # author's copper keep-clear must not make a part read as
+                    # hanging off the board outline. Measured on
+                    # splitflap_driver at --clearance 0.25, injecting lc on
+                    # H6/H7's NPTH pads only: without this split, lc 0.90 takes
+                    # `oob_pad_count` from 0 to 2 and lc 0.95 puts both refs in
+                    # the seeder's ZERO-margin off-board census, which
+                    # CLAUDE.md calls the top-priority placement defect. This
+                    # keeps every extent byte-identical to pre-#730.
+                    # The FLAT floor, deliberately (#761): a board's
+                    # declared copper-to-hole rule is a copper rule, exactly
+                    # like `local_clearance` above, and `extent_local` asks
+                    # where the part physically IS. Keeping it out here keeps
+                    # every extent byte-identical on every board, which is what
+                    # stops a declaration from pushing a part off the outline.
+                    ext_grow = max(0.0, defaults.NPTH_TO_TRACK_CLEARANCE
+                                   - clearance)
+                    # The resolved requirement itself, for DISCLOSURE
+                    # (#761). Derivable from the radius only with `hd/2` in
+                    # hand, which no consumer has -- and a census that counts
+                    # a conflict without naming what it required is the same
+                    # shape of silence #697 fixed for the pad channel.
+                    npth_req = max(clearance, _npth_floor, _lc)
                     for hx, hy, hd in pad_drill_circles(p):
                         self.holes_local.append(
                             (hx - fp.x, hy - fp.y, hd / 2.0 + npth_grow))
+                        self.holes_extent.append(
+                            (hx - fp.x, hy - fp.y, hd / 2.0 + ext_grow))
+                        self.holes_req.append(npth_req)
                 continue
             copper = [l for l in p.layers if str(l).endswith('.Cu')]
-            if not copper:
-                continue    # paste/mask-only aperture
             through = (p.drill or 0) > 0
             pside = None if through else (
                 'B' if any(str(l).startswith('B') for l in copper) else 'F')
@@ -1405,9 +1951,38 @@ class PartPads:
             self.pads_local.append((p.global_x - fp.x, p.global_y - fp.y,
                                     hx * c + hy * s, hx * s + hy * c,
                                     p.net_id, pside))
+            if model is not None:
+                floor = model.pad_floor(p)
+                self.pad_floors.append(floor)
+                mf = model.max_floor(floor)
+                if mf > self.max_floor:
+                    self.max_floor = mf
         self.n_pads = len(self.pads_local)
+        # How far this part's hole keep-outs reach BEYOND its own extent
+        # (#761) -- the broad-phase bound, 0.0 with no holes.
+        #
+        # Both early-outs drop a pair on the gap between EXTENT boxes, and
+        # `max_floor` is built from copper pads only: an NPTH pad `continue`s
+        # above, before `pad_floors.append`, so a hole's requirement reaches
+        # neither bound. Measured on ulx3s: AUDIO1.max_floor is 0.0 while its
+        # holes require 0.400, so at `model.base` 0.25 every pair at an extent
+        # gap in [0.25, 0.40) returned ZERO_SHORTFALL before the hole loop ran
+        # -- i.e. the keep-out fix above is INERT without this term.
+        #
+        # Soundness: an extent box contains its hole at `extent_r`, so
+        # `rect_gap(ea, eb) >= dist(hole_centre, foreign_rect) - extent_r`,
+        # while a penetration needs `dist < keepout_r`. Dropping at
+        # `gap >= reach` is therefore safe exactly when
+        # `reach >= keepout_r - extent_r`, which is this.
+        self.hole_reach = 0.0
+        for (_hx, _hy, _kr), (_ex, _ey, _er) in zip(self.holes_local,
+                                                    self.holes_extent):
+            over = (_kr + self.clearance) - _er
+            if over > self.hole_reach:
+                self.hole_reach = over
         self._pad_cache: Dict[float, list] = {}
         self._hole_cache: Dict[float, list] = {}
+        self._keepout_cache: Dict[float, list] = {}
         self._ext_cache: Dict[float, Tuple[float, float, float, float]] = {}
 
     def _delta_key(self, rot: float) -> float:
@@ -1438,7 +2013,13 @@ class PartPads:
         return out
 
     def hole_circles(self, x: float, y: float, rot: float):
-        """[(cx, cy, radius)] NPTH keepout circles at the given pose."""
+        """[(cx, cy, radius)] NPTH hole circles at the given pose, at the
+        INFLATION radius -- the growth above `clearance`, not the requirement.
+
+        A copper consumer wants `hole_keepouts` instead. This accessor exists
+        for the caller that adds its own term at its own gap test: labels.py
+        (silk, `< config.silk_pad_clearance`, labels.py:399).
+        """
         key = self._delta_key(rot)
         cache = self._hole_cache.get(key)
         if cache is None:
@@ -1447,6 +2028,33 @@ class PartPads:
             cache = [(ox * c - oy * s, ox * s + oy * c, r)
                      for ox, oy, r in self.holes_local]
             self._hole_cache[key] = cache
+        return [(x + ox, y + oy, r) for ox, oy, r in cache]
+
+    def hole_keepouts(self, x: float, y: float, rot: float):
+        """[(cx, cy, radius)] NPTH COPPER keep-out circles at the given pose.
+
+        The one resolver for "how close may foreign copper come to this hole"
+        (#761). It is `hole_circles`' radius PLUS the flat clearance, because
+        the stored growth is `max(0, requirement - clearance)`; adding the
+        clearance back composes, per hole, to
+
+            hd/2 + max(clearance, NPTH floor, the hole pad's local_clearance)
+
+        -- a MAX rather than a sum, since the growth is already floored at 0.
+        That is `check_drc`'s own requirement (`max(npth_clr, lc)`,
+        check_drc.py:2733) and what fanout_clearance's cap gate charges.
+
+        Tested against RAW pad rects, so the whole requirement lives in this
+        radius: `_circle_rect_penetration` stays a pure geometric predicate
+        with no clearance parameter to forget.
+        """
+        key = self._delta_key(rot)
+        cache = self._keepout_cache.get(key)
+        if cache is None:
+            clr = self.clearance
+            cache = [(ox, oy, r + clr)
+                     for ox, oy, r in self.hole_circles(0.0, 0.0, rot)]
+            self._keepout_cache[key] = cache
         return [(x + ox, y + oy, r) for ox, oy, r in cache]
 
     def extent_local(self, rot: float):
@@ -1459,7 +2067,14 @@ class PartPads:
             for ox, oy, HX, HY, _n, _s in self._rotated(rot):
                 xs0.append(ox - HX); ys0.append(oy - HY)
                 xs1.append(ox + HX); ys1.append(oy + HY)
-            for cx, cy, r in self.hole_circles(0.0, 0.0, rot):
+            # #730: the EXTENT radii, not the keep-out ones -- see the note
+            # beside holes_extent. `_rotated`-style rotation done inline
+            # because holes rotate about the part origin exactly as
+            # hole_circles rotates them.
+            rad = math.radians(-key)
+            hc, hs = math.cos(rad), math.sin(rad)
+            for ox, oy, r in self.holes_extent:
+                cx, cy = ox * hc - oy * hs, ox * hs + oy * hc
                 xs0.append(cx - r); ys0.append(cy - r)
                 xs1.append(cx + r); ys1.append(cy + r)
             if not xs0:
@@ -1477,13 +2092,20 @@ class PartPads:
 
 
 def build_part_pads(footprints: Dict[str, object],
-                    clearance: float) -> Dict[str, 'PartPads']:
-    """PartPads for every footprint that has any pad (copper or NPTH)."""
+                    clearance: float, model=None,
+                    copper_holes: bool = True,
+                    npth_floor: float = None) -> Dict[str, 'PartPads']:
+    """PartPads for every footprint that has any pad (copper or NPTH).
+
+    `model` is an optional `PadClearanceModel` (#697); without it the parts
+    carry no per-pad clearance floors and every consumer behaves exactly as
+    before.
+    """
     out = {}
     for ref, fp in footprints.items():
         if not getattr(fp, 'pads', None):
             continue
-        pp = PartPads(fp, clearance)
+        pp = PartPads(fp, clearance, model, copper_holes, npth_floor)
         if pp.n_pads or pp.holes_local:
             out[ref] = pp
     return out
@@ -1492,6 +2114,25 @@ def build_part_pads(footprints: Dict[str, object],
 def _sides_interact(a, b) -> bool:
     """Do two pad sides share copper? None = through (both sides)."""
     return a is None or b is None or a == b
+
+
+def _hole_shortfall(pa, xa, ya, ra, rects_b, pb, xb, yb, rb, rects_a):
+    """Total penetration of either part's NPTH keep-outs into the other's
+    copper (#761). ONE resolver, because `pair_shortfall` reaches it from two
+    branches -- the full pad sweep and the PAIR_TEST_CAP extent branch -- and
+    a second copy is how the cap branch came to report a hardcoded zero.
+
+    Keep-outs, not `hole_circles`: the requirement lives in the radius, and
+    the rects are raw.
+    """
+    hole = 0.0
+    for cx, cy, r in pb.hole_keepouts(xb, yb, rb):
+        for a0, a1, a2, a3, _na, _sa in rects_a:
+            hole += _circle_rect_penetration(cx, cy, r, (a0, a1, a2, a3))
+    for cx, cy, r in pa.hole_keepouts(xa, ya, ra):
+        for b0, b1, b2, b3, _nb, _sb in rects_b:
+            hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
+    return hole
 
 
 def _circle_rect_penetration(cx, cy, r, rect) -> float:
@@ -1518,10 +2159,15 @@ class LegalityContext:
 
     def __init__(self, part_pads: Dict[str, PartPads],
                  gate: Optional[BoardOutlineGate], clearance: float,
-                 pose_of, seed_of):
+                 pose_of, seed_of, model=None):
         self.parts = part_pads
         self.gate = gate
         self.clearance = clearance
+        # #697: the per-pair required clearance, when the board declares one
+        # above the flat scalar (pad override / netclass / .kicad_dru rule).
+        # None -- the common case, and every board that declares nothing -- is
+        # the original flat-scalar path, unchanged and untouched.
+        self._floors = model if (model is not None and model.active) else None
         self.pose_of = pose_of
         self.seed_of = seed_of
         self._baselines: Dict[Tuple[str, str], PairShortfall] = {}
@@ -1555,21 +2201,60 @@ class LegalityContext:
         eb = pb.extent(xb, yb, rb)
         if ea is None or eb is None:
             return ZERO_SHORTFALL
-        if rect_gap(ea, eb) >= self.clearance - EPS:
+        model = self._floors
+        # The pair's REACH: how far apart these two parts can still interact.
+        # With per-pad floors it is bounded by THESE TWO PARTS' own maxima, not
+        # by the board-wide maximum -- this test runs per candidate pose
+        # (quench.candidate_valid -> pads_ok), so a board-wide bound would slow
+        # every pair on the board for the sake of one fiducial.
+        pad_reach = (self.clearance if model is None
+                     else max(self.clearance, model.base,
+                              pa.max_floor, pb.max_floor))
+        # ...and the hole keep-outs, which no pad floor accounts for (#761).
+        # Kept as a SEPARATE name: the cap branch below charges its shortfall
+        # into the PAD channel, and folding the hole requirement into the
+        # number it charges bills one physical violation to two independent
+        # gates (`pads_ok` tests `cur.pad` and `cur.hole` as separate
+        # conjuncts, and quench sums `sf.hole` on its own). Measured on one
+        # hole at lc 1.0 with pads 0.30 off the wall, the only difference
+        # being the pad-pair product: 60x60 -> pad 0.0000, 70x70 -> pad
+        # 0.7000, hole 0.7000 in both.
+        reach = max(pad_reach, pa.hole_reach, pb.hole_reach)
+        if rect_gap(ea, eb) >= reach - EPS:
             return ZERO_SHORTFALL
-        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
-            # Extent-level verdict only: charge the extent shortfall as pad
-            # shortfall so the baseline comparison still constrains the pair.
-            g = rect_gap(ea, eb)
-            return PairShortfall(max(0.0, self.clearance - g), g < 0.0, 0.0,
-                                 g < 0.0)
         rects_a = pa.pad_rects(xa, ya, ra)
         rects_b = pb.pad_rects(xb, yb, rb)
+        if pa.n_pads * pb.n_pads > PAIR_TEST_CAP:
+            # Extent-level verdict for the PAD channel only: charge the extent
+            # shortfall as pad shortfall so the baseline comparison still
+            # constrains the pair.
+            #
+            # The HOLE channel is measured anyway (#761). The cap exists for
+            # the pad x pad product; the hole loops are holes x pads, an order
+            # smaller on the one part that trips it -- glasgow_revC's J5 is 44
+            # pads and 2 NPTH drill circles against a 121-pad neighbour that
+            # has none, so 5324 pad pairs against 242 hole tests, a factor of
+            # 22. (First written as "4 holes / 660 tests / two orders", which
+            # a fact-check re-measured; the numbers are here rather than in a
+            # commit message so the next reader can check them.) Returning a
+            # hardcoded `hole=0.0` here made `cur.hole > base.hole` unable to
+            # fire for exactly the dense connectors that carry mounting holes,
+            # and that is corpus-reachable, not theoretical: J5 is the one part
+            # on the 22 tracked boards whose product exceeds the cap.
+            g = rect_gap(ea, eb)
+            return PairShortfall(max(0.0, pad_reach - g), g < 0.0,
+                                 _hole_shortfall(pa, xa, ya, ra, rects_b,
+                                                 pb, xb, yb, rb, rects_a),
+                                 g < 0.0)
+        floors_a = pa.pad_floors if model is not None else None
+        floors_b = pb.pad_floors if model is not None else None
         pad_short = 0.0
         overlap = False
         stack = False
-        for a0, a1, a2, a3, na, sa in rects_a:
-            for b0, b1, b2, b3, nb, sb in rects_b:
+        clr = self.clearance
+        for ai, (a0, a1, a2, a3, na, sa) in enumerate(rects_a):
+            fa = floors_a[ai] if floors_a else None
+            for bi, (b0, b1, b2, b3, nb, sb) in enumerate(rects_b):
                 if not _sides_interact(sa, sb):
                     continue
                 g = rect_gap((a0, a1, a2, a3), (b0, b1, b2, b3))
@@ -1580,18 +2265,22 @@ class LegalityContext:
                     stack = True
                 if na == nb and na > 0:
                     continue
-                if g < self.clearance - EPS:
-                    pad_short += self.clearance - g
+                # Cheap pre-reject before resolving the pair's requirement: it
+                # can never exceed `reach`, so a gap at or beyond it is clear
+                # whatever the two pads declare.
+                if g >= reach - EPS:
+                    continue
+                eff = clr if fa is None else model.pair(fa, floors_b[bi])
+                if g < eff - EPS:
+                    pad_short += eff - g
                     if g < 0.0:
                         overlap = True
-        hole = 0.0
-        for cx, cy, r in pb.hole_circles(xb, yb, rb):
-            for a0, a1, a2, a3, _na, _sa in rects_a:
-                hole += _circle_rect_penetration(cx, cy, r, (a0, a1, a2, a3))
-        for cx, cy, r in pa.hole_circles(xa, ya, ra):
-            for b0, b1, b2, b3, _nb, _sb in rects_b:
-                hole += _circle_rect_penetration(cx, cy, r, (b0, b1, b2, b3))
-        return PairShortfall(pad_short, overlap, hole, stack)
+        # #761: keep-outs, not inflations -- the requirement is the stored
+        # growth PLUS the flat clearance, and the rects below are raw.
+        return PairShortfall(pad_short, overlap,
+                             _hole_shortfall(pa, xa, ya, ra, rects_b,
+                                             pb, xb, yb, rb, rects_a),
+                             stack)
 
     def seed_baseline(self, a: str, b: str) -> PairShortfall:
         # The single choke point every consumer routes through (pads_ok and
@@ -1649,6 +2338,27 @@ class LegalityContext:
         return self.gate.rect_outside_amount(ext, exact=exact, edges=edges)
 
 
+def format_required_clause(report, limit: int = 6) -> str:
+    """One line naming the pairs graded ABOVE the board-wide clearance, and WHY.
+
+    Lives beside the measure for the same reason `format_oob_clause` does: a
+    printed basis hand-copied into each CLI is the Class-2 drift CLAUDE.md
+    warns about, and no parity gate covers a print.
+
+    Without this the #697 fix would trade one confusing report for another --
+    the census would start counting a pair that is nowhere near the `--clearance`
+    the run announced, with nothing on screen to explain the gap. Returns ''
+    when every pair is graded at the flat scalar, which is the common case.
+    """
+    rows = list(report.get('required') or [])
+    if not rows:
+        return ''
+    shown = ', '.join('{}<->{} requires {:g}mm ({})'.format(a, b, mm, src)
+                      for a, b, mm, src in rows[:limit])
+    more = ' ... showing {} of {}'.format(limit, len(rows)) if len(rows) > limit else ''
+    return shown + more
+
+
 def format_oob_clause(report, limit: int = 6) -> str:
     """One line naming the off-board parts AND which measure produced them.
 
@@ -1678,7 +2388,8 @@ def format_oob_clause(report, limit: int = 6) -> str:
 
 def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                        edge_margin: Optional[float] = None,
-                       worst_n: int = 10) -> Dict[str, object]:
+                       worst_n: int = 10,
+                       pcb_file: str = None) -> Dict[str, object]:
     """Board-level pad/hole legality audit at the FILE's own poses.
 
     AABB broad phase over all cross-footprint pad pairs; with `exact` (the
@@ -1687,14 +2398,40 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
 
         {'pad_conflicts': int, 'pad_shortfall': mm, 'hole_conflicts': int,
          'oob_pad_count': int, 'oob_pad_amount': mm,
-         'worst': [(refA, refB, mm), ...], 'exact': bool}
+         'worst': [(refA, refB, mm), ...],
+         'required': [[refA, refB, mm, source], ...], 'exact': bool}
+
+    `clearance` is the BOARD-WIDE floor, not the whole requirement. Each pair is
+    graded at check_drc's own value -- max over the two nets' net classes, the
+    board's .kicad_dru per-layer rules, and either pad's `local_clearance`
+    override -- resolved by `PadClearanceModel` (#697). Pairs whose requirement
+    exceeds `clearance` are named in `required` with the source that raised
+    them, mirroring check_drc's `required_mm` disclosure; a board that declares
+    none of the three grades exactly as it did before.
+
+    `worst` deliberately stays a 3-tuple: seeder's repair census unpacks it
+    positionally, and the disclosure rides the separate `required` list.
 
     Consumers: place_optimize / place_seed JSON summaries, the render
     legality overlay, and the reconstruct gate.
     """
     fps = pcb_data.footprints
     pads_by_ref = {ref: [p for p in fp.pads] for ref, fp in fps.items()}
-    parts = build_part_pads(fps, clearance)
+    model = PadClearanceModel.for_board(pcb_data, clearance, pcb_file)
+    # Keep the notes even when the model is dropped: a source that FAILED to
+    # read is exactly what makes the model look inert, so reading them off the
+    # dropped object loses them in the one case they matter.
+    clearance_notes = list(model.notes)
+    if not model.active:
+        model = None
+    # The census reads hole keep-outs, so it carries the board's own
+    # copper-to-hole floor. The three call sites that read only pad rects and
+    # extents (legality's pad_intersection channel, routability, seeder's
+    # off-board census) deliberately do not: for them the term would resolve a
+    # board and change nothing.
+    parts = build_part_pads(
+        fps, clearance, model,
+        npth_floor=resolve_npth_floor(pcb_data, pcb_file, clearance_notes))
     routing_layers = list(getattr(pcb_data.board_info, 'copper_layers', []) or [])
     check_exact = None
     if exact:
@@ -1711,7 +2448,7 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     for ref, pp in parts.items():
         fp = fps[ref]
         rects = pp.pad_rects(fp.x, fp.y, fp.rotation or 0.0)
-        holes = pp.hole_circles(fp.x, fp.y, fp.rotation or 0.0)
+        holes = pp.hole_keepouts(fp.x, fp.y, fp.rotation or 0.0)  # #761
         entries[ref] = (rects, holes)
         ext = pp.extent(fp.x, fp.y, fp.rotation or 0.0)
         if ext is None:
@@ -1720,6 +2457,19 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             for gy in range(int(ext[1] // cell), int(ext[3] // cell) + 1):
                 grid.setdefault((gx, gy), set()).add(ref)
 
+    # The census reach. Unlike the per-candidate gate this runs ONCE, and the
+    # requirement is a max over BOTH members of a pair -- so the halo must cover
+    # the largest floor any partner could contribute, which is the board-wide
+    # maximum. Under-reaching here is how the original bug hid: a fiducial
+    # keep-clear 1.016mm wide never entered a census bounded at 0.15 + 0.5.
+    board_max_floor = max([pp.max_floor for pp in parts.values()] or [0.0])
+    # ...plus the hole keep-outs (#761): same argument, and the same reason
+    # the per-candidate gate needs it -- an NPTH hole contributes to no pad
+    # floor, so a halo bounded by floors alone never reaches one.
+    board_max_hole = max([pp.hole_reach for pp in parts.values()] or [0.0])
+    census_reach = max(clearance, board_max_floor, board_max_hole,
+                       model.base if model is not None else 0.0)
+
     def near_refs(ref):
         fp = fps[ref]
         pp = parts[ref]
@@ -1727,7 +2477,7 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
         if ext is None:
             return ()
         out = set()
-        m = clearance + 0.5
+        m = census_reach + 0.5
         for gx in range(int((ext[0] - m) // cell), int((ext[2] + m) // cell) + 1):
             for gy in range(int((ext[1] - m) // cell), int((ext[3] + m) // cell) + 1):
                 out |= grid.get((gx, gy), set())
@@ -1738,6 +2488,7 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
     pad_shortfall = 0.0
     hole_conflicts = 0
     worst: List[Tuple[str, str, float]] = []
+    required: List[list] = []
     seen_pairs = set()
     for ref in sorted(parts):
         rects_a, holes_a = entries[ref]
@@ -1747,46 +2498,97 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
                 continue
             seen_pairs.add(key)
             rects_b, holes_b = entries[other]
+            floors_a = parts[ref].pad_floors if model is not None else None
+            floors_b = parts[other].pad_floors if model is not None else None
+            pair_reach = (clearance if model is None else
+                          max(clearance, model.base, parts[ref].max_floor,
+                              parts[other].max_floor))
             pair_mm = 0.0
             pair_hit = False
+            pair_required = 0.0
+            pair_source = ''
             for ai, (a0, a1, a2, a3, na, sa) in enumerate(rects_a):
+                fa = floors_a[ai] if floors_a else None
                 for bi, (b0, b1, b2, b3, nb, sb) in enumerate(rects_b):
                     if na == nb and na > 0:
                         continue
                     if not _sides_interact(sa, sb):
                         continue
                     g = rect_gap((a0, a1, a2, a3), (b0, b1, b2, b3))
-                    if g >= clearance - EPS:
+                    if g >= pair_reach - EPS:
+                        continue
+                    if fa is None:
+                        eff, src = clearance, ''
+                    else:
+                        eff, src = model.pair_with_source(fa, floors_b[bi])
+                    if g >= eff - EPS:
                         continue
                     if check_exact is not None:
                         pa = _pad_with_copper(pads_by_ref[ref], ai, clearance)
                         pb = _pad_with_copper(pads_by_ref[other], bi, clearance)
                         if pa is not None and pb is not None:
-                            hit, over, _pt = check_exact(pa, pb, clearance,
+                            hit, over, _pt = check_exact(pa, pb, eff,
                                                          routing_layers,
                                                          clearance_margin=0.0)
                             if not hit:
                                 continue
                             pair_mm += over
                             pair_hit = True
+                            if eff > pair_required:
+                                pair_required, pair_source = eff, src
                             continue
-                    pair_mm += clearance - g
+                    pair_mm += eff - g
                     pair_hit = True
+                    if eff > pair_required:
+                        pair_required, pair_source = eff, src
             if pair_hit:
                 pad_conflicts += 1
                 pad_shortfall += pair_mm
                 worst.append((key[0], key[1], round(pair_mm, 4)))
+                if pair_source:
+                    required.append([key[0], key[1],
+                                     round(pair_required, 4), pair_source])
+            # #761: the hole channel discloses its requirement too. It used
+            # to report a bare `hole_conflicts` count with the mm thrown away,
+            # so a user saw that a mounting hole was too close to something
+            # without ever being told how close it was allowed to be -- and
+            # that number is not the board-wide clearance whenever the hole
+            # pad declares an override or the board declares a floor.
             hole_pen = 0.0
-            for cx, cy, r in holes_b:
+            hole_req = 0.0
+            for (cx, cy, r), req in zip(holes_b, parts[other].holes_req):
                 for a0, a1, a2, a3, _na, _sa in rects_a:
-                    hole_pen += _circle_rect_penetration(cx, cy, r,
-                                                         (a0, a1, a2, a3))
-            for cx, cy, r in holes_a:
+                    pen = _circle_rect_penetration(cx, cy, r,
+                                                   (a0, a1, a2, a3))
+                    hole_pen += pen
+                    if pen > EPS and req > hole_req:
+                        hole_req = req
+            for (cx, cy, r), req in zip(holes_a, parts[ref].holes_req):
                 for b0, b1, b2, b3, _nb, _sb in rects_b:
-                    hole_pen += _circle_rect_penetration(cx, cy, r,
-                                                         (b0, b1, b2, b3))
+                    pen = _circle_rect_penetration(cx, cy, r,
+                                                   (b0, b1, b2, b3))
+                    hole_pen += pen
+                    if pen > EPS and req > hole_req:
+                        hole_req = req
             if hole_pen > EPS:
                 hole_conflicts += 1
+                # Above the board-wide clearance only, so a plain hole at the
+                # flat scalar stays quiet. NOT literally the pad channel's
+                # bar, which is `pair_source != ''` and therefore sits at
+                # `model.base` -- the two differ when a netclass lifts
+                # `model.base` above `--clearance`, and "the same bar" would
+                # be wrong in exactly that case.
+                #
+                # DISCLOSED, not fixed: the hole channel files into `required`
+                # but not into `worst`, so a hole-ONLY conflict is printed by
+                # `format_required_clause` and is invisible to
+                # `floorplan.suspect_pairs`, which is built from `worst`.
+                # Widening `worst` changes what `place_seed --repair` chooses
+                # to move -- a placement-behaviour change needing its own
+                # before/after, not a rider on an arithmetic fix.
+                if hole_req > clearance + 1e-9:
+                    required.append([key[0], key[1], round(hole_req, 4),
+                                     'NPTH hole'])
 
     oob_count = 0
     oob_amount = 0.0
@@ -1836,18 +2638,31 @@ def grade_pad_legality(pcb_data, clearance: float, exact: bool = True,
             # worst_n <= 0 = list ALL (run-4 F5: the repair rung's census
             # was silently capped at 10 movers on a 20-pair board).
             'worst': worst[:worst_n] if worst_n and worst_n > 0 else worst,
+            # #697: pairs whose REQUIREMENT exceeds the board-wide `clearance`,
+            # with what raised it -- check_drc's `required_mm` disclosure, so a
+            # conflict the flat scalar could not explain does not read as an
+            # unexplained number. Empty on a board that declares no netclass,
+            # no .kicad_dru rule and no pad override.
+            'required': sorted(required, key=lambda r: (-r[2], r[0], r[1])),
+            # #697: anything that went WRONG resolving the requirement (an
+            # unreadable .kicad_pro / .kicad_dru, a dru note). Silence there
+            # drops the census back to the flat scalar and reports 0 conflicts
+            # -- the exact silence this issue was filed for.
+            'clearance_notes': clearance_notes,
             'exact': check_exact is not None}
 
 
 def _pad_with_copper(pads, copper_index: int, clearance: float):
     """The Nth COPPER pad of a footprint's pad list (grade_pad_legality's
-    PartPads indices count copper pads only, in construction order)."""
-    from check_drc import _pad_has_no_copper
+    PartPads indices count copper pads only, in construction order).
+
+    The skip conditions here MIRROR `PartPads.__init__`'s, and that mirroring is
+    what makes the index valid. Since #697 the same index also addresses
+    `PartPads.pad_floors`, so a change to either skip rule must change both.
+    """
     n = -1
     for p in pads:
-        if _pad_has_no_copper(p):
-            continue
-        if not any(str(l).endswith('.Cu') for l in p.layers):
+        if not _pad_carries_copper(p):
             continue
         n += 1
         if n == copper_index:

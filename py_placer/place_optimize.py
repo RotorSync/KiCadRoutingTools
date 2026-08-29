@@ -203,16 +203,21 @@ Examples:
     # the report pair. Gate-currency tallies live inside the quench; this is
     # the phantom-free number an auditor compares.
     from placement.legality import (grade_pad_legality,
-                                    format_oob_clause as _oob_clause)
+                                    format_oob_clause as _oob_clause,
+                                    format_required_clause as _req_clause)
     legality_before = None
     if not args.courtyard_only:
-        legality_before = grade_pad_legality(pcb_data, args.clearance)
+        legality_before = grade_pad_legality(pcb_data, args.clearance,
+                                             pcb_file=args.input_file)
         print(f"Pad legality before: {legality_before['pad_conflicts']} "
               f"conflict pair(s), {legality_before['hole_conflicts']} hole "
               f"conflict(s), {legality_before['oob_pad_count']} part(s) with "
               f"pad copper off-board"
               + (": " + _oob_clause(legality_before)
                  if _oob_clause(legality_before) else ""))
+        if _req_clause(legality_before):
+            print(f"  above the {args.clearance}mm floor: "
+                  f"{_req_clause(legality_before)}")
 
     ratsnest = {}
     summary = {'parts_moved': 0}
@@ -294,13 +299,18 @@ Examples:
     # means a gate has a hole and is worth a bug report.
     if legality_before is not None:
         legality_after = grade_pad_legality(parse_kicad_pcb(args.output_file),
-                                            args.clearance)
+                                            args.clearance,
+                                            pcb_file=args.output_file)
         print(f"Pad legality after: {legality_after['pad_conflicts']} "
               f"conflict pair(s), {legality_after['hole_conflicts']} hole "
               f"conflict(s), {legality_after['oob_pad_count']} part(s) with "
               f"pad copper off-board"
               + (": " + _oob_clause(legality_after)
                  if _oob_clause(legality_after) else ""))
+        if _req_clause(legality_after):
+            print(f"  above the {args.clearance}mm floor: "
+                  f"{_req_clause(legality_after)}")
+        summary['pad_clearance_required'] = legality_after['required']
         for key in ('pad_conflicts', 'hole_conflicts', 'oob_pad_count'):
             summary[f'{key}_before'] = legality_before[key]
             summary[f'{key}_after'] = legality_after[key]
@@ -315,8 +325,14 @@ Examples:
 
 
 if __name__ == "__main__":
-    import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
-    # main() already returns 0 from the --suggest-locks branch; that value was
-    # dropped here, so the process exited 0 regardless of what main() decided
-    # (the #551 family). Propagate it so a future refusal is visible to a caller.
-    sys.exit(main() or 0)
+    # Declare the lever for the WHOLE run, so every pose this CLI
+    # writes carries its name. Nothing called declare_lever outside
+    # tests, so the unaided instrument had no armed state at all:
+    # unarmed it is silent, and armed by hand it refused the engine.
+    from placement.provenance import declare_lever
+    with declare_lever('place_optimize.py', sys.argv):
+        import cli_banner; cli_banner.install()  # CMD/EXIT self-echo (run-3 B1)
+        # main() already returns 0 from the --suggest-locks branch; that value was
+        # dropped here, so the process exited 0 regardless of what main() decided
+        # (the #551 family). Propagate it so a future refusal is visible to a caller.
+        sys.exit(main() or 0)

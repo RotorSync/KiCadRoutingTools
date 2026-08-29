@@ -939,7 +939,11 @@ class DifferentialTab(wx.Panel):
             # unchecked) actually reaches the router. Checking Min Clearance
             # (== the CLI passing --clearance) caps each class at
             # min(class, clearance); unchecked routes each class in full.
-            _diff_clearance = config.get('clearance', 0.1)
+            # #755: the fallback is routing_defaults.CLEARANCE, not a bare
+            # literal -- this seeds EVERY net's priced clearance and the
+            # Min-Clearance cap below, so a 0.1 here under-prices the whole
+            # board's obstacles when the key is absent.
+            _diff_clearance = config.get('clearance', defaults.CLEARANCE)
             net_clearances = {}
             try:
                 from .fanout_gui import _get_net_classes_from_board
@@ -983,20 +987,30 @@ class DifferentialTab(wx.Panel):
                 # routing only and diff-pair rip-up silently stayed on 'count'.
                 ripup_blocker_select=config.get('ripup_blocker_select',
                                                 defaults.RIPUP_BLOCKER_SELECT),
-                clearance=config.get('clearance', 0.1),
-                via_size=config.get('via_size', 0.3),
-                via_drill=config.get('via_drill', 0.2),
+                # #755: geometry fallbacks come from routing_defaults, like the
+                # hole-to-hole line below and like planes_gui -- NOT bare
+                # literals that disagree with it (0.1/0.3/0.2 vs 0.25/0.5/0.3;
+                # via_size was the largest divergence, a 0.2mm barrel). A diff
+                # pair carries the SIGNAL via defaults (VIA_SIZE/VIA_DRILL, what
+                # the route tab and route_diff.py resolve to), not the fanout
+                # tab's BGA_* escape-via knobs. The shipping GUI path always
+                # populates all three (_build_routing_config), so this is the
+                # latent-trap arm: a partially-built config must not silently
+                # route to a different geometry than the CLI would.
+                clearance=config.get('clearance', defaults.CLEARANCE),
+                via_size=config.get('via_size', defaults.VIA_SIZE),
+                via_drill=config.get('via_drill', defaults.VIA_DRILL),
                 hole_to_hole_clearance=config.get('hole_to_hole_clearance',
                                                   defaults.HOLE_TO_HOLE_CLEARANCE),
                 board_edge_clearance=config.get('board_edge_clearance',
                                                 defaults.BOARD_EDGE_CLEARANCE),
-                grid_step=config.get('grid_step', 0.1),
+                grid_step=config.get('grid_step', defaults.GRID_STEP),
                 via_cost=config.get('via_cost', defaults.VIA_COST),
-                max_iterations=config.get('max_iterations', 200000),
+                max_iterations=config.get('max_iterations', defaults.MAX_ITERATIONS),
                 proximity_heuristic_factor=config.get('proximity_heuristic_factor', defaults.PROXIMITY_HEURISTIC_FACTOR),
                 keepout_enabled=config.get('keepout_enabled', False),
                 keepout_layer=config.get('keepout_layer', defaults.KEEPOUT_LAYER),
-                diff_pair_gap=config.get('diff_pair_gap', 0.101),
+                diff_pair_gap=config.get('diff_pair_gap', defaults.DIFF_PAIR_GAP),
                 diff_pair_width_from_class=config.get('diff_pair_width_from_class', False),
                 diff_pair_gap_from_class=config.get('diff_pair_gap_from_class', False),
                 min_turning_radius=config.get('min_turning_radius', 0.2),
@@ -1399,16 +1413,23 @@ class DifferentialTab(wx.Panel):
         # had tightened to 0.0889 / 0.25-0.15 by step 10. Every later step
         # resolves its geometry from that class, so the two fronts routed with
         # DIFFERENT parameters from step 11 on (GUI 3581 segments vs CLI 3428).
-        from .gui_utils import update_live_drc_floors
+        # #693: gated on the shared "Fix DRC settings after routing"
+        # checkbox, like the netclass/severity writeback above -- it used to
+        # run unconditionally, so an unchecked box still moved the board's
+        # Board Setup floors. The CLI gates its twin on
+        # --no-fix-drc-settings.
         _cfg = getattr(self, '_diff_drc_config', {}) or {}
-        update_live_drc_floors(
-            board,
-            clearance=_cfg.get('clearance'),
-            track_width=_cfg.get('diff_pair_width') or _cfg.get('track_width'),
-            via_size=_cfg.get('via_size'),
-            via_drill=_cfg.get('via_drill'),
-            hole_to_hole=_cfg.get('hole_to_hole_clearance'),
-            edge_clearance=_cfg.get('board_edge_clearance'))
+        if _cfg.get('fix_drc_settings', True):
+            from .gui_utils import update_live_drc_floors
+            update_live_drc_floors(
+                board,
+                clearance=_cfg.get('clearance'),
+                track_width=(_cfg.get('diff_pair_width')
+                             or _cfg.get('track_width')),
+                via_size=_cfg.get('via_size'),
+                via_drill=_cfg.get('via_drill'),
+                hole_to_hole=_cfg.get('hole_to_hole_clearance'),
+                edge_clearance=_cfg.get('board_edge_clearance'))
 
         return tracks_added, vias_added, tracks_removed
 

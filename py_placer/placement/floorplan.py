@@ -81,13 +81,81 @@ DEFAULT_ENVELOPE_TOLERANCE_MM = 0.5
 #: which already knows this failure mode for one part class.
 EDGE_BAND_SANITY_MM = 5.0
 
+#: What this build can ACT on, as distinct from what it can parse (#710).
+#: `schema` is the format number and is matched exactly; bumping it invalidates
+#: every existing intent file at once, which is far too blunt for "this build
+#: learned a new field". `READER_VERSION` is the field-vocabulary number, and an
+#: intent whose claim would be MEANINGLESS to an older build says so by setting
+#: `min_reader` to the version that introduced the field.
+#:
+#: Bump this whenever the loader learns a declarable field that changes a
+#: verdict, and say in docs/floorplan-intent.md which field arrived. Do NOT
+#: bump it for a field nothing grades.
+READER_VERSION = 1
+
 _TOP_LEVEL_KEYS = {
     'schema', 'kind', 'board', 'units', 'envelope', 'defaults', 'blocks',
     'keepouts', 'edge_connectors', 'decaps', 'must_lock', 'legality_budget',
-    'health', 'severity', 'context', 'overlap_waivers',
+    'health', 'severity', 'context', 'overlap_waivers', 'min_reader',
 }
 _BLOCK_KEYS = {'name', 'group', 'refs', 'zone', 'side', 'exclusive',
-               'tolerance_mm', 'note'}
+               'tolerance_mm', 'note', 'context'}
+
+# The principle `_BLOCK_KEYS` already encodes, applied one level down (#710).
+# Before this the loader was strict at exactly two levels -- top-level and
+# `blocks[]` -- and permissive everywhere else, so `{"ref": "J1",
+# "max_setback": 2.0}` and `{"severity": {"decap_distanc": "warn"}}` loaded
+# clean and did nothing. That is the failure `block_unresolved` exists to
+# prevent, one level down: a constraint the author thinks they set and the
+# grader never checks.
+#
+# The compatibility half matters as much. Because unknown nested keys were
+# IGNORED rather than refused, every field added below the top level was
+# automatically backward compatible AND silently inert on an older build --
+# for a constraint the worst possible pair, because the older reader answers
+# "clean" instead of "I do not understand this". Refusing makes it say so;
+# `min_reader` is the explicit, author-set form of the same guarantee.
+#
+# Every name below is either read by code or written by `emit_intent`. The
+# sets were enumerated from both directions, and the emitter's own output is
+# pinned against them by tests/test_549_floorplan_grade.py -- so a new emitted
+# key fails there, rather than as an artifact that stops loading months later.
+_ENVELOPE_KEYS = {'rect', 'tolerance_mm'}
+_KEEPOUT_KEYS = {'name', 'rect', 'circle', 'sides', 'allow', 'note',
+                 'context'}
+#: `source`, `suspect`, `suspect_reason`, `overhang_capped` and
+#: `observed_overhang_mm` are emitter-written and read by nothing today; they
+#: are accepted because `emit_intent` writes them and the round trip must
+#: survive, not because anything acts on them.
+_EDGE_CONNECTOR_KEYS = {'ref', 'edge', 'overhang_mm', 'max_setback_mm',
+                        'class', 'source', 'note', 'suspect', 'suspect_reason',
+                        'overhang_capped', 'observed_overhang_mm', 'context'}
+_OVERHANG_KEYS = {'min', 'max'}
+_DECAP_KEYS = {'max_distance_mm', 'exempt', 'search_radius_mm'}
+_DEFAULTS_KEYS = {'zone_tolerance_mm'}
+#: `zoned_blocks` is setdefault-injected into this same dict by `grade` after
+#: load, and `affinity_exempt_net_ids` is derived there from
+#: `affinity_exempt_nets` -- but only when that key is present, so an author
+#: may also set the ids directly. Both are accepted for that reason.
+_HEALTH_KEYS = {'bus_corridors', 'classes', 'zoned_blocks',
+                'affinity_exempt_nets', 'affinity_exempt_net_ids',
+                'ignore_net_ids', 'max_fanout', 'block_displacement_mm'}
+_CORRIDOR_KEYS = {'name', 'nets', 'width_mm'}
+_BUDGET_KEYS = {'overlap_area', 'oob_count', 'oob_amount'}
+_WAIVER_KEYS = {'pair', 'reason', 'context'}
+# `context` deliberately has NO key set of its own, at the top level or on an
+# entry: it is the read-only slot where a run records provenance no rule will
+# ever grade. The four objects a human AUTHORS entry-by-entry accept one --
+# _BLOCK_KEYS, _KEEPOUT_KEYS, _EDGE_CONNECTOR_KEYS, _WAIVER_KEYS -- because the
+# alternative is worse; the settings objects (envelope, defaults, decaps,
+# health, legality_budget, overhang_mm) do not, since prose about a setting
+# belongs on the claim that uses it or at the top level.
+# Refusing prose outright pushes it into a key that IS graded -- the recorded
+# runs show exactly that drift, an `edge_connectors[]` entry that grew
+# `band_basis`, `why`, `why_not_repaired` and `rejected_alternative` because
+# there was nowhere else for the reasoning to go. Folding it into `note`
+# instead would be worse still: `note` is load-bearing, grepped for the
+# substring SUSPECT by emit_intent and place_reconstruct.
 _EDGES = ('north', 'south', 'east', 'west')
 
 
@@ -138,6 +206,13 @@ class Zone:
     exclusive: bool = False
     tolerance_mm: Optional[float] = None
     note: str = ''
+    #: Free-form provenance, read by nothing (see `_BLOCK_KEYS`). Carried on
+    #: the Zone rather than dropped: `keepouts`/`edge_connectors`/
+    #: `overlap_waivers` keep their raw dict and so keep theirs, and a slot
+    #: that silently vanishes for ONE of the four is the #710 defect itself.
+    #: (Zone is frozen, so this makes it unhashable -- nothing hashes a Zone,
+    #: only iterates them.)
+    context: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -161,6 +236,39 @@ class Intent:
     # NEVER auto-emitted (a waiver derived from the board under repair would
     # be the budget self-bless bug again); consumed by grade_body_overlap.
     overlap_waivers: Tuple[Dict[str, object], ...] = ()
+    # Run-23: budget keys `emit_intent` deliberately did NOT bake, and why
+    # ({key: reason}). Emitted into `context.budget_withheld`; carried here so
+    # the GRADE can say "not derivable" instead of grading nothing and
+    # printing 0 errors. Hand-written intents leave it empty, which is the
+    # honest answer for a budget a human simply chose not to declare.
+    budget_withheld: Dict[str, str] = field(default_factory=dict)
+
+    def edge_claims(self) -> Tuple[Dict[str, object], ...]:
+        """The `edge_connectors` entries that actually CLAIM AN EDGE.
+
+        The wire key holds two populations. An `edge_receptacle` /
+        `edge_actuator` entry says "this part's mating face belongs at the
+        boundary", and the placement engines act on that: place_seed LOCKS it
+        during the polish quench, place_reconstruct grants it a banded
+        out-of-outline allowance and excludes it from the exchange stage, and
+        reconstruct.classify forces it into the anchor tier. A
+        `connector_affinity` entry (run-23) says only "this is a
+        connector-family part with NO edge claim" -- it exists so a mid-board
+        header stops being invisible to `rule_edge_connector`, which flags an
+        interior pose at WARN.
+
+        Handing the second population to the first's consumers would silently
+        change placement: on tigard_placed that is 6 extra refs locked in the
+        seed quench, given a 2.0mm off-outline allowance each and pinned as
+        anchors -- for parts nobody said anything about. So the engines read
+        THIS, and the rule reads `edge_connectors`.
+
+        The split lives here, in one place, rather than as a filter repeated
+        at every consumer: a filter that must be remembered is a filter that
+        will be forgotten at the next call site.
+        """
+        return tuple(c for c in self.edge_connectors
+                     if c.get('class') != 'connector_affinity')
 
     def waiver_pairs(self) -> Tuple[Tuple[str, str], ...]:
         out = []
@@ -209,6 +317,48 @@ def _rect(value, where: str) -> Tuple[float, float, float, float]:
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+def _reject_unknown(obj, allowed, where: str) -> None:
+    """Refuse an unknown key rather than dropping it (#710).
+
+    One message shape for every level, so `blocks[3]`, `severity` and
+    `health.bus_corridors[0]` all read alike. The `Known:` list is what turns
+    a typo into a fix -- `keepout` only looks wrong next to `keepouts`.
+    """
+    # str() BEFORE sorting, not at join time: a dict handed to
+    # `intent_from_dict` directly (it is public, and the place_* mains catch
+    # only ValueError) can carry a non-string key, and both `sorted` over
+    # mixed types and `join` over non-strings raise TypeError -- which would
+    # traceback past the callers instead of becoming their exit 2.
+    bad = sorted(str(k) for k in set(obj) - set(allowed))
+    if bad:
+        raise IntentError(f"{where}: unknown key(s) {', '.join(bad)}. "
+                          f"Known: {', '.join(sorted(map(str, allowed)))}")
+
+
+def _entry_context(entry, where: str) -> None:
+    """An entry's `context` is free-form, but it is still an OBJECT.
+
+    Type-checked and otherwise untouched: a list here means the author meant
+    something else, while an unknown key inside means nothing at all.
+    """
+    if 'context' in entry:
+        _obj(entry['context'], f"{where}.context")
+
+
+def _obj(value, where: str) -> Dict:
+    """An intent object, or `{}` when absent.
+
+    `raw.get(k) or {}` handed a list or a string straight on, so a schema
+    error surfaced as an AttributeError inside a rule three call frames later
+    -- or, for a key nothing reads yet, not at all.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise IntentError(f"{where}: expected an object, got {value!r}")
+    return value
+
+
 def _str_tuple(value, where: str) -> Tuple[str, ...]:
     if value is None:
         return ()
@@ -238,16 +388,33 @@ def load_intent(path: str) -> Intent:
 
 
 def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
-    unknown = sorted(set(raw) - _TOP_LEVEL_KEYS)
-    if unknown:
-        raise IntentError(
-            f"unknown top-level key(s): {', '.join(unknown)}. Known keys: "
-            f"{', '.join(sorted(_TOP_LEVEL_KEYS))}")
+    # FIRST, ahead of the unknown-key and schema checks. A build that declares
+    # a new field almost always declares a new TOP-LEVEL one, so checking the
+    # key set first means the actionable "this build is too old, upgrade"
+    # message is exactly the one an author never sees -- they get "unknown
+    # key(s) zones" and go looking for a typo that is not there.
+    #
+    # Grading such a file halfway is the same wrong answer as grading it
+    # fully, so nothing else is read until this passes.
+    min_reader = raw.get('min_reader')
+    if min_reader is not None:
+        if not isinstance(min_reader, int) or isinstance(min_reader, bool):
+            raise IntentError(
+                f"min_reader {min_reader!r}: expected an integer")
+        if min_reader > READER_VERSION:
+            raise IntentError(
+                f"min_reader {min_reader}: this build is reader "
+                f"{READER_VERSION}. The intent declares a claim this build "
+                f"would not act on, and grading it would report clean on a "
+                f"constraint that was never checked -- upgrade instead")
+
+    _reject_unknown(raw, _TOP_LEVEL_KEYS, 'top level')
 
     schema = raw.get('schema')
     if schema != SCHEMA_VERSION:
         raise IntentError(
             f"schema {schema!r}: this build reads schema {SCHEMA_VERSION}")
+
     kind = raw.get('kind')
     if kind != KIND:
         # A round sidecar or a lock-advisor dump handed in by mistake reads as
@@ -259,9 +426,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     if units != 'mm':
         raise IntentError(f"units {units!r}: only 'mm' is supported")
 
-    envelope = raw.get('envelope') or {}
-    if not isinstance(envelope, dict):
-        raise IntentError("envelope: expected an object")
+    envelope = _obj(raw.get('envelope'), 'envelope')
+    _reject_unknown(envelope, _ENVELOPE_KEYS, 'envelope')
     if 'rect' in envelope and envelope['rect'] is not None:
         envelope = dict(envelope)
         envelope['rect'] = _rect(envelope['rect'], 'envelope.rect')
@@ -271,9 +437,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     for i, b in enumerate(raw.get('blocks') or []):
         if not isinstance(b, dict):
             raise IntentError(f"blocks[{i}]: expected an object")
-        bad = sorted(set(b) - _BLOCK_KEYS)
-        if bad:
-            raise IntentError(f"blocks[{i}]: unknown key(s) {', '.join(bad)}")
+        _reject_unknown(b, _BLOCK_KEYS, f"blocks[{i}]")
+        _entry_context(b, f"blocks[{i}]")
         name = b.get('name') or f"block{i}"
         if name in seen_names:
             raise IntentError(f"blocks[{i}]: duplicate block name {name!r}")
@@ -292,6 +457,7 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             exclusive=bool(b.get('exclusive', False)),
             tolerance_mm=b.get('tolerance_mm'),
             note=b.get('note', '') or '',
+            context=b.get('context') or {},
         ))
         if not blocks[-1].refs and not blocks[-1].group:
             raise IntentError(
@@ -303,6 +469,8 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
     for i, k in enumerate(raw.get('keepouts') or []):
         if not isinstance(k, dict):
             raise IntentError(f"keepouts[{i}]: expected an object")
+        _reject_unknown(k, _KEEPOUT_KEYS, f"keepouts[{i}]")
+        _entry_context(k, f"keepouts[{i}]")
         k = dict(k)
         k.setdefault('name', f"keepout{i}")
         if 'rect' in k and k['rect'] is not None:
@@ -323,7 +491,15 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
 
     conns = []
     for i, c in enumerate(raw.get('edge_connectors') or []):
-        if not isinstance(c, dict) or not c.get('ref'):
+        if not isinstance(c, dict):
+            raise IntentError(f"edge_connectors[{i}]: expected an object with "
+                              f"a `ref`")
+        # Unknown keys BEFORE the `ref` check: a typo'd `reff` should be told
+        # it is unknown, not reported as a missing `ref` while the author
+        # stares at the key they did write.
+        _reject_unknown(c, _EDGE_CONNECTOR_KEYS, f"edge_connectors[{i}]")
+        _entry_context(c, f"edge_connectors[{i}]")
+        if not c.get('ref'):
             raise IntentError(f"edge_connectors[{i}]: expected an object with "
                               f"a `ref`")
         c = dict(c)
@@ -333,20 +509,25 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
                 f"edge_connectors[{i}] ({c['ref']}): edge {edge!r}, expected "
                 f"one of {', '.join(_EDGES)}")
         oh = c.get('overhang_mm')
-        if oh is not None and not isinstance(oh, dict):
-            raise IntentError(f"edge_connectors[{i}] ({c['ref']}): "
-                              f"overhang_mm expects {{'min': .., 'max': ..}}")
+        if oh is not None:
+            if not isinstance(oh, dict):
+                raise IntentError(f"edge_connectors[{i}] ({c['ref']}): "
+                                  f"overhang_mm expects "
+                                  f"{{'min': .., 'max': ..}}")
+            _reject_unknown(oh, _OVERHANG_KEYS,
+                            f"edge_connectors[{i}] ({c['ref']}).overhang_mm")
         conns.append(c)
 
-    severity = raw.get('severity') or {}
-    if not isinstance(severity, dict) or any(
-            v not in (ERROR, WARN) for v in severity.values()):
+    severity = _obj(raw.get('severity'), 'severity')
+    if any(v not in (ERROR, WARN) for v in severity.values()):
         raise IntentError(
             f"severity: expected {{rule: 'error'|'warn'}}, got {severity!r}")
+    # Keys too, not only values (#710). `{"decap_distanc": "warn"}` used to
+    # load clean and leave the rule at its default -- a demotion the author
+    # believes they made and the exit code never reflects.
+    _reject_unknown(severity, _SEVERITY_KEYS, 'severity')
 
-    budget = raw.get('legality_budget') or {}
-    if not isinstance(budget, dict):
-        raise IntentError("legality_budget: expected an object")
+    budget = _obj(raw.get('legality_budget'), 'legality_budget')
     if 'oob_area' in budget:
         # Refused loudly rather than ignored, because it is the ONE legality
         # number that lies about cutouts. `out_of_board_area` measures against
@@ -359,37 +540,59 @@ def intent_from_dict(raw: Dict, source_path: str = '') -> Intent:
             "measured against the bounding-box inset, so a part sitting inside "
             "a CUTOUT scores 0.0 area and would grade clean. Use oob_count or "
             "oob_amount, which both see the real Edge.Cuts rings")
-    unknown_budget = sorted(set(budget) - {'overlap_area', 'oob_count',
-                                           'oob_amount'})
-    if unknown_budget:
-        raise IntentError(
-            f"legality_budget: unknown key(s) {', '.join(unknown_budget)}. "
-            f"Known: overlap_area, oob_count, oob_amount")
+    _reject_unknown(budget, _BUDGET_KEYS, 'legality_budget')
+
+    defaults = _obj(raw.get('defaults'), 'defaults')
+    _reject_unknown(defaults, _DEFAULTS_KEYS, 'defaults')
+
+    decaps = _obj(raw.get('decaps'), 'decaps')
+    _reject_unknown(decaps, _DECAP_KEYS, 'decaps')
+
+    health = _obj(raw.get('health'), 'health')
+    _reject_unknown(health, _HEALTH_KEYS, 'health')
+    for i, spec in enumerate(health.get('bus_corridors') or []):
+        if not isinstance(spec, dict):
+            raise IntentError(f"health.bus_corridors[{i}]: expected an object")
+        _reject_unknown(spec, _CORRIDOR_KEYS, f"health.bus_corridors[{i}]")
+
+    # `context` is deliberately OPEN -- the documented read-only slot, where a
+    # run records provenance no rule will ever grade (`emit_intent` writes
+    # `cutouts`, `file_locked`, `budget_withheld`; run artifacts add their own
+    # prose). Type-checked so a list cannot reach `.get('budget_withheld')`,
+    # but its KEYS are the author's business: refusing them would only push
+    # provenance into a key that IS graded, which is the worse failure.
+    context = _obj(raw.get('context'), 'context')
 
     waivers = raw.get('overlap_waivers') or []
     if not isinstance(waivers, list):
         raise IntentError("overlap_waivers: expected a list of "
                           "{'pair': [refA, refB], 'reason': ...} objects")
-    for w in waivers:
+    for i, w in enumerate(waivers):
         if (not isinstance(w, dict) or not isinstance(w.get('pair'), list)
                 or len(w['pair']) != 2):
             raise IntentError(
                 "overlap_waivers: each entry needs 'pair': [refA, refB] "
                 "(and should carry a 'reason')")
+        _reject_unknown(w, _WAIVER_KEYS, f"overlap_waivers[{i}]")
+        _entry_context(w, f"overlap_waivers[{i}]")
 
     return Intent(
         schema=schema, kind=kind, board=raw.get('board', '') or '',
         units=units, envelope=envelope,
-        defaults=raw.get('defaults') or {},
+        defaults=defaults,
         blocks=tuple(blocks), keepouts=tuple(keepouts),
         edge_connectors=tuple(conns),
-        decaps=raw.get('decaps') or {},
+        decaps=decaps,
         must_lock=_str_tuple(raw.get('must_lock'), 'must_lock'),
-        legality_budget=raw.get('legality_budget') or {},
-        health=raw.get('health') or {},
+        legality_budget=budget,
+        health=health,
         severity={str(k): str(v) for k, v in severity.items()},
         source_path=source_path,
         overlap_waivers=tuple(waivers),
+        budget_withheld={
+            str(k): str(v) for k, v in
+            _obj(context.get('budget_withheld'),
+                 'context.budget_withheld').items()},
     )
 
 
@@ -878,19 +1081,32 @@ def rule_edge_connector(ctx) -> Iterator[Violation]:
         # a violation -- which is also what makes a misplaced edge part
         # CHARGEABLE by place_seed --repair.
         setback = c.get('max_setback_mm')
+        _sev = ctx.sev('edge_connector')
         if setback is None and c.get('class') == 'edge_receptacle':
             from .part_class import SEAT_TOL_MM
             setback = SEAT_TOL_MM
+        if setback is None and c.get('class') == 'connector_affinity':
+            # run-23: the weak class. An INTERIOR generic connector is a flag
+            # for the boundary review, never an error -- legitimately-interior
+            # connectors exist (tigard J7), so this fires at WARN whatever the
+            # rule's configured severity. An author upgrades by writing
+            # max_setback_mm (then the configured severity applies) or edge.
+            from .part_class import INTERIOR_AFFINITY_MM
+            setback = INTERIOR_AFFINITY_MM
+            _sev = WARN
         if setback is not None and amount <= legality.EPS:
             clr = ctx.gate.edge_clearance(part.rect)
             if clr > float(setback) + legality.EPS:
                 yield Violation(
-                    rule='edge_connector', severity=ctx.sev('edge_connector'),
+                    rule='edge_connector', severity=_sev,
                     ref=ref,
                     message=(f"{ref} is an edge part seated {clr:.2f}mm from "
                              f"the nearest edge with no overhang (seat "
-                             f"tolerance {float(setback):.2f}mm) -- the "
-                             f"mating face cannot reach the edge"),
+                             f"tolerance {float(setback):.2f}mm) -- "
+                             + ("a plug may not reach it; disposition in the "
+                                "boundary review or declare max_setback_mm"
+                                if _sev == WARN else
+                                "the mating face cannot reach the edge")),
                     measured={'edge_clearance_mm': round(clr, 4)},
                     expected={'max_setback_mm': float(setback)})
 
@@ -964,6 +1180,11 @@ def rule_legality(ctx) -> Iterator[Violation]:
                        ('oob_count', 'parts leaving the board outline'),
                        ('oob_amount', 'total off-board overhang (mm)')):
         if key not in budget:
+            # Not graded. When the emitter WITHHELD it (a blocking body pair
+            # or an unwaived courtyard interpenetration on the board it was
+            # emitted from), the run must not look like a pass on this
+            # channel: `budget_abstained` on the result carries it, and both
+            # the report and the summary print it. See grade().
             continue
         got = ctx.legality.get(key)
         if got is None:
@@ -988,6 +1209,19 @@ RULES = (
     ('must_lock', rule_must_lock),
     ('legality', rule_legality),
 )
+
+#: Rules whose violations are raised OUTSIDE the `RULES` loop, and so have no
+#: rule function to be enumerated from: the two self-contradiction findings in
+#: `validate_intent` and the unresolved-block finding in `resolve_blocks`.
+#: Kept as a named set rather than folded into `_SEVERITY_KEYS` by hand, so the
+#: next reader can see which names are the exception and why.
+_NON_RULE_SEVERITIES = frozenset({
+    'intent_zone_outside_envelope', 'intent_zone_overlap', 'block_unresolved'})
+
+#: Every rule name an intent may set a severity for. Derived from `RULES`, so a
+#: new rule is settable the moment it is registered -- a hand-listed set would
+#: silently refuse the newest rule's own name.
+_SEVERITY_KEYS = frozenset(name for name, _ in RULES) | _NON_RULE_SEVERITIES
 
 # Why a rule did not run. Reported so that "0 violations" and "0 rules ran"
 # cannot look the same to a reader or to a machine.
@@ -1043,6 +1277,11 @@ class GradeResult:
     rules_run: Tuple[str, ...]
     rules_skipped: Dict[str, str]
     n_footprints: int
+    # Run-23: budget keys the intent could NOT derive, {key: reason}. An
+    # abstention, not a pass -- the channel was never graded. Before this the
+    # withheld key was a bare `continue` in rule_legality and the run printed
+    # "PASS: N rules ran, no violations" with overlap unmeasured.
+    budget_abstained: Dict[str, str] = field(default_factory=dict)
 
     @property
     def errors(self) -> List[Violation]:
@@ -1106,9 +1345,21 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
     violations = list(validate_intent(intent)) + list(block_problems)
     ran: List[str] = []
     skipped: Dict[str, str] = {}
+    # Budget keys the emitter withheld and that are therefore NOT graded.
+    # A key present in the budget was declared (by hand, deliberately) and
+    # overrides its withholding note.
+    abstained = {str(k): str(v)
+                 for k, v in (intent.budget_withheld or {}).items()
+                 if k not in (intent.legality_budget or {})}
     for name, fn in RULES:
         if not _wants(intent, name):
-            skipped[name] = _SKIP_REASON.get(name, 'not requested')
+            reason = _SKIP_REASON.get(name, 'not requested')
+            if name == 'legality' and abstained:
+                # "declares no legality_budget" is true but reads as "nobody
+                # wanted one". Say that the emitter refused to derive it.
+                reason += ('; the emitter WITHHELD ' + ', '.join(
+                    f'{k} ({v})' for k, v in sorted(abstained.items())))
+            skipped[name] = reason
             continue
         ran.append(name)
         violations.extend(fn(ctx))
@@ -1158,6 +1409,7 @@ def grade(intent: Intent, pcb_data, pcb_file: str, *,
                'segments': st.segments, 'vias': st.vias},
         health=health_out,
         rules_run=tuple(ran), rules_skipped=skipped,
+        budget_abstained=abstained,
         n_footprints=len(pcb_data.footprints))
 
 
@@ -1428,6 +1680,21 @@ def emit_intent(pcb_data, pcb_file: str, *,
             if fp is None:
                 continue
             pc = classify_part(fp, ref)
+            if pc.name == 'connector_affinity':
+                # run-23: generic connectors (headers, JST, terminal blocks)
+                # had NO class, so J2/J5/J6/J7 seated mid-board and no
+                # instrument could say so. Declared WITHOUT an edge (the
+                # run-4 rule stands: naming one would be an invention) and
+                # with no band ceiling; the grade flags an INTERIOR pose at
+                # ADVISORY severity only. A human upgrades by adding `edge`
+                # or `max_setback_mm` to the entry.
+                clr = state.edge_gate.edge_clearance(parts[ref].rect)
+                conns.append({
+                    'ref': ref, 'class': pc.name, 'source': 'auto-class',
+                    'overhang_mm': {'min': 0.0},
+                    'note': (f'connector-family part, no edge claim; '
+                             f'measured {clr:.2f}mm from the nearest edge')})
+                continue
             if pc.name != 'edge_receptacle':
                 # actuators make no claim unless they actually overhang
                 # (handled above); nothing else is an edge class.
@@ -1453,15 +1720,37 @@ def emit_intent(pcb_data, pcb_file: str, *,
     # (the emitted 6.112 budget graded the C14-on-R14 board clean). The
     # repaired board re-emits the honest number; meanwhile board_score's
     # `assembly` component grades independently of any budget.
+    # Run-23 extends the same withholding to unwaived COURTYARD interpene-
+    # trations past the blocking floors: run 23's intent was emitted from a
+    # mid-repair board carrying J4 0.90mm inside U6, baked overlap_area
+    # 30.1085, and the final board's 26.302 then graded PASS -- the budget
+    # blessed the board it was emitted from. A board with such pairs gets no
+    # auto overlap budget; declare one by hand (visibly) if the overlap is
+    # by design. Cost, measured: 5 of 34 corpus boards carry by-design
+    # censuses and lose the auto-budget too -- the legality rule then
+    # ABSTAINS (not-derivable) on them, which is honest degradation; their
+    # independent coverage is check_assembly's moved-vs-baseline gate.
     try:
         from placement.legality import grade_body_overlap
-        _body_blocking = grade_body_overlap(
-            pcb_data, state.clearance, pcb_file=pcb_file)['blocking']
+        _g_overlap = grade_body_overlap(
+            pcb_data, state.clearance, pcb_file=pcb_file)
+        _body_blocking = _g_overlap['blocking']
+        _courtyard_blocking = _g_overlap.get('courtyard_blocking', 0)
     except Exception:
         _body_blocking = 0
+        _courtyard_blocking = 0
     _suspects = any('SUSPECT' in (c.get('note') or '') for c in conns)
     _budget = {}
-    if not _body_blocking:
+    _withheld = {}
+    if _body_blocking:
+        _withheld['overlap_area'] = (f'{_body_blocking} blocking body '
+                                     f'pair(s) on the emitting board (run-6)')
+    elif _courtyard_blocking:
+        _withheld['overlap_area'] = (
+            f'{_courtyard_blocking} unwaived courtyard interpenetration(s) '
+            f'past the blocking floors on the emitting board (run-23): an '
+            f'auto-budget would bless them')
+    else:
         _budget['overlap_area'] = _ceil4(float(leg['overlap_area']))
     if not _suspects:
         _budget['oob_count'] = int(leg['oob_count'])
@@ -1499,6 +1788,10 @@ def emit_intent(pcb_data, pcb_file: str, *,
             'note': ('read-only, describing the board as it is. The outline is '
                      'not editable by this toolchain: size, cutouts and slots '
                      'are mechanical decisions the user owns'),
+            # Budget keys deliberately NOT baked, and why -- so a reader of
+            # the intent can tell "withheld" from "forgot" (empty when
+            # nothing was withheld).
+            'budget_withheld': _withheld,
             'cutouts': [[[round(x, 3), round(y, 3)] for x, y in ring]
                         for ring in (pcb_data.board_info.board_cutouts or [])],
             'edge_contours': len(
@@ -1542,6 +1835,11 @@ def format_text(r: GradeResult) -> str:
         for v in r.violations:
             tag = 'ERROR' if v.severity == ERROR else 'warn '
             lines.append(f"    [{tag}] {v.rule}: {v.message}")
+    if r.budget_abstained:
+        lines.append(f"  {len(r.budget_abstained)} legality budget key(s) NOT "
+                     f"DERIVABLE -- not graded, not passed:")
+        for key in sorted(r.budget_abstained):
+            lines.append(f"    - {key}: {r.budget_abstained[key]}")
     if r.rules_skipped:
         lines.append(f"  {len(r.rules_skipped)} rule(s) did not run:")
         for name in sorted(r.rules_skipped):
@@ -1641,6 +1939,7 @@ def to_json(r: GradeResult) -> Dict:
         'health': r.health,
         'rules_run': list(r.rules_run),
         'rules_skipped': r.rules_skipped,
+        'budget_abstained': r.budget_abstained,
         'n_footprints': r.n_footprints,
     }
 
@@ -1660,6 +1959,9 @@ def summary(r: GradeResult) -> Dict:
         'violations_by_rule': by_rule,
         'rules_run': len(r.rules_run),
         'rules_skipped': len(r.rules_skipped),
+        # Not a violation count and not a pass: channels nothing graded.
+        'budget_abstained': len(r.budget_abstained),
+        'budget_abstained_keys': sorted(r.budget_abstained),
         'blocks': len(r.blocks),
         'blocks_resolved': sum(1 for v in r.blocks.values() if v),
         'parts_covered': len({ref for v in r.blocks.values() for ref in v}),

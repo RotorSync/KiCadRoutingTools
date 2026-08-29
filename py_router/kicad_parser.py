@@ -2771,94 +2771,248 @@ def extract_groups(content: str, footprints: Dict[str, 'Footprint']) -> Dict[str
     return out
 
 
+def _via_blocks(content: str) -> List[Tuple[int, str]]:
+    """``(start offset, paren-balanced text)`` for every ``(via ...)`` in a file.
+
+    ONE scan, shared by the geometry parse and the protection-attr pass, and the
+    reason both are safe (#748). The geometry regexes used to run over the WHOLE
+    file, which let the KiCad-10 pattern's ``.*?`` gap run out of one via and
+    into a LATER via's ``(net "...")``. On a MIXED-dialect board that is not a
+    near-miss: measured, a numeric via followed by a named one parsed as two
+    vias BOTH at the numeric one's coordinates -- one barrel invented, one real
+    barrel swallowed. Mixed-dialect boards are not hypothetical either; this
+    repo's own fanout step writes numeric refs into KiCad-10 boards, which is
+    what ``tests/stress/fix_mixed_net_refs.py`` exists to undo. A pattern
+    confined to a block cannot reach another via at all.
+
+    The balanced scan stops at the via's own closing paren, so it costs the via
+    text rather than the file. Deliberately NOT ``content[start:]`` per via:
+    that copies the whole tail for EVERY via (O(vias x filesize)) -- the same
+    quadratic shape this file already carries a guard for at #225, and what
+    ``_extract_via_protection_attrs`` was doing before it shared this scan.
+
+    String-aware, because KiCad net names may contain parentheses (``/BUS(0)``)
+    and a bare depth count would end the block inside one. An UNBALANCED via
+    (truncated file) is skipped: there is no field ordering to trust in a block
+    whose end cannot be found.
+    """
+    out: List[Tuple[int, str]] = []
+    n = len(content)
+    for m in re.finditer(r'\(via(?=[\s(])', content):
+        start = m.start()
+        depth = 0
+        in_str = False
+        i = start
+        while i < n:
+            c = content[i]
+            if in_str:
+                if c == '\\':
+                    i += 2
+                    continue
+                if c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    out.append((start, content[start:i + 1]))
+                    break
+            i += 1
+    return out
+
+
+# Geometry prefix, identical in both net dialects: the type token (blind/micro)
+# precedes (at ...), and at -> size -> drill -> layers is what KiCad and this
+# repo's own writer emit.
+_VIA_PREFIX_RE = re.compile(
+    r'\(via\s+(?:blind\s+|micro\s+)?'
+    r'\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+'
+    r'\(size\s+([\d.-]+)\)\s+'
+    r'\(drill\s+([\d.-]+)\)\s+'
+    r'\(layers\s+"([^"]+)"\s+"([^"]+)"\)')
+# Either dialect, whichever the block carries. Escape-aware on the name side
+# (pads and zones already are): with a plain [^"]* a net name containing an
+# escaped quote ends the capture early, the pattern fails, and the via is lost
+# -- the same disappearance #748 is about, by a different route.
+_VIA_NET_RE = re.compile(r'\(net\s+(?:"((?:[^"\\]|\\.)*)"|(\d+))\)')
+_VIA_UUID_RE = re.compile(r'\(uuid\s+"([^"]+)"\)')
+_VIA_FREE_RE = re.compile(r'\(free\s+yes\)')
+_VIA_LOCKED_RE = re.compile(r'\(locked\s+yes\)')
+
+
 def extract_vias(content: str, name_to_id: Dict[str, int] = None) -> List[Via]:
-    """Extract all vias from PCB file."""
+    """Extract all vias from PCB file.
+
+    Only the GEOMETRY prefix is positional. Everything after ``(layers ...)`` --
+    net, uuid, ``(free yes)``, ``(locked yes)``, the protection family -- is read
+    from the block by its own token, in either order and with anything between
+    (#748).
+
+    That asymmetry used to be the bug. The KiCad-10 pattern was given a flexible
+    gap before ``(net ...)`` for exactly the protection tokens KiCad 10 writes
+    there; its KiCad-9 twin kept strict field ordering, so a NUMERIC-net via
+    carrying any protection token matched neither pattern and vanished from the
+    model. Not an invisible spec -- an invisible barrel, which the router then
+    plans tracks through (the hazard PR #534 was written against). Our own
+    writer produces that exact shape whenever a net name fails to resolve, and
+    ``net_id_to_name`` has no key 0 on any board.
+
+    A token sitting between ``(net ...)`` and ``(uuid ...)`` used to cost the
+    SPEC in both dialects for the same positional reason -- the uuid capture
+    failed and the uuid-keyed protection join then missed. Reading each field
+    independently retires that too, and lets a uuid-less via carry a spec at all.
+    """
     vias = []
+    # One linear scan: most boards mention no protection token and skip the
+    # per-block spec work entirely.
+    want_spec = any(('(' + t) in content for t in VIA_PROTECTION_TOKENS)
 
-    # Try KiCad 9 format first: (net <id>)
-    # Strict field ordering: at → size → drill → layers → (locked?) → (free?)
-    # → net → uuid. (locked yes) is tolerated on either side of (free ...) --
-    # without it a LOCKED via matched nothing at all (the segment-side #150
-    # bug, via edition): never an obstacle, never protected.
-    # (via blind ...) / (via micro ...): the type token precedes (at ...)
-    # uuid OPTIONAL (PR #534): KiCad itself accepts uuid-less copper (it mints
-    # one on load) and tool-injected copper often omits it. Requiring the
-    # token silently DROPPED such vias from the model -- invisible barrels the
-    # router then planned tracks through. uuid-less vias parse with uuid=""
-    # (they simply can't carry the uuid-keyed extras: v10 free-flag, tenting
-    # attrs, teardrop insertion -- all benign degradations).
-    via_pattern = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\)\s+(?:\(locked\s+yes\)\s+)?(?:\(free\s+(yes|no)\)\s+)?(?:\(locked\s+yes\)\s+)?\(net\s+(\d+)\)(?:\s+\(uuid\s+"([^"]+)"\))?'
-
-    for m in re.finditer(via_pattern, content, re.DOTALL):
-        free_value = m.group(7)  # "yes", "no", or None
+    for _start, block in _via_blocks(content):
+        m = _VIA_PREFIX_RE.match(block)
+        if not m:
+            continue
+        nm = _VIA_NET_RE.search(block)
+        if nm is None:
+            continue
+        net_name, numeric = nm.group(1), nm.group(2)
+        if numeric is not None:
+            net_id = int(numeric)
+        else:
+            # KiCad 10 dialect. Without the name map the id is unknowable, so
+            # skip the via rather than model it on a guessed one -- unchanged
+            # behavior, and parse_kicad_pcb always passes a map.
+            if not name_to_id:
+                continue
+            net_id = name_to_id.get(_unescape_kicad_string(net_name), 0)
+        u = _VIA_UUID_RE.search(block)
         via = Via(
             x=float(m.group(1)),
             y=float(m.group(2)),
             size=float(m.group(3)),
             drill=float(m.group(4)),
             layers=[m.group(5), m.group(6)],
-            net_id=int(m.group(8)),
-            uuid=m.group(9) or "",
-            free=(free_value == "yes"),
-            locked='(locked yes)' in m.group(0)
+            net_id=net_id,
+            uuid=u.group(1) if u else "",
+            # Read from the block, not from a capture group and not from a
+            # second uuid-keyed pass over the file. The old v10 path needed
+            # that pass (#225's O(vias x filesize) backtracking, guarded by a
+            # linear pre-scan) and it could only reach vias that HAD a uuid.
+            free=bool(_VIA_FREE_RE.search(block)),
+            locked=bool(_VIA_LOCKED_RE.search(block)),
         )
+        # Protection spec per via (#489 §8): tenting/covering/plugging/capping/
+        # filling were parsed by NOBODY, so a re-placed via lost whatever the
+        # board specified and got the writer's hardcoded front+back tenting.
+        if want_spec:
+            spec = _via_spec_from_block(block)
+            if spec:
+                via.tenting_attrs = spec
         vias.append(via)
-
-    if name_to_id:
-        # KiCad 10 format: (net "name"). Always run IN ADDITION to the numeric
-        # pattern and merge: a file can legally mix both styles (e.g. a tool
-        # that writes numeric refs into a v10 board), and each via matches
-        # exactly one pattern. An either/or fallback silently dropped every
-        # name-style via when any numeric one existed (issue #79).
-        # Use flexible matching between layers and net to handle new v10 fields
-        # (tenting, covering, plugging, capping, filling) that appear after layers.
-        # uuid OPTIONAL here too (PR #534) -- the numeric fix alone left this
-        # dialect still dropping uuid-less vias (the #344/#369 "forgot the
-        # KiCad-10 twin" class).
-        via_pattern_v10 = r'\(via\s+(?:blind\s+|micro\s+)?\(at\s+([\d.-]+)\s+([\d.-]+)\)\s+\(size\s+([\d.-]+)\)\s+\(drill\s+([\d.-]+)\)\s+\(layers\s+"([^"]+)"\s+"([^"]+)"\).*?\(net\s+"([^"]*)"\)(?:\s+\(uuid\s+"([^"]+)"\))?'
-        if re.search(r"\(via\s.{0,400}?\(net\s+\"", content, re.DOTALL):
-            for m in re.finditer(via_pattern_v10, content, re.DOTALL):
-                net_name = m.group(7)
-                via = Via(
-                    x=float(m.group(1)),
-                    y=float(m.group(2)),
-                    size=float(m.group(3)),
-                    drill=float(m.group(4)),
-                    layers=[m.group(5), m.group(6)],
-                    net_id=name_to_id.get(net_name, 0),
-                    uuid=m.group(8) or "",
-                    free=False,  # Parse free from content if present
-                    locked='(locked yes)' in m.group(0)
-                )
-                vias.append(via)
-        # Check for free flag in matched vias. The free_pattern below has two
-        # DOTALL `.*?` gaps, so on a board with NO free via it backtracks from
-        # every `(via` to EOF looking for a `(free yes)` that isn't there --
-        # O(vias x filesize), ~32s on daisho's 1574 vias (issue #225). Guard on a
-        # single linear scan for the token; absent it, no via is free and
-        # free_uuids is empty (identical result).
-        if vias and re.search(r'\(free\s+yes\)', content):
-            free_pattern = r'\(via\s+\(at\s+[\d.-]+\s+[\d.-]+\).*?\(free\s+yes\).*?\(uuid\s+"([^"]+)"\)'
-            free_uuids = {m.group(1) for m in re.finditer(free_pattern, content, re.DOTALL)}
-            for via in vias:
-                if via.uuid in free_uuids:
-                    via.free = True
-
-    # Protection spec per via (#489 §8): tenting/covering/plugging/capping/
-    # filling were parsed by NOBODY, so a re-placed via lost whatever the board
-    # specified and got the writer's hardcoded front+back tenting instead.
-    if vias:
-        attrs_by_uuid = _extract_via_protection_attrs(content)
-        if attrs_by_uuid:
-            for via in vias:
-                spec = attrs_by_uuid.get(via.uuid)
-                if spec:
-                    via.tenting_attrs = spec
 
     return vias
 
 
 VIA_PROTECTION_TOKENS = ('tenting', 'covering', 'plugging', 'capping', 'filling')
+
+
+# Every enum value _pcbnew_via_protection_attrs compares against. ALL of them,
+# not just the two whose absence raises: a wrapper exporting the tenting pair
+# and not the capping one yields a PARTIAL spec, which is a quiet loss rather
+# than a loud one.
+_PROTECTION_ENUM_NAMES = (
+    'TENTING_MODE_TENTED', 'TENTING_MODE_NOT_TENTED',
+    'COVERING_MODE_COVERED', 'COVERING_MODE_NOT_COVERED',
+    'PLUGGING_MODE_PLUGGED', 'PLUGGING_MODE_NOT_PLUGGED',
+    'CAPPING_MODE_CAPPED', 'CAPPING_MODE_NOT_CAPPED',
+    'FILLING_MODE_FILLED', 'FILLING_MODE_NOT_FILLED')
+
+
+def pcbnew_protection_accessors_usable(via=None) -> bool:
+    """Whether THIS pcbnew can be asked for a via's protection spec (#751).
+
+    KiCad 10.0.0's shipping SWIG wrapper cannot. The SETTERS are exported but
+    the enum VALUES are not, and the getters hand back an opaque SwigPyObject
+    ('TENTING_MODE *') that compares equal to nothing -- so building the
+    comparison table raised inside `_pcbnew_via_protection_attrs`' own `try`
+    and it returned {} for EVERY via, leaving the GUI half of the #489 s8 round
+    trip carrying no spec at all. Measured against
+    `C:/Program Files/KiCad/10.0/bin/python.exe` (pcbnew 10.0.0, wx 4.2.2).
+
+    BUILD-dependent, not version-dependent: 10.0.0-103-gacbf1898e0 on macOS
+    exports all ten constants and returns plain ints. So this is a question to
+    ask the wrapper in front of us, never one to answer from GetBuildVersion().
+
+    Both failure modes are checked, because either alone empties the answer:
+    the constants must exist AND a getter must return something comparable to
+    them. Pass a real PCB_VIA for the second half -- without one only the
+    constants are checked, which is the weaker question.
+    """
+    try:
+        import pcbnew
+    except ImportError:
+        return False
+    if any(getattr(pcbnew, n, None) is None for n in _PROTECTION_ENUM_NAMES):
+        return False
+    if via is None:
+        return True
+    try:
+        # A SWIG enum arrives as a plain int; the broken wrapper's SwigPyObject
+        # does not, and `mode == const` on it is False for every mode.
+        return isinstance(via.GetFrontTentingMode(), int)
+    except Exception:
+        return False
+
+
+def via_protection_attrs_from_board_file(board) -> Dict[str, Dict[str, str]]:
+    """{via uuid: spec} read from a pcbnew BOARD's own file, for a wrapper that
+    cannot be asked (#751).
+
+    The text parser is the CLI's, which is the point: the two parse paths agree
+    field-for-field because it is the same code, rather than because two
+    implementations were kept in step by hand.
+
+    The file can LAG the live board mid-plan (earlier steps apply copper to the
+    board only). For this key that degrades gently in the safe direction: a via
+    added in-session has no entry, so it reads as unspecified and keeps
+    INHERITING, which is exactly right for new copper. Only a spec the user
+    changed in the GUI and has not saved reads stale -- and that is strictly
+    better than the {} every via got before.
+    """
+    try:
+        path = board.GetFileName()
+        if not path or not os.path.isfile(path):
+            return {}
+        with open(path, 'r', encoding='utf-8') as f:
+            return _extract_via_protection_attrs(f.read())
+    except Exception:
+        return {}
+
+
+def pcbnew_via_protection_attrs(via, text_specs: Dict[str, Dict[str, str]] = None) -> Dict[str, str]:
+    """A PCB_VIA's protection spec: from the live object where that works, from
+    the board's file where it does not (#751).
+
+    THE entry point for GUI-side callers. `_pcbnew_via_protection_attrs` below
+    is the live-object half and answers {} on a wrapper that cannot be asked --
+    which, on the shipping KiCad 10, is every via.
+
+    The choice is made on whether the ACCESSORS work, not on whether they
+    returned something: a via that genuinely inherits the board's `(setup ...)`
+    answers {} legitimately, and on a working wrapper the live board is the
+    authority for that answer.
+    """
+    if pcbnew_protection_accessors_usable(via):
+        return _pcbnew_via_protection_attrs(via)
+    if not text_specs:
+        return {}
+    try:
+        uid = str(via.m_Uuid.AsString())
+    except Exception:
+        return {}
+    return dict(text_specs.get(uid, {}))
 
 
 def _pcbnew_via_protection_attrs(via) -> Dict[str, str]:
@@ -2960,46 +3114,42 @@ def _balanced_token_text(text: str, token: str) -> Optional[str]:
     return None
 
 
+def _via_spec_from_block(block: str) -> Dict[str, str]:
+    """The tenting-family spec carried by ONE via block, as {token: inner text}.
+
+    Read from the block by token rather than by extending the via regexes: the
+    tokens are optional, differ by KiCad version, and one of them appearing
+    where a positional pattern did not expect it is exactly how #748 lost a via.
+    """
+    spec: Dict[str, str] = {}
+    for token in VIA_PROTECTION_TOKENS:
+        inner = _balanced_token_text(block, token)
+        if inner is not None:
+            spec[token] = inner
+    return spec
+
+
 def _extract_via_protection_attrs(content: str) -> Dict[str, Dict[str, str]]:
     """{via uuid: {token: raw inner text}} for the tenting-family tokens.
 
-    Read from each via's own block rather than by extending the via regexes: the
-    tokens are optional, differ by KiCad version, and the numeric-net pattern is
-    deliberately strict about field order. Skipped entirely (single linear scan)
-    when the file mentions none of them, so the common board pays nothing.
+    Skipped entirely (single linear scan) when the file mentions none of them,
+    so the common board pays nothing.
+
+    ``extract_vias`` no longer needs this -- it reads each via's spec from the
+    block it already has, so a UUID-LESS via can carry one now. This stays for
+    the callers that hold board TEXT and no parsed vias
+    (``prevailing_via_protection_in_text``, the GUI's #751 fallback), and those
+    genuinely need the uuid key.
     """
     if not any(('(' + t) in content for t in VIA_PROTECTION_TOKENS):
         return {}
 
     out: Dict[str, Dict[str, str]] = {}
-    for m in re.finditer(r'\(via(?=[\s(])', content):
-        start = m.start()
-        depth = 0
-        end = len(content)
-        # Direct indexing instead of `enumerate(content[start:])`: slicing the
-        # board's remainder for EVERY via is the #225 class of
-        # O(vias x filesize) copies even when the loop breaks at the via's own
-        # short block. Indexing without the per-via slice keeps this a single
-        # pass over each via's own block, so a malformed/very-long block can
-        # still only cost its own length, never a whole-board copy per via.
-        for i in range(start, len(content)):
-            c = content[i]
-            if c == '(':
-                depth += 1
-            elif c == ')':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        block = content[start:end]
-        uuid_match = re.search(r'\(uuid\s+"([^"]+)"\)', block)
+    for _start, block in _via_blocks(content):
+        uuid_match = _VIA_UUID_RE.search(block)
         if not uuid_match:
             continue
-        spec = {}
-        for token in VIA_PROTECTION_TOKENS:
-            inner = _balanced_token_text(block, token)
-            if inner is not None:
-                spec[token] = inner
+        spec = _via_spec_from_block(block)
         if spec:
             out[uuid_match.group(1)] = spec
     return out
@@ -3030,6 +3180,18 @@ def warn_net_tagged_graphics(segments, name_to_id=None) -> int:
           f"target them, and copper joined only through them is electrically "
           f"OPEN. Convert them to footprint pads or tracks if they must "
           f"conduct (#513).")
+    # ...and say what it will look like AFTERWARDS, which is the part people
+    # actually hit (#659). KiCad's own DRC lists such a net as unconnected on
+    # every run, forever: the art is copper to KiCad, so it demands a link to
+    # it, while #337 makes the art immutable so no routing pass may weld to it
+    # or delete it. Measured over 31 recorded boards, this is the DOMINANT
+    # class of "KiCad says open, our grading says connected" -- 36 of 51 such
+    # links on zone-less signal nets. Nobody should spend a retry on it.
+    print(f"         Expect KiCad DRC to keep reporting these {len(nets)} "
+          f"net(s) as UNCONNECTED on every run: no routing pass can fix it "
+          f"(the art is immutable, #337), so this is a board-authoring fix, "
+          f"not a routing failure. It is the single largest source of "
+          f"'KiCad says open, our grading says connected' (#659).")
     return len(tagged)
 
 
@@ -3161,13 +3323,35 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
                 width=ew, layer=layer, net_id=nid, uuid=uuid, graphic=True))
 
     def _blk_fields(blk):
+        # BOTH layer tokens (#659 follow-up). KiCad writes the singular
+        # (layer "F.Cu") for a one-layer graphic and the PLURAL
+        # (layers "F.Cu" "F.Mask") for one that also carries mask/paste --
+        # and a singular-only regex dropped the plural form ENTIRELY, so its
+        # copper was neither connectivity nor an OBSTACLE. Measured on
+        # endgame_trackball: 8 filled 3.2mm copper gr_circles invisible, and
+        # the router laid 13 foreign-net crossings straight through them (the
+        # unrouted input had 0) while every checker read clean, because
+        # check_drc reads this same parser. Returns the copper layers as a
+        # LIST -- a two-sided graphic is copper on both.
         lm = re.search(r'\(layer\s+"([^"]+)"\)', blk)
+        if lm:
+            names = [lm.group(1)]
+        else:
+            lsm = re.search(r'\(layers\s+((?:"[^"]*"\s*)+)\)', blk)
+            names = re.findall(r'"([^"]*)"', lsm.group(1)) if lsm else []
+        layers = []
+        for _nm in names:
+            # F&B.Cu is KiCad's two-sided shorthand. A bare *.Cu wildcard
+            # cannot be expanded here (extract_segments has no stackup), so
+            # it falls through as non-copper rather than being guessed at.
+            for _one in (('F.Cu', 'B.Cu') if _nm == 'F&B.Cu' else (_nm,)):
+                if _one.endswith('.Cu') and _one not in layers:
+                    layers.append(_one)
         wm = re.search(r'\(width\s+([-\d.]+)\)', blk)
         nm = re.search(r'\(net\s+("[^"]*"|\d+)\)', blk)
         um = (re.search(r'\(uuid\s+"([^"]+)"\)', blk)
               or re.search(r'\(tstamp\s+([-\w]+)\)', blk))
-        layer = lm.group(1) if lm else None
-        return (layer, float(wm.group(1)) if wm else 0.0,
+        return (layers, float(wm.group(1)) if wm else 0.0,
                 _resolve_net(nm.group(1)) if nm else 0,
                 um.group(1) if um else '')
 
@@ -3189,42 +3373,41 @@ def extract_segments(content: str, name_to_id: Dict[str, int] = None) -> List[Se
             j = find_matching_paren(content, i)
             blk = content[i:j]
             pos = j
-            layer, w, nid, uuid = _blk_fields(blk)
-            if not layer or not layer.endswith('.Cu'):
+            layers, w, nid, uuid = _blk_fields(blk)
+            if not layers:
                 continue
-            if tag == 'gr_line':
-                if w <= 0:
-                    continue
-                a, b = _xy(blk, 'start'), _xy(blk, 'end')
-                if a and b:
-                    segments.append(Segment(
-                        start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
-                        width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
-            elif tag == 'gr_arc':
-                if w <= 0:
-                    continue
-                a, mid, b = _xy(blk, 'start'), _xy(blk, 'mid'), _xy(blk, 'end')
-                if a and mid and b:
-                    for p0, p1 in _arc_to_segments(a, mid, b):
+            if tag in ('gr_line', 'gr_arc') and w <= 0:
+                continue        # unstroked line/arc: no copper to model
+            for layer in layers:
+                if tag == 'gr_line':
+                    a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                    if a and b:
                         segments.append(Segment(
-                            start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                            start_x=a[0], start_y=a[1], end_x=b[0], end_y=b[1],
                             width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
-            elif tag == 'gr_poly':
-                pts = [(float(x), float(y)) for x, y in
-                       re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
-                _emit_outline(pts, w, layer, nid, uuid)
-            elif tag == 'gr_rect':
-                a, b = _xy(blk, 'start'), _xy(blk, 'end')
-                if a and b:
-                    _emit_outline([(a[0], a[1]), (b[0], a[1]),
-                                   (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid)
-            elif tag == 'gr_circle':
-                c, e = _xy(blk, 'center'), _xy(blk, 'end')
-                if c and e:
-                    r = math.hypot(e[0] - c[0], e[1] - c[1])
-                    _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
-                                    c[1] + r * math.sin(k * math.pi / 8))
-                                   for k in range(16)], w, layer, nid, uuid)
+                elif tag == 'gr_arc':
+                    a, mid, b = _xy(blk, 'start'), _xy(blk, 'mid'), _xy(blk, 'end')
+                    if a and mid and b:
+                        for p0, p1 in _arc_to_segments(a, mid, b):
+                            segments.append(Segment(
+                                start_x=p0[0], start_y=p0[1], end_x=p1[0], end_y=p1[1],
+                                width=w, layer=layer, net_id=nid, uuid=uuid, graphic=True))
+                elif tag == 'gr_poly':
+                    pts = [(float(x), float(y)) for x, y in
+                           re.findall(r'\(xy\s+([-\d.]+)\s+([-\d.]+)\)', blk)]
+                    _emit_outline(pts, w, layer, nid, uuid)
+                elif tag == 'gr_rect':
+                    a, b = _xy(blk, 'start'), _xy(blk, 'end')
+                    if a and b:
+                        _emit_outline([(a[0], a[1]), (b[0], a[1]),
+                                       (b[0], b[1]), (a[0], b[1])], w, layer, nid, uuid)
+                elif tag == 'gr_circle':
+                    c, e = _xy(blk, 'center'), _xy(blk, 'end')
+                    if c and e:
+                        r = math.hypot(e[0] - c[0], e[1] - c[1])
+                        _emit_outline([(c[0] + r * math.cos(k * math.pi / 8),
+                                        c[1] + r * math.sin(k * math.pi / 8))
+                                       for k in range(16)], w, layer, nid, uuid)
 
     warn_net_tagged_graphics(segments, name_to_id)
     return segments
@@ -3704,6 +3887,19 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
 
     def to_mm(val):
         return pcbnew.ToMM(val)
+
+    # #751: whether the live objects can be asked for their protection spec is
+    # a property of the WRAPPER, so it is decided once, on the first via (a
+    # real PCB_VIA is needed to catch the opaque-getter half of the failure).
+    # [] = not resolved yet; {} = the accessors work and no fallback is needed.
+    _text_specs_memo = []
+
+    def _via_text_specs(via):
+        if not _text_specs_memo:
+            _text_specs_memo.append(
+                {} if pcbnew_protection_accessors_usable(via)
+                else via_protection_attrs_from_board_file(board))
+        return _text_specs_memo[0]
 
     # --- Build layer mappings ---
     # copper_id_to_name: COPPER ONLY -- the copper-layer enumeration and the
@@ -4445,10 +4641,13 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
                 drill=to_mm(track.GetDrill()),
                 layers=[get_layer_name(track.TopLayer()), get_layer_name(track.BottomLayer())],
                 net_id=track.GetNetCode(),
-                # Parity with the text parser's protection spec (#489 §8): the
-                # builder must read it too, or GUI-side vias round-trip as
-                # "unspecified" and lose it exactly where the CLI keeps it.
-                tenting_attrs=_pcbnew_via_protection_attrs(track),
+                # Parity with the text parser's protection spec (#489 s8) --
+                # via the #751 resolver, so a pcbnew whose SWIG wrapper omits
+                # the protection enums reads the spec from the board's FILE
+                # instead of reporting {} for every via and silently dropping
+                # the GUI half of the round trip.
+                tenting_attrs=pcbnew_via_protection_attrs(
+                    track, _via_text_specs(track)),
                 locked=bool(track.IsLocked()),
             )
             vias.append(v)
@@ -4466,8 +4665,26 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
         for _d in board.GetDrawings():
             if _d.GetClass() not in ("PCB_SHAPE", "DRAWSEGMENT"):
                 continue
-            _ln = get_layer_name(_d.GetLayer())
-            if not (_ln or '').endswith('.Cu'):
+            # EVERY copper layer of the shape, not just GetLayer() (#659
+            # follow-up): KiCad writes a multi-layer graphic as the plural
+            # (layers "F.Cu" "F.Mask") / ("F.Cu" "B.Cu"), and the text parser
+            # now models one copy per copper layer -- the same rule the
+            # multi-layer ZONE fix already follows. GetLayer() returns only
+            # the primary layer, so a two-sided graphic would be copper on
+            # one side in the GUI and both in the CLI.
+            _lns = []
+            try:
+                for _lid in _d.GetLayerSet().Seq():
+                    _n2 = get_layer_name(_lid)
+                    if (_n2 or '').endswith('.Cu') and _n2 not in _lns:
+                        _lns.append(_n2)
+            except Exception:
+                pass        # older pcbnew: no LayerSet on a shape
+            if not _lns:
+                _n2 = get_layer_name(_d.GetLayer())
+                if (_n2 or '').endswith('.Cu'):
+                    _lns = [_n2]
+            if not _lns:
                 continue
             try:
                 _shape = _d.GetShape()
@@ -4479,60 +4696,61 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             _RECT = getattr(_pcbnew_g, 'SHAPE_T_RECT', -11)
             _CIRC = getattr(_pcbnew_g, 'SHAPE_T_CIRCLE', -12)
 
-            def _emit_outline_b(pts, ew):
-                seq = list(pts) + [pts[0]]
-                for _a, _b in zip(seq, seq[1:]):
-                    segments.append(Segment(
-                        start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
-                        width=ew, layer=_ln, net_id=_nid, graphic=True))
+            for _ln in _lns:
+                def _emit_outline_b(pts, ew):
+                    seq = list(pts) + [pts[0]]
+                    for _a, _b in zip(seq, seq[1:]):
+                        segments.append(Segment(
+                            start_x=_a[0], start_y=_a[1], end_x=_b[0], end_y=_b[1],
+                            width=ew, layer=_ln, net_id=_nid, graphic=True))
 
-            if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
-                if _w <= 0:
-                    continue
-                segments.append(Segment(
-                    start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
-                    end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
-                    width=_w, layer=_ln, net_id=_nid, graphic=True))
-            elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
-                if _w <= 0:
-                    continue
-                try:
-                    _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
-                    _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
-                    _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
-                except Exception:
-                    continue
-                for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
+                if _shape == getattr(_pcbnew_g, 'SHAPE_T_SEGMENT', 0):
+                    if _w <= 0:
+                        continue
                     segments.append(Segment(
-                        start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
+                        start_x=to_mm(_d.GetStart().x), start_y=to_mm(_d.GetStart().y),
+                        end_x=to_mm(_d.GetEnd().x), end_y=to_mm(_d.GetEnd().y),
                         width=_w, layer=_ln, net_id=_nid, graphic=True))
-            elif _shape in (_POLY, _RECT, _CIRC):
-                # FILLED copper areas (#337): outline as graphic segments (parity
-                # with the text parser). Filled shapes may have 0 stroke width.
-                _ow = _w if _w > 0 else defaults.TRACK_WIDTH
-                try:
-                    if _shape == _POLY:
-                        _ps = _d.GetPolyShape()
-                        _ol = _ps.Outline(0)
-                        _pts = [(to_mm(_ol.CPoint(k).x), to_mm(_ol.CPoint(k).y))
-                                for k in range(_ol.PointCount())]
-                        if len(_pts) >= 2:
-                            _emit_outline_b(_pts, _ow)
-                    elif _shape == _RECT:
-                        _s0 = _d.GetStart(); _e0 = _d.GetEnd()
-                        _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
-                        _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
-                        _emit_outline_b([(_x1, _y1), (_x2, _y1),
-                                         (_x2, _y2), (_x1, _y2)], _ow)
-                    elif _shape == _CIRC:
-                        _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
-                        _r = to_mm(_d.GetRadius())
-                        _emit_outline_b(
-                            [(_cx + _r * math.cos(k * math.pi / 8),
-                              _cy + _r * math.sin(k * math.pi / 8))
-                             for k in range(16)], _ow)
-                except Exception:
-                    pass
+                elif _shape == getattr(_pcbnew_g, 'SHAPE_T_ARC', 2):
+                    if _w <= 0:
+                        continue
+                    try:
+                        _s0 = (to_mm(_d.GetStart().x), to_mm(_d.GetStart().y))
+                        _m0 = (to_mm(_d.GetArcMid().x), to_mm(_d.GetArcMid().y))
+                        _e0 = (to_mm(_d.GetEnd().x), to_mm(_d.GetEnd().y))
+                    except Exception:
+                        continue
+                    for _p0, _p1 in _arc_to_segments(_s0, _m0, _e0):
+                        segments.append(Segment(
+                            start_x=_p0[0], start_y=_p0[1], end_x=_p1[0], end_y=_p1[1],
+                            width=_w, layer=_ln, net_id=_nid, graphic=True))
+                elif _shape in (_POLY, _RECT, _CIRC):
+                    # FILLED copper areas (#337): outline as graphic segments (parity
+                    # with the text parser). Filled shapes may have 0 stroke width.
+                    _ow = _w if _w > 0 else defaults.TRACK_WIDTH
+                    try:
+                        if _shape == _POLY:
+                            _ps = _d.GetPolyShape()
+                            _ol = _ps.Outline(0)
+                            _pts = [(to_mm(_ol.CPoint(k).x), to_mm(_ol.CPoint(k).y))
+                                    for k in range(_ol.PointCount())]
+                            if len(_pts) >= 2:
+                                _emit_outline_b(_pts, _ow)
+                        elif _shape == _RECT:
+                            _s0 = _d.GetStart(); _e0 = _d.GetEnd()
+                            _x1, _y1 = to_mm(_s0.x), to_mm(_s0.y)
+                            _x2, _y2 = to_mm(_e0.x), to_mm(_e0.y)
+                            _emit_outline_b([(_x1, _y1), (_x2, _y1),
+                                             (_x2, _y2), (_x1, _y2)], _ow)
+                        elif _shape == _CIRC:
+                            _c = _d.GetCenter(); _cx, _cy = to_mm(_c.x), to_mm(_c.y)
+                            _r = to_mm(_d.GetRadius())
+                            _emit_outline_b(
+                                [(_cx + _r * math.cos(k * math.pi / 8),
+                                  _cy + _r * math.sin(k * math.pi / 8))
+                                 for k in range(16)], _ow)
+                    except Exception:
+                        pass
     except Exception:
         pass  # older pcbnew APIs: best-effort
 
@@ -4626,7 +4844,17 @@ def build_pcb_data_from_board(board, guide_layer: str = "User.1",
             # #627's GUI-only copper drift (the refill fell back to stock
             # rules; project_from=tmp resolved nothing). stage_live_
             # project_rules re-authors it from the live board, crash-free.
-            _pcbnew.SaveBoard(tmp, _board, aSkipSettings=True)
+            # #688: this provider is invoked BY THE ENGINE (exact_unconnected,
+            # plane_fragility -- every oracle round), which in the GUI means the
+            # routing WORKER thread. A worker-thread SaveBoard is what deadlocked
+            # the plugin on Windows, so marshal it to the wx main thread; on the
+            # CLI (no wx) the helper calls straight through. Returning False here
+            # falls through to the in-process fill below, which is exactly the
+            # documented fallback.
+            from ui_thread import save_board_on_ui_thread as _save688
+            if not _save688(tmp, _board, label=" live-fill"):
+                raise RuntimeError("could not save the live board on the UI "
+                                   "thread (#688 guard)")
             _pro = stage_live_project_rules(tmp, _board)
             _h = hashlib.sha256()
             with open(tmp, 'rb') as _fh:
