@@ -48,6 +48,112 @@ from routing_state import record_net_event
 from terminal_colors import RED, GREEN, YELLOW, RESET
 
 
+def _rescue_pt_seg_d(px, py, x1, y1, x2, y2):
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((px - x1) * dx
+                                               + (py - y1) * dy) / L2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _rescue_seg_seg_d(x1, y1, x2, y2, u1, v1, u2, v2):
+    """Segment-segment distance, 0 when they properly intersect.
+    Endpoint distances alone are BLIND to a crossing (two legs crossed
+    mid-span with every endpoint 0.5mm clear -- shipped an F.Cu short)."""
+    d1x, d1y = x2 - x1, y2 - y1
+    d2x, d2y = u2 - u1, v2 - v1
+    denom = d1x * d2y - d1y * d2x
+    if abs(denom) > 1e-12:
+        t = ((u1 - x1) * d2y - (v1 - y1) * d2x) / denom
+        s = ((u1 - x1) * d1y - (v1 - y1) * d1x) / denom
+        if 0.0 <= t <= 1.0 and 0.0 <= s <= 1.0:
+            return 0.0
+    return min(_rescue_pt_seg_d(u1, v1, x1, y1, x2, y2),
+               _rescue_pt_seg_d(u2, v2, x1, y1, x2, y2),
+               _rescue_pt_seg_d(x1, y1, u1, v1, u2, v2),
+               _rescue_pt_seg_d(x2, y2, u1, v1, u2, v2))
+
+
+def _rescue_escape_clear(pcb_data, segs, vias, config, net_id):
+    """Would-short guard (#468 doctrine, rescue-escape edition):
+    generate_bga_fanout's conflict model covers balls/teeth/passives,
+    NOT this run's routed tracks -- at rescue time the board is ROUTED,
+    and an unchecked escape ships a short (measured glasgow_revC:
+    /FLAGB's U30.K5 fanout-rescue escape crossed /CLKREF's F.Cu diagonal
+    at (79.412,94.412), 5 overlaps + 1 crossing DRC). Exact-check every
+    emitted seg and via against foreign copper; decline the escape like
+    any other no-escape outcome rather than ship it."""
+    hw = config.track_width / 2.0
+    for s in segs:
+        for pad_net, pads in (getattr(pcb_data, 'pads_by_net', None)
+                              or {}).items():
+            if pad_net == net_id:
+                continue
+            for p in pads:
+                if getattr(p, 'drill', 0):
+                    r = max(p.size_x, p.size_y) / 2.0
+                elif s.layer in p.layers:
+                    r = (p.size_x / 2.0 if p.shape == 'circle'
+                         else math.hypot(p.size_x, p.size_y) / 2.0)
+                else:
+                    continue
+                if _rescue_pt_seg_d(p.global_x, p.global_y,
+                                    s.start_x, s.start_y,
+                                    s.end_x, s.end_y) \
+                        < r + hw + config.clearance - 1e-6:
+                    return 'seg-pad'
+        for o in pcb_data.segments:
+            if o.net_id == net_id or o.layer != s.layer:
+                continue
+            if _rescue_seg_seg_d(s.start_x, s.start_y, s.end_x, s.end_y,
+                                 o.start_x, o.start_y,
+                                 o.end_x, o.end_y) \
+                    < o.width / 2.0 + hw + config.clearance - 1e-6:
+                return 'seg-seg'
+        for v in pcb_data.vias:
+            if v.net_id == net_id:
+                continue
+            if _rescue_pt_seg_d(v.x, v.y, s.start_x, s.start_y,
+                                s.end_x, s.end_y) \
+                    < v.size / 2.0 + hw + config.clearance - 1e-6:
+                return 'seg-via'
+    vr = config.via_size / 2.0
+    vd = config.via_drill / 2.0
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.2) or 0.2
+    for v in vias:
+        for o in pcb_data.vias:
+            if o.net_id == net_id:
+                continue
+            d = math.hypot(v.x - o.x, v.y - o.y)
+            if d < vr + o.size / 2.0 + config.clearance:
+                return 'via-via'
+            if d < vd + o.drill / 2.0 + h2h:
+                return 'via-h2h'
+        for fp in pcb_data.footprints.values():
+            for p in fp.pads:
+                if p.net_id == net_id:
+                    continue
+                if p.drill and p.drill > 0:
+                    hx = p.hole_x if p.hole_x is not None else p.global_x
+                    hy = p.hole_y if p.hole_y is not None else p.global_y
+                    if math.hypot(v.x - hx, v.y - hy) < vd + p.drill / 2.0 + h2h:
+                        return 'via-h2h-pad'
+                if p.pad_type == 'np_thru_hole':
+                    continue
+                dx = max(abs(v.x - p.global_x) - p.size_x / 2.0, 0.0)
+                dy = max(abs(v.y - p.global_y) - p.size_y / 2.0, 0.0)
+                if math.hypot(dx, dy) < vr + config.clearance:
+                    return 'via-pad'
+        for o in pcb_data.segments:
+            if o.net_id == net_id:
+                continue
+            if _rescue_pt_seg_d(v.x, v.y, o.start_x, o.start_y,
+                                o.end_x, o.end_y) \
+                    < vr + o.width / 2.0 + config.clearance:
+                return 'via-seg'
+    return None
+
+
 def _net_component_info(pcb_data, net_id):
     """Connected components of a net's pads+copper on the REAL board.
 
@@ -890,6 +996,26 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                             net_id=net_id) for v in (_fv or [])
                             if v.get('net_id') == net_id]
                     if not _gsegs and not _gvias:
+                        continue
+                    # Would-short guard (#468 doctrine, rescue-escape
+                    # edition): generate_bga_fanout's conflict model
+                    # covers balls/teeth/passives, NOT this run's
+                    # routed tracks -- at rescue time the board is
+                    # ROUTED, and an unchecked escape ships a short
+                    # (measured glasgow_revC: /FLAGB's U30.K5
+                    # fanout-rescue escape crossed /CLKREF's F.Cu
+                    # diagonal at (79.412,94.412), 5 overlaps + 1
+                    # crossing DRC). Exact-check every emitted seg and
+                    # via against foreign copper; decline the escape
+                    # like any other no-escape outcome rather than
+                    # ship it.
+                    _short666 = _rescue_escape_clear(
+                        pcb_data, _gsegs, _gvias, config, net_id)
+                    if _short666 is not None:
+                        print(f"    bare-ball escape: "
+                              f"{_pad.component_ref}.{_pad.pad_number} "
+                              f"declined (escape {_short666} would "
+                              f"short routed copper)")
                         continue
                     pcb_data.segments.extend(_gsegs)
                     pcb_data.vias.extend(_gvias)

@@ -1056,7 +1056,80 @@ def _pair_via_offset(config, spacing_mm):
                track_via_clearance - spacing_mm)
 
 
-def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs):
+def _gnd_via_clear(pcb_data, x, y, config, gnd_net_id,
+                   extra_segments=None):
+    """Exact foreign-copper check for a GND return via (#468 doctrine,
+    GND-return-via edition). The via is through-hole (F.Cu..B.Cu), so it must
+    clear foreign copper on BOTH outer layers: foreign tracks on F.Cu/B.Cu,
+    foreign pads (any copper layer the via spans), and foreign via barrels.
+    Own-net (GND) copper is exempt -- the return via legitimately lands near
+    GND pours/planes. extra_segments are this pair's OWN new P/N segments
+    being committed in the same call (not yet in pcb_data) -- the GND via is
+    placed AFTER them, so it must clear them too (measured carrier post-merge:
+    TRD1's GND return via at (72.514,56.048) landed 0.0085mm from TRD1_P's
+    OWN new F.Cu segment (72.770,55.805) to (72.005,56.570)). Returns True
+    when the site is clear, False when it would short."""
+    vr = config.via_size / 2.0
+    vd = config.via_drill / 2.0
+    clr = config.clearance
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    # Cross-class aware (#439): price each foreign obstacle at its own class.
+    _oc = getattr(config, 'obstacle_clearance', None)
+    def _obs_clr(net_id):
+        return _oc(net_id) if _oc is not None else clr
+    # Foreign tracks on the outer layers (the via barrel spans F.Cu..B.Cu).
+    # The pair's own new segments count as foreign here -- the GND via is a
+    # DIFFERENT net, and it must not land on the P/N copper just laid.
+    _all_segs = list(getattr(pcb_data, 'segments', None) or [])
+    if extra_segments:
+        _all_segs.extend(extra_segments)
+    for s in _all_segs:
+        if s.net_id == gnd_net_id or s.layer not in ('F.Cu', 'B.Cu'):
+            continue
+        need = _obs_clr(s.net_id) + vr + s.width / 2.0 - _DRC_CLEARANCE_MARGIN
+        if need <= 0:
+            continue
+        if _seg_seg_distance(x, y, x, y, s.start_x, s.start_y,
+                             s.end_x, s.end_y) < need:
+            return False
+    # Foreign pads (any copper layer the via spans). Iterate pads_by_net
+    # (the same source the connector-graze check uses) so in-memory boards
+    # built without footprints are covered too.
+    for pad_net, pads in (getattr(pcb_data, 'pads_by_net', None) or {}).items():
+        if pad_net == gnd_net_id:
+            continue
+        for p in pads:
+            if p.pad_type == 'np_thru_hole':
+                continue
+            cu = [L for L in (p.layers or []) if L.endswith('.Cu')]
+            if not cu or not any(L in ('F.Cu', 'B.Cu') for L in cu):
+                continue
+            pclr = max(_obs_clr(p.net_id), getattr(p, 'local_clearance', 0.0) or 0.0)
+            dx = max(abs(x - p.global_x) - p.size_x / 2.0, 0.0)
+            dy = max(abs(y - p.global_y) - p.size_y / 2.0, 0.0)
+            if math.hypot(dx, dy) < vr + pclr - _DRC_CLEARANCE_MARGIN:
+                return False
+            # Drill hole-to-hole vs a thru/NPTH pad's drill.
+            if p.drill and p.drill > 0:
+                hx = p.hole_x if p.hole_x is not None else p.global_x
+                hy = p.hole_y if p.hole_y is not None else p.global_y
+                if math.hypot(x - hx, y - hy) < vd + p.drill / 2.0 + h2h:
+                    return False
+    # Foreign via barrels (copper + drill rules).
+    for v in (getattr(pcb_data, 'vias', None) or []):
+        if v.net_id == gnd_net_id:
+            continue
+        d = math.hypot(x - v.x, y - v.y)
+        if d < vr + v.size / 2.0 + _obs_clr(v.net_id) - _DRC_CLEARANCE_MARGIN:
+            return False
+        if d < vd + v.drill / 2.0 + h2h:
+            return False
+    return True
+
+
+def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm,
+                     gnd_net_id, gnd_via_dirs, pcb_data=None,
+                     extra_segments=None):
     """Create GND vias at layer changes in the centerline path.
 
     Args:
@@ -1143,22 +1216,33 @@ def _create_gnd_vias(simplified_path, coord, config, layer_names, spacing_mm, gn
             gnd_n_y = cy - perp_y * gnd_via_perp_mm + dy * via_via_dist_mm * gnd_dir
 
             # Create GND vias (free=True prevents KiCad auto-assigning net)
-            gnd_vias.append(Via(
-                x=gnd_p_x, y=gnd_p_y,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=gnd_net_id,
-                free=True
-            ))
-            gnd_vias.append(Via(
-                x=gnd_n_x, y=gnd_n_y,
-                size=config.via_size,
-                drill=config.via_drill,
-                layers=["F.Cu", "B.Cu"],  # Always through-hole
-                net_id=gnd_net_id,
-                free=True
-            ))
+            for _gx, _gy in ((gnd_p_x, gnd_p_y), (gnd_n_x, gnd_n_y)):
+                if not _gnd_via_clear(pcb_data, _gx, _gy, config,
+                                      gnd_net_id,
+                                      extra_segments=extra_segments):
+                    # Would-short guard (#468 doctrine, GND-return-via
+                    # edition): the GND via position is pure geometry
+                    # (perpendicular offset from the P/N centerline) and
+                    # is NEVER checked against foreign copper -- at
+                    # route_diff time the board is ROUTED, and an
+                    # unchecked return via ships a short (measured
+                    # carrier post-merge: TRD1's GND return via at
+                    # (72.514,56.048) landed 0.0085mm from TRD1_P's own
+                    # F.Cu segment (72.770,55.805)->(72.005,56.570),
+                    # a real Via:GND <-> Seg:TRD1_P DRC short). Decline
+                    # the via like any other no-placement outcome rather
+                    # than ship it.
+                    print(f"    GND return via at ({_gx:.3f},{_gy:.3f}) "
+                          f"declined (would short foreign copper)")
+                    continue
+                gnd_vias.append(Via(
+                    x=_gx, y=_gy,
+                    size=config.via_size,
+                    drill=config.via_drill,
+                    layers=["F.Cu", "B.Cu"],  # Always through-hole
+                    net_id=gnd_net_id,
+                    free=True
+                ))
 
     return gnd_vias
 
@@ -4647,9 +4731,14 @@ def route_diff_pair_with_obstacles(pcb_data: PCBData, diff_pair: DiffPairNet,
     # partner's copper (assembled in the same commit), see helper docstring.
     _neck_pair_partner_grazes(p_segs, n_segs, config, pcb_data)
 
-    # Create GND vias at layer changes if enabled
+    # Create GND vias at layer changes if enabled. The pair's own new
+    # segments are passed so the return via cannot land on the P/N copper
+    # being committed in the same call (measured carrier post-merge: TRD1's
+    # GND return via at (72.514,56.048) landed 0.0085mm from TRD1_P's own
+    # new F.Cu segment).
     gnd_vias = _create_gnd_vias(
-        simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id, gnd_via_dirs
+        simplified_path, coord, config, layer_names, spacing_mm, gnd_net_id,
+        gnd_via_dirs, pcb_data=pcb_data, extra_segments=new_segments
     )
     new_vias.extend(gnd_vias)
 
