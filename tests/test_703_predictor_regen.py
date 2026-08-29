@@ -68,9 +68,9 @@ EXPECTED = {
     'esp_prog:authored': dict(
         poses_sha256='439485f758347d1929cde06f8ab34ce7c6e6e2174df5d85be98d48afbde51783',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=8.2,
+        seconds=2.3,
         truth={'headline': 0,
-               'quality': {'vias': 30, 'copper_mm': 342.83, 'segments': 247}},
+               'quality': {'vias': 30, 'copper_mm': 344.69, 'segments': 254}},
         predictors={
             'crossings': 53, 'hpwl': 253.98092000000003,
             'halo': 125.4377644075392, 'overlap_area': 1.1400451712000104,
@@ -81,9 +81,9 @@ EXPECTED = {
     'esp_prog:perturb-scatter-d1': dict(
         poses_sha256='f58b7226eee4c4826a6430d1c972deb2cab1daf05ec2a17b1b7d56c9f88c4bdc',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=11.2,
+        seconds=3.2,
         truth={'headline': 0,
-               'quality': {'vias': 36, 'copper_mm': 340.87, 'segments': 282}},
+               'quality': {'vias': 36, 'copper_mm': 342.59, 'segments': 289}},
         predictors={
             'crossings': 56, 'hpwl': 253.13733999999994,
             'halo': 132.15233459554824, 'overlap_area': 1.1400451712000104,
@@ -98,9 +98,9 @@ EXPECTED = {
     'esp_prog:portfolio-1': dict(
         poses_sha256='4c299873cd66c843dc6b27fcadf99c9782a7e7e1a3b51328a5b5cee9ca6593d8',
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
-        seconds=23.8,
+        seconds=6.3,
         truth={'headline': 3,
-               'quality': {'vias': 30, 'copper_mm': 303.26, 'segments': 270}},
+               'quality': {'vias': 30, 'copper_mm': 306.67, 'segments': 283}},
         predictors={
             'crossings': 23, 'hpwl': 236.74883999999992,
             'halo': 113.8065780241933, 'overlap_area': 1.0,
@@ -114,10 +114,10 @@ EXPECTED = {
     'splitflap_driver:authored': dict(
         poses_sha256='8b89746bc1a8528de6349f54dd18874ca11d8c7a1f73dd657edce65d460391d9',
         argv_sha='d32ea90c2e348bd6c1fb318983e73f953f179d1ea85aeca7ad4ed4b2bed5cbdc',
-        seconds=32.6,
+        seconds=6.3,
         truth={'headline': 0,
-               'quality': {'vias': 168, 'copper_mm': 2915.15,
-                           'segments': 1437}},
+               'quality': {'vias': 168, 'copper_mm': 2919.19,
+                           'segments': 1449}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,
