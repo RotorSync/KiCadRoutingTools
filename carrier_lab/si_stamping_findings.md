@@ -91,3 +91,38 @@ A future candidate should target the per-row hashmap insert with a cheaper dedup
 (e.g. a flat Vec + sort only when duplicates are actually detected, or a radix/
 counting approach) — but the measured evidence here says the historical loop is
 already hard to beat on this workload.
+
+## 6. Memory-safety audit (sibling SIGBUS evidence — NOT attributable to this change)
+
+A sibling session reported the 0.26.0 binary crashing with 'Bus error (core dumped)'
+twice on a dense board. Unifying hypothesis: OOB write in the new stamping code.
+Audit result: **the SIGBUS cannot be from the new stamping code — it predates it.**
+
+Timeline (file mtimes):
+- /tmp/build026.log (the sibling's "0.26.0" build): **19:44** — built from the OLD
+  obstacle_map.rs (only the Cargo.toml version bump was in the working tree then).
+- The new sort-dedupe obstacle_map.rs source: **22:13**.
+- The stale grid_router.so (old code, version-bumped): **20:31**.
+
+So the binary the sibling crashed with contained the HISTORICAL per-row max-insert
+loop, not the sort-dedupe. The crash is a pre-existing phenomenon (or an ABI/stale-
+binary artifact), not a regression from this campaign.
+
+Direct audit of the new code:
+- **No `unsafe` blocks anywhere in the crate** (grep across rust_router/src). All
+  indexing is bounds-checked safe Rust; the fold loop uses only `rows[i]` with
+  `i < rows.len()` guards and `layer_proximity_costs[layer]` with
+  `layer < self.num_layers` pre-checked.
+- **cargo test with debug assertions** (bounds checks on): 3/3 pass.
+- **50 adversarial stress trials** of set_layer_proximity_batch under the debug
+  build (out-of-range layers both sides, extreme +/-100000 coords, non-positive
+  costs, up to 500K rows): no panic, no OOB.
+- **Dense boards route cleanly** with the new source in BOTH debug and release
+  builds: haasoscope_chain3/off_a (118,970,202 iterations, EXIT=0) and watchy
+  (4,517,399, EXIT=0). No SIGBUS reproduced.
+
+The iteration-sum mismatch that started this investigation was already proven to be
+a stale-binary artifact (different logs used different Rust binaries AND different
+Python code), not silent memory corruption — the four-combination equivalence test
+(HEAD/new Rust x cache off/on) produced byte-identical sequences, which an OOB write
+corrupting cost cells would have perturbed.
