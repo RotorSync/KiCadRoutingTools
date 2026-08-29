@@ -143,10 +143,11 @@ LIST_FLAGS = {
     # allowlist survives as a list param that ai_plan's alias routes to the
     # diff tab's polarity_swap_nets_text field.
     '--polarity-swap-nets': 'polarity_swap_nets',
-    # route_diff's explicit-pair escape hatch (repeatable, nargs=2 'POS NEG').
-    # A flat list of net-name tokens accumulates across occurrences; the GUI
-    # control parses them back into pairs.
-    '--explicit-pair': 'explicit_pairs',
+    # route_diff's explicit-pair escape hatch (repeatable --pair POS_NET:NEG_NET).
+    # Each occurrence is ONE colon-separated token; the flat list of net-name
+    # tokens accumulates across occurrences and the GUI control parses them back
+    # into pairs. Handled specially in the LIST_FLAGS branch (colon -> two tokens).
+    '--pair': 'explicit_pairs',
     # #486: route.py's coplanar-waveguide net allowlist (nargs='+' globs).
     # LIST, not FLAG_PARAMS -- as a scalar flag only the FIRST pattern survived.
     '--coplanar-nets': 'coplanar_nets',
@@ -308,9 +309,21 @@ def parse_command(argv):
             while i < len(argv) and not argv[i].startswith('--'):
                 vals.append(_num(argv[i]))
                 i += 1
-            # Repeatable flags (--explicit-pair) must ACCUMULATE across
-            # occurrences, not overwrite -- a recorded chain passing several
-            # pairs would otherwise keep only the last one.
+            # Repeatable flags (--pair) must ACCUMULATE across occurrences, not
+            # overwrite -- a recorded chain passing several pairs would otherwise
+            # keep only the last one.
+            if a == '--pair':
+                # --pair POS_NET:NEG_NET: each occurrence is ONE colon-separated
+                # token. Split it into the two net-name tokens so the flat list
+                # (and the GUI text control) sees 'POS NEG' pairs.
+                _flat = []
+                for _v in vals:
+                    _parts = str(_v).split(':', 1)
+                    if len(_parts) == 2 and _parts[0] and _parts[1]:
+                        _flat.extend(_parts)
+                    else:
+                        _flat.append(str(_v))
+                vals = _flat
             lists[a] = lists.get(a, []) + vals
         elif a in ('--group', '--group-scope', '--group-by'):
             # #459 placement blocks: these must land as TOP-LEVEL step keys,
@@ -417,7 +430,7 @@ def parse_command(argv):
         step['nets'] = [str(n) for n in nets] or ['*']
     for k in ('--power-nets', '--power-nets-widths', '--layer-costs',
               '--layers', '--polarity-swap-nets', '--coplanar-nets',
-              '--rip-existing-nets', '--protect-nets'):
+              '--rip-existing-nets', '--protect-nets', '--pair'):
         if k in lists:
             step['params'][LIST_FLAGS[k]] = lists[k]
     return step

@@ -73,8 +73,8 @@ LIST_FLAGS = {
     '--rip-existing-nets': 'rip_existing_nets',
     '--polarity-swap-nets': 'polarity_swap_nets',
     '--coplanar-nets': 'coplanar_nets',
-    # route_diff's explicit-pair escape hatch (repeatable, nargs=2 'POS NEG').
-    '--explicit-pair': 'explicit_pairs',
+    # route_diff's explicit-pair escape hatch (repeatable --pair POS_NET:NEG_NET).
+    '--pair': 'explicit_pairs',
 }
 # Per-action overrides of SCALAR_FLAGS. #381 D4: route_diff.py's trace width is
 # --track-width, but its GUI home is the diff tab's diff_pair_width control (not
@@ -216,6 +216,18 @@ def check_pair(argv, step):
             i += 1
             while i < len(argv) and not argv[i].startswith('--'):
                 want.append(argv[i]); i += 1
+            if a == '--pair':
+                # --pair POS_NET:NEG_NET: manifest_to_plan splits each colon
+                # token into the two net names, so the plan param is a flat
+                # 'POS NEG' list. Mirror that split here.
+                _flat = []
+                for _w in want:
+                    _parts = str(_w).split(':', 1)
+                    if len(_parts) == 2 and _parts[0] and _parts[1]:
+                        _flat.extend(_parts)
+                    else:
+                        _flat.append(str(_w))
+                want = _flat
             got = params.get(LIST_FLAGS[a])
             got = [str(x) for x in got] if isinstance(got, list) else \
                   ([str(got)] if got is not None else [])

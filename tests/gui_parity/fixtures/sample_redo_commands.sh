@@ -6,12 +6,13 @@
 # no-gnd-vias/escape-method/diff-pair-gap/plane-layers/
 # rip-existing-nets/protect-nets (#521)/fab-tier/fab-overrides (#237 -- the
 # ONLY asserted manifest carrying --fab-overrides, so this fixture is what
-# keeps its loss detectable; the corpus never uses it).
+# keeps its loss detectable; the corpus never uses it) and --pair (the
+# explicit-pair escape hatch; the corpus never uses it either).
 set -e
 # cwd=/repo
 python3 -u -X utf8 bga_fanout.py board.kicad_pcb step1.kicad_pcb --component U1 --nets '*' '!GND' --clearance 0.09 --track-width 0.0762 --via-size 0.25 --via-drill 0.15 --grid-step 0.05 --escape-method auto
 # cwd=/repo
-python3 -u -X utf8 route_diff.py step1.kicad_pcb step2.kicad_pcb --nets /USB/D+ /USB/D- --clearance 0.10 --diff-pair-gap 0.1 --via-size 0.45 --via-drill 0.2 --grid-step 0.05 --no-gnd-vias
+python3 -u -X utf8 route_diff.py step1.kicad_pcb step2.kicad_pcb --nets /USB/D+ /USB/D- --clearance 0.10 --diff-pair-gap 0.1 --via-size 0.45 --via-drill 0.2 --grid-step 0.05 --no-gnd-vias --pair TDP1:TDN1 --pair TDP2:TDN2
 # cwd=/repo
 python3 -u -X utf8 route.py step2.kicad_pcb step3.kicad_pcb --nets '*' '!GND' '!+3V3' --no-bga-zones --clearance 0.09 --track-width 0.0762 --via-size 0.45 --via-drill 0.2 --hole-to-hole-clearance 0.2 --grid-step 0.05 --max-ripup 10 --max-iterations 1000000 --fab-tier advanced --fab-overrides my_fab.txt --incremental-from prev_routed.kicad_pcb
 # cwd=/repo

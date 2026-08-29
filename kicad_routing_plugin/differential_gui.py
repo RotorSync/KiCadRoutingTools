@@ -619,19 +619,19 @@ class DifferentialTab(wx.Panel):
                                         "vs N path across the caps, not each side alone (#196)")
         options_sizer.Add(self.ac_couple_check, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 5)
 
-        # Explicitly named diff pairs (--explicit-pair): net-name pairs that
-        # bypass name-pattern matching entirely. Escape hatch for names the
+        # Explicitly named diff pairs (--pair POS_NET:NEG_NET): net-name pairs
+        # that bypass name-pattern matching entirely. Escape hatch for names the
         # strict parser rejects (e.g. TDP1/TDN1 -- polarity letter mid-name,
-        # index after). Comma/space-separated "POS NEG" pairs; both nets must
+        # index after). Accepts 'POS:NEG' or 'POS NEG' pairs; both nets must
         # exist; normal diff-pair routing applies. Repeatable.
         explicit_row = wx.BoxSizer(wx.HORIZONTAL)
-        explicit_row.Add(wx.StaticText(self, label="Explicit pairs (POS NEG):"),
+        explicit_row.Add(wx.StaticText(self, label="Explicit pairs (POS:NEG):"),
                          0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         self.explicit_pairs_text = wx.TextCtrl(self, value="", size=(180, -1))
         self.explicit_pairs_text.SetToolTip(
             "Explicitly named diff pairs to route WITHOUT name-pattern matching, "
-            "as 'POS NEG' pairs separated by commas or spaces (e.g. 'TDP1 TDN1, "
-            "TDP2 TDN2'). Both nets of each pair must exist on the board; normal "
+            "as 'POS:NEG' pairs separated by commas or spaces (e.g. 'TDP1:TDN1, "
+            "TDP2:TDN2'). Both nets of each pair must exist on the board; normal "
             "diff-pair routing applies. Escape hatch for names the strict parser "
             "rejects (polarity letter mid-name, index after).")
         explicit_row.Add(self.explicit_pairs_text, 1, wx.ALIGN_CENTER_VERTICAL)
@@ -795,7 +795,7 @@ class DifferentialTab(wx.Panel):
                 self.append_log(
                     f"AI found pairs with unconventional names: {pairs_str} - "
                     "the GUI and router pair nets by P/N naming, so these can't be "
-                    "routed as pairs yet (rename the nets, or see the explicit-pair "
+                    "routed as pairs yet (rename the nets, or use the explicit "
                     "support issue)\n")
             if not any([confirmed, rejected, unknown, parsed["custom"]]):
                 self.append_log(f"AI: no usable diff-pair findings in {value!r}\n")
@@ -1448,20 +1448,23 @@ class DifferentialTab(wx.Panel):
     def get_explicit_pairs(self):
         """Parse the explicit-pairs field into a list of (pos, neg) name pairs.
 
-        Comma/space-separated 'POS NEG' pairs; empty field -> None (no explicit
-        pairs), matching route_diff.py's --explicit-pair semantics. Net names
-        may contain spaces (#493), so pairs are split on commas first, then each
-        pair's two halves on whitespace.
+        Accepts both the CLI's colon form ('TDP1:TDN1, TDP2:TDN2') and the
+        space/comma-separated 'POS NEG' form; empty field -> None (no explicit
+        pairs), matching route_diff.py's --pair semantics. Net names may contain
+        spaces (#493), so pairs are split on commas/colons first (a pair
+        boundary), then each pair's two halves on whitespace.
         """
         text = self.explicit_pairs_text.GetValue()
-        # Split on commas first (a pair boundary), then whitespace within a pair.
-        tokens = [t for t in text.replace(',', ' ').split() if t]
+        # Split on commas and colons first (pair boundaries), then whitespace
+        # within a pair. A colon is the CLI's POS:NEG separator; a comma or
+        # space separates pairs.
+        tokens = [t for t in text.replace(',', ' ').replace(':', ' ').split() if t]
         if len(tokens) % 2 != 0:
             # Odd token count: a net name with a space was split. Fall back to
             # treating every other token as a pair boundary is unsafe -- warn
             # and return what parses cleanly.
             print("  WARNING: explicit pairs field has an odd number of tokens; "
-                  "pairs must be 'POS NEG' (comma/space separated)")
+                  "pairs must be 'POS NEG' or 'POS:NEG' (comma/space separated)")
         pairs = []
         for i in range(0, len(tokens) - 1, 2):
             pairs.append((tokens[i], tokens[i + 1]))

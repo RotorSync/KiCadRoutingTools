@@ -555,11 +555,11 @@ def batch_route_diff_pairs(input_file: str, output_file: str, net_names: List[st
     # Find differential pairs from all provided nets
     diff_pairs: Dict[str, DiffPairNet] = find_differential_pairs(pcb_data, net_names)
 
-    # Explicitly named pairs (--explicit-pair): bypass name-pattern matching
-    # entirely. The strict parser is arguably correct to reject names like
-    # TDP1/TDN1 (polarity letter MID-name, index after), but the operator needs
-    # an escape hatch without rewriting the chain. Both nets must exist; normal
-    # diff-pair routing still applies. Repeatable.
+    # Explicitly named pairs (--pair POS_NET:NEG_NET): bypass name-pattern
+    # matching entirely. The strict parser is arguably correct to reject names
+    # like TDP1/TDN1 (polarity letter MID-name, index after), but the operator
+    # needs an escape hatch without rewriting the chain. Both nets must exist;
+    # normal diff-pair routing still applies. Repeatable.
     if explicit_pairs:
         _net_by_name = {n.name: n for n in pcb_data.nets.values() if n.name}
         for _p_name, _n_name in explicit_pairs:
@@ -1939,12 +1939,13 @@ Examples:
                         help="End-to-end length-match AC-coupled differential pairs split by series DC-blocking "
                              "caps (#196): auto-detect the cap chain, match the concatenated P path vs the N path, "
                              "and place the compensating meanders on whichever segment has room. Off by default.")
-    parser.add_argument("--explicit-pair", action="append", nargs=2, metavar=("POS_NET", "NEG_NET"),
+    parser.add_argument("--pair", action="append", metavar="POS_NET:NEG_NET",
                         dest="explicit_pairs",
-                        help="Route an explicitly named differential pair (POS_NET NEG_NET) WITHOUT "
-                             "name-pattern matching. Escape hatch for names the strict parser rejects "
-                             "(e.g. TDP1 TDN1 -- polarity letter mid-name, index after). Both nets must "
-                             "exist; normal diff-pair routing applies. Repeatable: pass once per pair.")
+                        help="Route an explicitly named differential pair POS_NET:NEG_NET WITHOUT "
+                             "name-pattern matching. The first name is the positive net, the second "
+                             "the negative. Escape hatch for names the strict parser rejects "
+                             "(e.g. TDP1:TDN1 -- polarity letter mid-name, index after). Both nets "
+                             "must exist; normal diff-pair routing applies. Repeatable: pass once per pair.")
 
     # Rip-up and retry options
     parser.add_argument("--max-ripup", type=int, default=defaults.MAX_RIPUP,
@@ -2003,6 +2004,19 @@ Examples:
                            enforce_fab_floors, count_copper_layers_in_file)
     add_fab_tier_args(parser)
     args = __import__("cli_nets").pin_dash_digit_values(parser).parse_args()
+    # --pair POS_NET:NEG_NET (repeatable): parse the colon-separated form into
+    # (positive, negative) name tuples for the engine. A malformed pair (no
+    # colon, or an empty half) is a hard error -- the operator spelled the flag
+    # wrong, and silently dropping it would route nothing while reporting
+    # success. Parsed here (before board loading) so a bad spec fails fast.
+    if args.explicit_pairs:
+        _parsed_pairs = []
+        for _spec in args.explicit_pairs:
+            _parts = _spec.split(":", 1)
+            if len(_parts) != 2 or not _parts[0] or not _parts[1]:
+                parser.error(f"--pair expects POS_NET:NEG_NET, got {_spec!r}")
+            _parsed_pairs.append((_parts[0], _parts[1]))
+        args.explicit_pairs = _parsed_pairs
     # #439: the PRESENCE of --clearance is the clamp switch (see route.py). Given ->
     # non-Default classes capped at min(class, --clearance) + writeback clamps.
     # Omitted -> honor classes: base = board Default net-class clearance, classes
