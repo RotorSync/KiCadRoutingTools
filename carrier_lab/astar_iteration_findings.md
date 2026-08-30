@@ -82,6 +82,37 @@ overflow cells; otherwise the exact per-cell loop runs unchanged.
 - Overflow fallback (cell far outside window): **0 mismatches**.
 - BGA-zone fallback: **0 mismatches**.
 
+### Review-found bugs (fixed before shipping)
+
+A review of the fast path found TWO correctness bugs that the original fuzz and the
+three-board gates did not fire on. Both are closed; the regression tests below pin them.
+
+**Bug 1 — adjacent-row bits in straddling words (false block).** The bitmap is a flat
+w*h array packed 64/word with NO per-row padding (new_words = (w*h+63)/64), so rows are
+word-aligned only when width is a multiple of 64. A straddling word holds bits from the
+adjacent row. The fast path decoded each set bit as cx = min_x + (cell_idx % width) and
+checked only cx against [lo_x, hi_x], never that the bit's row equals cy. A set bit in
+row y-1 near the window's right edge decodes to cx near max_x; a query box touching the
+right edge passed the x-check and distance-tested it as though it sat at (cx, cy) — a
+FALSE BLOCK (prunes a legal move). Symmetric false clear at the left edge for row y+1
+bits. FIX: row_word_range now returns the row's exact bit bounds [bit_lo, bit_hi] and
+each word is masked to them (BlockedBitmap::mask_word) before decoding, so every
+surviving bit is in-row and in-range by construction.
+
+**Bug 2 — query box extending past a window edge (false clear).** When part of a row's
+query range fell outside the window (lo_x < min_x or hi_x > max_x), row_word_range
+returned None and the fast path SILENTLY SKIPPED that row instead of scanning its
+in-window portion — missing real blocks near the edge (false clear -> routing into a
+blocked area). FIX: row_word_range now CLAMPS dx0/dx1 to [0, width-1] instead of
+returning None. This is exact because the fast path only runs when overflow is empty,
+so nothing outside the window can be blocked on that layer; scanning only the in-window
+portion of an overhanging range is identical to the per-cell loop.
+
+Both bugs were confirmed empirically pre-fix (right-edge: fast=True/slow=False; left-edge
+at r>=3: fast=False/slow=True) and both probes agree post-fix. The strengthened fuzz
+(edge-biased, non-multiple-of-64 widths) catches the buggy version with 19 mismatches and
+passes the fixed version with 0.
+
 ## Gates
 
 ### (1) Byte-identical search behaviour
@@ -115,6 +146,19 @@ one core, gnome-shell, brave -- stated honestly):
 Old mean 465.58s, new mean 370.81s => **94.8s faster (20.4%)**. Gate was >=20s; met with
 4.7x margin.
 
+**Post-fix re-measurement** (mask + clamp added; same ABBA protocol, load ~2.2-2.9):
+
+| run | .so | user s |
+|---|---|---|
+| A0 | old (0.25.0) | 464.01 |
+| B1 | fixed (0.27.0) | 342.30 |
+| B2 | fixed (0.27.0) | 343.30 |
+| A3 | old (0.25.0) | 398.70 |
+
+Old mean 431.36s, fixed mean 342.80s => **88.6s faster (20.5%)**. The fix costs one mask
+per row (and the clamp is free); the win stands -- actually slightly better than the
+pre-fix 370.81s mean, within run noise. Gate >=20s met with 4.4x margin.
+
 ### (3) Twice-run determinism
 
 Carrier: B1 and B2 (both new .so) produced identical iteration sums (9,839,848) and
@@ -129,8 +173,10 @@ test_si_classes). New .so (0.27.0): **320 passed / 3 failed / 131 skipped**
 failures are the documented pre-existing ones (C2 baseline); test_si_classes is flaky
 (passed with new, failed with old -- unrelated to the Rust change). No test that passed
 with the old .so failed with the new one. Rust unit tests: cargo test --release =
-**6 passed / 0 failed** (3 new segment_blocked fast-vs-slow equivalence tests + 3
-existing rate-rule tests).
+**8 passed / 0 failed** (strengthened edge-biased fuzz + 2 regression tests pinning the
+review-found bugs + overflow/BGA fallback tests + 3 existing rate-rule tests). The two
+regression tests and the strengthened fuzz FAIL against the pre-fix code (proven by
+running them on the buggy source: 3 failed) and PASS on the fixed code.
 
 ### (5) Version triple
 

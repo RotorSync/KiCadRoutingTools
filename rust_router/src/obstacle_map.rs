@@ -90,28 +90,53 @@ impl BlockedBitmap {
 
     /// Word range covering the row segment [x0..=x1] on row y for `layer`,
     /// when the whole segment is inside the window. Returns
-    /// (layer_word_base, first_word, last_word) where the word indices are
-    /// relative to the layer base. None when any part of the segment falls
-    /// outside the window (the caller must fall back to per-cell probing).
+    /// (layer_word_base, first_word, last_word, bit_lo, bit_hi) where the word
+    /// indices are relative to the layer base and bit_lo/bit_hi are the
+    /// ABSOLUTE bit indices (within the layer) of the segment's first and last
+    /// cell. The caller MUST mask each word to [bit_lo, bit_hi] before decoding:
+    /// the bitmap is a flat w*h array with no per-row padding, so a straddling
+    /// word holds bits from the adjacent rows, and an unmasked decode would
+    /// misattribute them to this row (a false block/clear at the window edge).
+    /// None when any part of the segment falls outside the window (the caller
+    /// must fall back to per-cell probing).
     #[inline]
     fn row_word_range(&self, layer: usize, y: i32, x0: i32, x1: i32)
-        -> Option<(usize, usize, usize)> {
+        -> Option<(usize, usize, usize, usize, usize)> {
         let dy = y.wrapping_sub(self.min_y);
         if (dy as u32) >= self.height as u32 {
             return None;
         }
-        let dx0 = x0.wrapping_sub(self.min_x);
-        let dx1 = x1.wrapping_sub(self.min_x);
-        if (dx0 as u32) >= self.width as u32 || (dx1 as u32) >= self.width as u32 {
-            return None;
-        }
+        // Clamp to the window: when overflow is empty (the fast-path
+        // precondition), nothing outside [min_x, max_x] can be blocked on this
+        // layer, so scanning only the in-window portion of a query range that
+        // extends past an edge is exact -- NOT skipping the whole row.
+        let dx0 = x0.wrapping_sub(self.min_x).max(0);
+        let dx1 = x1.wrapping_sub(self.min_x).min(self.width - 1);
         if dx0 > dx1 {
-            return None;
+            return None; // query entirely outside the window horizontally
         }
         let row_base = dy as usize * self.width as usize;
-        let w0 = (row_base + dx0 as usize) >> 6;
-        let w1 = (row_base + dx1 as usize) >> 6;
-        Some((layer * self.words_per_layer, w0, w1))
+        let bit_lo = row_base + dx0 as usize;
+        let bit_hi = row_base + dx1 as usize;
+        let w0 = bit_lo >> 6;
+        let w1 = bit_hi >> 6;
+        Some((layer * self.words_per_layer, w0, w1, bit_lo, bit_hi))
+    }
+
+    /// Mask a word to the bits in [bit_lo, bit_hi] (absolute layer bit indices).
+    /// Keeps only in-row, in-range bits so every surviving bit decodes to a
+    /// cell on the queried row within [x0, x1] -- valid by construction.
+    #[inline]
+    fn mask_word(word: u64, wi: usize, bit_lo: usize, bit_hi: usize) -> u64 {
+        let w_lo = wi * 64;
+        let w_hi = wi * 64 + 63;
+        let lo_bit = bit_lo.max(w_lo);
+        let hi_bit = bit_hi.min(w_hi);
+        if lo_bit > hi_bit {
+            return 0;
+        }
+        let mask = (!0u64 << (lo_bit - w_lo)) & (!0u64 >> (63 - (hi_bit - w_lo)));
+        word & mask
     }
 
     /// Mark a cell blocked (refcount transitioned 0 -> 1).
@@ -948,19 +973,20 @@ impl GridObstacleMap {
             && self.static_blocked_bitmap.overflow[layer].is_empty() {
             for cy in lo_y..=hi_y {
                 // Scan the dynamic bitmap's words for this row.
-                if let Some((dyn_base, dw0, dw1)) =
+                if let Some((dyn_base, dw0, dw1, dbit_lo, dbit_hi)) =
                     self.blocked_bitmap.row_word_range(layer, cy, lo_x, hi_x) {
                     for wi in dw0..=dw1 {
                         let mut word = self.blocked_bitmap.bits[dyn_base + wi];
+                        // Mask to this row's exact bit range: the flat bitmap
+                        // has no per-row padding, so a straddling word holds
+                        // adjacent-row bits that must not be decoded here.
+                        word = BlockedBitmap::mask_word(word, wi, dbit_lo, dbit_hi);
                         while word != 0 {
                             let bit = word.trailing_zeros() as usize;
                             word &= word - 1;
                             let cell_idx = wi * 64 + bit;
                             let cx = self.blocked_bitmap.min_x
                                 + (cell_idx % self.blocked_bitmap.width as usize) as i32;
-                            if cx < lo_x || cx > hi_x {
-                                continue;
-                            }
                             if self.source_target_cells[layer].contains(&pack_xy(cx, cy)) {
                                 continue;
                             }
@@ -984,19 +1010,17 @@ impl GridObstacleMap {
                     }
                 }
                 // Scan the static bitmap's words for this row.
-                if let Some((st_base, sw0, sw1)) =
+                if let Some((st_base, sw0, sw1, sbit_lo, sbit_hi)) =
                     self.static_blocked_bitmap.row_word_range(layer, cy, lo_x, hi_x) {
                     for wi in sw0..=sw1 {
                         let mut word = self.static_blocked_bitmap.bits[st_base + wi];
+                        word = BlockedBitmap::mask_word(word, wi, sbit_lo, sbit_hi);
                         while word != 0 {
                             let bit = word.trailing_zeros() as usize;
                             word &= word - 1;
                             let cell_idx = wi * 64 + bit;
                             let cx = self.static_blocked_bitmap.min_x
                                 + (cell_idx % self.static_blocked_bitmap.width as usize) as i32;
-                            if cx < lo_x || cx > hi_x {
-                                continue;
-                            }
                             if self.source_target_cells[layer].contains(&pack_xy(cx, cy)) {
                                 continue;
                             }
@@ -1022,7 +1046,6 @@ impl GridObstacleMap {
             }
             return false;
         }
-
         // Slow path: exact per-cell loop (unchanged semantics).
         for cx in lo_x..=hi_x {
             for cy in lo_y..=hi_y {
@@ -1419,41 +1442,64 @@ mod tests {
     }
 
     /// The word-at-a-time fast path must be byte-identical to the per-cell
-    /// loop on random maps with no BGA zones and no overflow cells.
+    /// loop on random maps with no BGA zones and no overflow cells. BIASED
+    /// toward window edges and non-multiple-of-64 widths: a flat w*h bitmap
+    /// has no per-row padding, so straddling words hold adjacent-row bits and
+    /// query boxes near a window edge can extend past it -- both were real
+    /// fast-path bugs (false block / false clear) that only fire under those
+    /// coincidences.
     #[test]
     fn segment_blocked_fast_equals_slow() {
         let mut rng = Rng(0x9E3779B97F4A7C15);
-        for _trial in 0..200 {
+        for _trial in 0..400 {
             let num_layers = 1 + (rng.next() % 4) as usize;
             let mut obs = GridObstacleMap::new(num_layers);
+            // Seed (0,0): window becomes [-128,128]^2 -> width/height 257,
+            // which is NOT a multiple of 64 (rows straddle word boundaries).
+            obs.add_blocked_cell(0, 0, 0);
             let n_blocked = rng.next() % 300;
             for _ in 0..n_blocked {
-                let gx = rng.range(-50, 50);
-                let gy = rng.range(-50, 50);
+                // Bias some cells toward the window edges.
+                let edge = rng.next() % 4 == 0;
+                let gx = if edge { rng.range(-130, 130) } else { rng.range(-120, 120) };
+                let gy = if edge { rng.range(-130, 130) } else { rng.range(-120, 120) };
                 let layer = (rng.next() % num_layers as u64) as usize;
                 obs.add_blocked_cell(gx, gy, layer);
             }
             let n_st = rng.next() % 6;
             for _ in 0..n_st {
-                let gx = rng.range(-50, 50);
-                let gy = rng.range(-50, 50);
+                let gx = rng.range(-130, 130);
+                let gy = rng.range(-130, 130);
                 let layer = (rng.next() % num_layers as u64) as usize;
                 obs.add_source_target_cell(gx, gy, layer);
             }
-            for _ in 0..50 {
-                let gx1 = rng.range(-40, 40);
-                let gy1 = rng.range(-40, 40);
-                let gx2 = rng.range(-40, 40);
-                let gy2 = rng.range(-40, 40);
+            for _ in 0..60 {
                 let layer = (rng.next() % num_layers as u64) as usize;
-                let r = match rng.next() % 6 {
+                let r = match rng.next() % 7 {
                     0 => 0.0,
                     1 => 0.5,
                     2 => 1.0,
                     3 => 2.0,
                     4 => 3.0,
-                    _ => 5.0,
+                    5 => 5.0,
+                    _ => 8.0,
                 };
+                // Bias half the queries toward a window edge/corner so the
+                // query box frequently extends past min/max.
+                let near_edge = rng.next() % 2 == 0;
+                let (gx1, gy1) = if near_edge {
+                    let corner = match rng.next() % 4 {
+                        0 => (-128i32, -128i32),
+                        1 => (128i32, -128i32),
+                        2 => (-128i32, 128i32),
+                        _ => (128i32, 128i32),
+                    };
+                    (corner.0 + rng.range(-12, 12), corner.1 + rng.range(-12, 12))
+                } else {
+                    (rng.range(-120, 120), rng.range(-120, 120))
+                };
+                let gx2 = gx1 + rng.range(-30, 30);
+                let gy2 = gy1 + rng.range(-30, 30);
                 let fast = obs.segment_blocked(gx1, gy1, gx2, gy2, layer, r);
                 let slow = slow_segment_blocked(&obs, gx1, gy1, gx2, gy2, layer, r);
                 assert_eq!(fast, slow,
@@ -1495,4 +1541,50 @@ mod tests {
             }
         }
     }
+    /// Regression: adjacent-row bits in a straddling word must be masked out.
+    /// Window width is NOT a multiple of 64 (257), so rows straddle word
+    /// boundaries. A blocked cell at the END of row y-1 near max_x sits in the
+    /// same word as row y's right-edge cells; an unmasked decode misattributes
+    /// it to row y and reports a FALSE BLOCK when the query box touches the
+    /// right edge.
+    #[test]
+    fn segment_blocked_adjacent_row_mask() {
+        // Seed (0,0) -> window [-128,128]^2, width=257 (257 % 64 = 1).
+        let mut obs = GridObstacleMap::new(2);
+        obs.add_blocked_cell(0, 0, 0);
+        // Blocked cell at END of row y-1 (gy=-128), right edge gx=128=max_x.
+        obs.add_blocked_cell(128, -128, 0);
+        // Query box on row y=-127 touching the right edge: segment
+        // (-120,-127)->(126,-127), r=2 -> box x in [-122,128], y in [-129,-125].
+        // Pre-fix this returned true (false block); slow path returns false.
+        let fast = obs.segment_blocked(-120, -127, 126, -127, 0, 2.0);
+        let slow = slow_segment_blocked(&obs, -120, -127, 126, -127, 0, 2.0);
+        assert_eq!(fast, slow,
+            "adjacent-row false block: fast={} slow={}", fast, slow);
+        assert!(!fast, "the blocked cell is on row -128, not row -127");
+    }
+
+    /// Regression: a query box extending past a window edge must still scan
+    /// its in-window portion (clamp), not skip the whole row. Window width is
+    /// NOT a multiple of 64. A blocked cell at the START of row y+1 near min_x
+    /// is inside the window; a query on row y whose box extends left of min_x
+    /// used to skip row y+1 entirely and report a FALSE CLEAR.
+    #[test]
+    fn segment_blocked_window_edge_clamp() {
+        // Seed (0,0) -> window [-128,128]^2.
+        let mut obs = GridObstacleMap::new(2);
+        obs.add_blocked_cell(0, 0, 0);
+        // Blocked cell at START of row y+1 (gy=-126), left edge gx=-128=min_x.
+        obs.add_blocked_cell(-128, -126, 0);
+        // Query on row y=-127 whose box extends left of min_x: segment
+        // (-126,-127)->(120,-127), r=3 -> box x in [-129,123], y in [-130,-124].
+        // The blocked cell at (-128,-126) is within r=3 of the segment.
+        // Pre-fix this returned false (false clear); slow path returns true.
+        let fast = obs.segment_blocked(-126, -127, 120, -127, 0, 3.0);
+        let slow = slow_segment_blocked(&obs, -126, -127, 120, -127, 0, 3.0);
+        assert_eq!(fast, slow,
+            "window-edge false clear: fast={} slow={}", fast, slow);
+        assert!(fast, "the blocked cell at (-128,-126) is within r=3 of the segment");
+    }
+
 }
