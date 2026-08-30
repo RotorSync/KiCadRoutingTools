@@ -87,6 +87,33 @@ impl BlockedBitmap {
         }
     }
 
+
+    /// Word range covering the row segment [x0..=x1] on row y for `layer`,
+    /// when the whole segment is inside the window. Returns
+    /// (layer_word_base, first_word, last_word) where the word indices are
+    /// relative to the layer base. None when any part of the segment falls
+    /// outside the window (the caller must fall back to per-cell probing).
+    #[inline]
+    fn row_word_range(&self, layer: usize, y: i32, x0: i32, x1: i32)
+        -> Option<(usize, usize, usize)> {
+        let dy = y.wrapping_sub(self.min_y);
+        if (dy as u32) >= self.height as u32 {
+            return None;
+        }
+        let dx0 = x0.wrapping_sub(self.min_x);
+        let dx1 = x1.wrapping_sub(self.min_x);
+        if (dx0 as u32) >= self.width as u32 || (dx1 as u32) >= self.width as u32 {
+            return None;
+        }
+        if dx0 > dx1 {
+            return None;
+        }
+        let row_base = dy as usize * self.width as usize;
+        let w0 = (row_base + dx0 as usize) >> 6;
+        let w1 = (row_base + dx1 as usize) >> 6;
+        Some((layer * self.words_per_layer, w0, w1))
+    }
+
     /// Mark a cell blocked (refcount transitioned 0 -> 1).
     fn set(&mut self, gx: i32, gy: i32, layer: usize) {
         if self.idx(gx, gy).is_none() {
@@ -885,6 +912,17 @@ impl GridObstacleMap {
     /// checks) reduces to a disc of radius `r` about the point. `r <= 0` falls
     /// back to a plain destination-cell check (base-width tracks: identical to
     /// the old is_blocked_with_margin(.., 0)).
+    ///
+    /// Fast path (crate 0.27.0): when there are no BGA zones and neither bitmap
+    /// has overflow cells, the box is swept WORD-AT-A-TIME -- each row's covering
+    /// words are loaded from both bitmaps and only SET bits are distance-checked
+    /// (with the source/target override applied identically to is_blocked). This
+    /// skips whole empty words instead of probing every cell, which is the
+    /// dominant cost for wide power trunks (margins of 3-8 cells => 49-289
+    /// probes per move). The result is byte-identical to the per-cell loop:
+    /// every cell in the box is either skipped (no bit set => not blocked) or
+    /// distance-checked with the same override, in the same order. When BGA
+    /// zones or overflow cells are present the exact per-cell loop below runs.
     #[inline]
     pub fn segment_blocked(&self, gx1: i32, gy1: i32, gx2: i32, gy2: i32,
                            layer: usize, r: f64) -> bool {
@@ -901,6 +939,91 @@ impl GridObstacleMap {
         let dx = (gx2 - gx1) as f64;
         let dy = (gy2 - gy1) as f64;
         let len2 = dx * dx + dy * dy;
+
+        // Fast path: word-at-a-time sweep. Valid only when every cell in the
+        // box is inside both bitmaps' windows (no overflow cells) and there
+        // are no BGA zones (whose allowed_cells override is per-cell).
+        if self.bga_zones.is_empty()
+            && self.blocked_bitmap.overflow[layer].is_empty()
+            && self.static_blocked_bitmap.overflow[layer].is_empty() {
+            for cy in lo_y..=hi_y {
+                // Scan the dynamic bitmap's words for this row.
+                if let Some((dyn_base, dw0, dw1)) =
+                    self.blocked_bitmap.row_word_range(layer, cy, lo_x, hi_x) {
+                    for wi in dw0..=dw1 {
+                        let mut word = self.blocked_bitmap.bits[dyn_base + wi];
+                        while word != 0 {
+                            let bit = word.trailing_zeros() as usize;
+                            word &= word - 1;
+                            let cell_idx = wi * 64 + bit;
+                            let cx = self.blocked_bitmap.min_x
+                                + (cell_idx % self.blocked_bitmap.width as usize) as i32;
+                            if cx < lo_x || cx > hi_x {
+                                continue;
+                            }
+                            if self.source_target_cells[layer].contains(&pack_xy(cx, cy)) {
+                                continue;
+                            }
+                            let px = cx as f64;
+                            let py = cy as f64;
+                            let d2 = if len2 <= 0.0 {
+                                let ex = px - ax;
+                                let ey = py - ay;
+                                ex * ex + ey * ey
+                            } else {
+                                let mut t = ((px - ax) * dx + (py - ay) * dy) / len2;
+                                if t < 0.0 { t = 0.0; } else if t > 1.0 { t = 1.0; }
+                                let ex = px - (ax + t * dx);
+                                let ey = py - (ay + t * dy);
+                                ex * ex + ey * ey
+                            };
+                            if d2 <= r2 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                // Scan the static bitmap's words for this row.
+                if let Some((st_base, sw0, sw1)) =
+                    self.static_blocked_bitmap.row_word_range(layer, cy, lo_x, hi_x) {
+                    for wi in sw0..=sw1 {
+                        let mut word = self.static_blocked_bitmap.bits[st_base + wi];
+                        while word != 0 {
+                            let bit = word.trailing_zeros() as usize;
+                            word &= word - 1;
+                            let cell_idx = wi * 64 + bit;
+                            let cx = self.static_blocked_bitmap.min_x
+                                + (cell_idx % self.static_blocked_bitmap.width as usize) as i32;
+                            if cx < lo_x || cx > hi_x {
+                                continue;
+                            }
+                            if self.source_target_cells[layer].contains(&pack_xy(cx, cy)) {
+                                continue;
+                            }
+                            let px = cx as f64;
+                            let py = cy as f64;
+                            let d2 = if len2 <= 0.0 {
+                                let ex = px - ax;
+                                let ey = py - ay;
+                                ex * ex + ey * ey
+                            } else {
+                                let mut t = ((px - ax) * dx + (py - ay) * dy) / len2;
+                                if t < 0.0 { t = 0.0; } else if t > 1.0 { t = 1.0; }
+                                let ex = px - (ax + t * dx);
+                                let ey = py - (ay + t * dy);
+                                ex * ex + ey * ey
+                            };
+                            if d2 <= r2 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Slow path: exact per-cell loop (unchanged semantics).
         for cx in lo_x..=hi_x {
             for cy in lo_y..=hi_y {
                 if !self.is_blocked(cx, cy, layer) {
@@ -1227,6 +1350,149 @@ impl GridObstacleMap {
     pub fn add_free_vias_batch(&mut self, positions: Vec<(i32, i32)>) {
         for (gx, gy) in positions {
             self.free_via_positions.insert(pack_xy(gx, gy));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reference implementation of the ORIGINAL per-cell segment_blocked loop,
+    /// used to prove the word-at-a-time fast path is byte-identical.
+    fn slow_segment_blocked(obs: &GridObstacleMap, gx1: i32, gy1: i32, gx2: i32, gy2: i32,
+                            layer: usize, r: f64) -> bool {
+        if r <= 0.0 {
+            return obs.is_blocked(gx2, gy2, layer);
+        }
+        let r2 = r * r;
+        let rc = r.ceil() as i32;
+        let lo_x = gx1.min(gx2) - rc;
+        let hi_x = gx1.max(gx2) + rc;
+        let lo_y = gy1.min(gy2) - rc;
+        let hi_y = gy1.max(gy2) + rc;
+        let (ax, ay) = (gx1 as f64, gy1 as f64);
+        let dx = (gx2 - gx1) as f64;
+        let dy = (gy2 - gy1) as f64;
+        let len2 = dx * dx + dy * dy;
+        for cx in lo_x..=hi_x {
+            for cy in lo_y..=hi_y {
+                if !obs.is_blocked(cx, cy, layer) {
+                    continue;
+                }
+                let px = cx as f64;
+                let py = cy as f64;
+                let d2 = if len2 <= 0.0 {
+                    let ex = px - ax;
+                    let ey = py - ay;
+                    ex * ex + ey * ey
+                } else {
+                    let mut t = ((px - ax) * dx + (py - ay) * dy) / len2;
+                    if t < 0.0 { t = 0.0; } else if t > 1.0 { t = 1.0; }
+                    let ex = px - (ax + t * dx);
+                    let ey = py - (ay + t * dy);
+                    ex * ex + ey * ey
+                };
+                if d2 <= r2 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Deterministic pseudo-random generator (xorshift) so the test is
+    /// reproducible across runs.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn range(&mut self, lo: i32, hi: i32) -> i32 {
+            lo + (self.next() % (hi - lo + 1) as u64) as i32
+        }
+    }
+
+    /// The word-at-a-time fast path must be byte-identical to the per-cell
+    /// loop on random maps with no BGA zones and no overflow cells.
+    #[test]
+    fn segment_blocked_fast_equals_slow() {
+        let mut rng = Rng(0x9E3779B97F4A7C15);
+        for _trial in 0..200 {
+            let num_layers = 1 + (rng.next() % 4) as usize;
+            let mut obs = GridObstacleMap::new(num_layers);
+            let n_blocked = rng.next() % 300;
+            for _ in 0..n_blocked {
+                let gx = rng.range(-50, 50);
+                let gy = rng.range(-50, 50);
+                let layer = (rng.next() % num_layers as u64) as usize;
+                obs.add_blocked_cell(gx, gy, layer);
+            }
+            let n_st = rng.next() % 6;
+            for _ in 0..n_st {
+                let gx = rng.range(-50, 50);
+                let gy = rng.range(-50, 50);
+                let layer = (rng.next() % num_layers as u64) as usize;
+                obs.add_source_target_cell(gx, gy, layer);
+            }
+            for _ in 0..50 {
+                let gx1 = rng.range(-40, 40);
+                let gy1 = rng.range(-40, 40);
+                let gx2 = rng.range(-40, 40);
+                let gy2 = rng.range(-40, 40);
+                let layer = (rng.next() % num_layers as u64) as usize;
+                let r = match rng.next() % 6 {
+                    0 => 0.0,
+                    1 => 0.5,
+                    2 => 1.0,
+                    3 => 2.0,
+                    4 => 3.0,
+                    _ => 5.0,
+                };
+                let fast = obs.segment_blocked(gx1, gy1, gx2, gy2, layer, r);
+                let slow = slow_segment_blocked(&obs, gx1, gy1, gx2, gy2, layer, r);
+                assert_eq!(fast, slow,
+                    "segment_blocked mismatch trial={} seg=({},{})->({},{}) layer={} r={}",
+                    _trial, gx1, gy1, gx2, gy2, layer, r);
+            }
+        }
+    }
+
+    /// The fast path must fall back to the per-cell loop (identical results)
+    /// when overflow cells are present.
+    #[test]
+    fn segment_blocked_overflow_fallback_equals_slow() {
+        let mut obs = GridObstacleMap::new(2);
+        obs.add_blocked_cell(5, 5, 0);
+        obs.add_blocked_cell(100000, 100000, 0); // forces overflow on layer 0
+        for r in [1.0f64, 2.0, 3.0] {
+            for seg in [(0i32, 0i32, 10i32, 10i32), (5, 5, 5, 5), (-5, -5, 5, 5)] {
+                let fast = obs.segment_blocked(seg.0, seg.1, seg.2, seg.3, 0, r);
+                let slow = slow_segment_blocked(&obs, seg.0, seg.1, seg.2, seg.3, 0, r);
+                assert_eq!(fast, slow, "overflow fallback mismatch seg={:?} r={}", seg, r);
+            }
+        }
+    }
+
+    /// The fast path must fall back to the per-cell loop (identical results)
+    /// when BGA zones are present.
+    #[test]
+    fn segment_blocked_bga_fallback_equals_slow() {
+        let mut obs = GridObstacleMap::new(2);
+        obs.add_blocked_cell(5, 5, 0);
+        obs.bga_zones.push((0, 0, 20, 20));
+        obs.allowed_cells.insert(pack_xy(5, 5));
+        for r in [1.0f64, 3.0] {
+            for seg in [(0i32, 0i32, 10i32, 10i32), (5i32, 5i32, 5i32, 5i32)] {
+                let fast = obs.segment_blocked(seg.0, seg.1, seg.2, seg.3, 0, r);
+                let slow = slow_segment_blocked(&obs, seg.0, seg.1, seg.2, seg.3, 0, r);
+                assert_eq!(fast, slow, "bga fallback mismatch seg={:?} r={}", seg, r);
+            }
         }
     }
 }

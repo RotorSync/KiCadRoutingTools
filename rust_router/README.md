@@ -2,7 +2,7 @@
 
 High-performance A* grid router implemented in Rust with Python bindings via PyO3.
 
-**Current Version: 0.24.0**
+**Current Version: 0.27.0**
 
 > **Release note:** the 0.20.0 per-platform binaries are published as of
 > [v0.20.0](https://github.com/drandyhaas/KiCadRoutingTools/releases/tag/v0.20.0),
@@ -311,6 +311,22 @@ src/
 
 ## Version History
 
+### 0.27.0 (2026-08-29)
+
+- A* inner-loop speed: word-at-a-time swept-capsule scan in
+  GridObstacleMap.segment_blocked (crate 0.27.0). Wide power trunks
+  (margins of 3-8 grid cells => 49-289 probes per move) previously called
+  is_blocked on EVERY cell in the swept box; the fast path now loads each
+  row's covering bitmap words from both the dynamic and static bitmaps and
+  distance-checks only SET bits (with the source/target override applied
+  identically to is_blocked), skipping whole empty words. Byte-identical
+  search behaviour: same nets, same order, same expansions, same results --
+  verified by identical iteration sums and identical check_connected /
+  check_drc counts on carrier + kitdev + glasgow. Measured on the carrier
+  bulk route step-6: user time 465.6s -> 370.8s (ABBA back-to-back, ~20%
+  faster), with the sweep being ~71% of segment_blocked calls. Falls back
+  to the exact per-cell loop whenever BGA zones or bitmap overflow cells are
+  present, so boards with those features behave identically to before.
 
 ### 0.25.0 (2026-08-28)
 
