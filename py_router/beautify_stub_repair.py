@@ -404,6 +404,13 @@ def beautify_stub_repair(pcb_data,
             done.add(k2)
 
     # ---- Phase 3: safe spur trim (branch/free chains only) ----
+    # Each candidate is judged against the EVOLVING board state: cur_segs /
+    # rem_ids / pcb_data.segments are refreshed after every accepted removal, so
+    # a later candidate's connectivity gate and chain walk see the copper that
+    # earlier trims already removed -- never a stale pre-loop snapshot. Without
+    # this, two individually-safe trims on one net (e.g. redundant parallel
+    # paths to a pad left by rip-up/retry) could each pass against the original
+    # board and together remove a through-path.
     dang = _dangling_endpoints(pcb_data)
     done = set()
     for (x, y) in dang:
@@ -453,6 +460,11 @@ def beautify_stub_repair(pcb_data,
         removed.extend([s for s in cur_segs if id(s) in rem_ids_local])
         nets_changed.add(nid)
         done.add(key)
+        # Refresh the evolving state so later candidates are judged against the
+        # copper that remains after THIS trim (not a stale pre-loop snapshot).
+        cur_segs = kept
+        rem_ids |= rem_ids_local
+        pcb_data.segments = cur_segs
 
     pcb_data.segments = saved_segs
     try:

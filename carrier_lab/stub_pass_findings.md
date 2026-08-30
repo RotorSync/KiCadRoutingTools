@@ -121,6 +121,28 @@ on rp2350: stub repair alone 0.043s vs full cleanup pipeline 1.19s = **3.6%
 overhead**; against full chain time (routing dominates) this is well under the
 <10% budget.
 
+## Follow-up fix: Phase-3 evolving-state gate (review finding)
+
+A review flagged that Phase 3's safe-spur-trim connectivity gate judged every
+candidate against a STALE pre-loop snapshot: `cur_segs` / `rem_ids` /
+`pcb_data.segments` were built once before the loop and never refreshed on
+acceptance, so a later candidate's gate and chain walk saw copper that earlier
+trims had already removed. Verified against the code: the reading HOLDS
+structurally. Empirically, two individually-safe trims on one net (redundant
+parallel paths to a pad left by rip-up/retry) can each pass against the original
+board and together remove a through-path segment — demonstrated by the new
+regression test `tests/test_stub_repair_evolving_gate.py`: the old logic
+removes 3 segments (including the through-path B), the fixed logic removes only
+the first tail (B survives, re-walk sees an 'anchor' chain and skips).
+
+Fix: after each accepted trim, refresh `cur_segs = kept`, `rem_ids |=
+rem_ids_local`, and `pcb_data.segments = cur_segs` so every later candidate is
+judged against the evolving board. Re-ran all gates: 6-board A/B score unchanged
+(rp2350 stubs 122->55, final +0.3, no sub-score regress >2), connectivity equal,
+DRC equal-or-better, timing 3.1% of cleanup pipeline (unchanged). The fix makes
+the pass's correctness self-evident rather than relying on the subtle invariant
+that branch/free trims preserve through-paths.
+
 ## Honest limitation
 
 The stub-heavy boards orangecrab/routed_output/fanout carry Class A stubs that
