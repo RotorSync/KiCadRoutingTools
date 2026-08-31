@@ -94,6 +94,16 @@ def refresh() -> None:
     # this phase -- the env knob is how the A/B harness toggles the engine
     # kwarg without a flag.
     g['PLANNER_ORDERING'] = _s('KICAD_PLANNER_ORDERING', '0') == '1'
+    # Layer-suggestion seam (Phase B 3.3): feed the plan's preferred layer
+    # into the detailed router as a SOFT per-net layer-cost bias -- leaving the
+    # suggested layer costs more (KICAD_LAYER_SUGGEST_TAX, default 1.3x), so a
+    # net vias out only when its corridor on the suggested layer is genuinely
+    # exhausted. NEVER a hard constraint, NEVER an ordering change (the
+    # ordering experiments' failure mode). Default OFF; the env knob is how the
+    # A/B harness toggles it without a flag.
+    g['LAYER_SUGGEST'] = _s('KICAD_LAYER_SUGGEST', '0') == '1'
+    g['LAYER_SUGGEST_TAX'] = _f('KICAD_LAYER_SUGGEST_TAX', 1.3)
+    g['LAYER_SUGGEST_DEBUG'] = _s('KICAD_LAYER_SUGGEST_DEBUG', '') == '1'
     # C2 phase-3 ordering: promote long-span / high-pad-count multipoint
     # nets earlier in the Phase-3 tap order (composite score =
     # boxed-in-risk + alpha*log(1+span) + beta*log(1+pads)). The power

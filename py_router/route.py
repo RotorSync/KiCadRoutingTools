@@ -1720,6 +1720,25 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                                  single_ended_nets, all_swap_vias,
                                  all_swap_segments, verbose=verbose)
 
+    # Layer-suggestion seam (Phase B 3.3, KICAD_LAYER_SUGGEST=1): run the
+    # Phase B multi-layer planner and stash each net's preferred layer on the
+    # config. The SE loop applies it as a SOFT per-net layer-cost tax (leaving
+    # the suggested layer costs more), so a net vias out only when its corridor
+    # on the suggested layer is genuinely exhausted. NEVER an ordering change
+    # and never a hard constraint -- the ordering experiments' failure mode.
+    # TOP-LEVEL RUNS ONLY (same gate as the #589 plan): the reconcile sub-runs
+    # re-enter with final_reconcile=False and inherit the outer config's map.
+    if env_knobs.LAYER_SUGGEST and final_reconcile and single_ended_nets:
+        try:
+            from global_planner.layer_suggestion import planner_layer_prefs
+            _ls_prefs = planner_layer_prefs(
+                pcb_data, track_width, clearance, via_size=via_size)
+            config._layer_suggestion_prefs = _ls_prefs
+            print(f"Layer suggestion: {len(_ls_prefs)} net(s) got a preferred "
+                  f"layer from the Phase B planner")
+        except Exception as _e:  # pragma: no cover - must never break routing
+            print(f"Layer suggestion skipped ({_e})")
+
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
 

@@ -4310,6 +4310,10 @@ def _route_multipoint_taps_impl(
     # power trunks on forbidden layers. Same soft override as the loop.
     from global_plan import power_layer_config
     config = power_layer_config(config, config, net_id)
+    # Layer-suggestion seam (Phase B 3.3): same soft per-net layer-cost tax
+    # as the SE loop, so tap edges also prefer the plan's suggested layer.
+    from global_planner.layer_suggestion import apply_layer_suggestion
+    config = apply_layer_suggestion(config, config, net_id)
 
     pad_info = main_result['multipoint_pad_info']
     routed_indices = set(main_result['routed_pad_indices'])

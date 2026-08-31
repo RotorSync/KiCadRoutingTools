@@ -697,6 +697,12 @@ def route_single_ended_nets(
         # #658 power discipline: power nets get their own layer economics
         # (off the highways, dive-fast) -- see power_layer_config.
         cfg_route = power_layer_config(cfg_route, config, net_id)
+        # Layer-suggestion seam (Phase B 3.3, KICAD_LAYER_SUGGEST=1): soft
+        # per-net layer-cost tax on leaving the plan's suggested layer. Same
+        # replace-clone pattern as the two above; inert when the knob is off
+        # or the net has no suggestion.
+        from global_planner.layer_suggestion import apply_layer_suggestion
+        cfg_route = apply_layer_suggestion(cfg_route, config, net_id)
         # #572: oracle forced links outrank endpoint derivation -- the
         # model's zone credit merges the exact-fill clusters, so both the
         # multipoint and plain derivations "see" no gap and succeed with
