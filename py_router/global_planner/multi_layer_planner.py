@@ -198,18 +198,43 @@ def _dijkstra_ml(mg: MultiLayerGraph,
                  occupancy: Dict[str, Dict[int, int]],
                  alpha: float = 2.0,
                  overfull_penalty: float = 50.0,
-                 via_units: int = 1) -> Optional[List[Tuple[str, int]]]:
+                 via_units: int = 1,
+                 fidelity_weight: float = 4.0,
+                 fidelity_power: float = 2.0) -> Optional[List[Tuple[str, int]]]:
     """Congestion-aware shortest path through the multi-layer graph.
 
     State is (layer, node_id). Within-layer transitions use the per-layer
     congestion cost; via transitions add fixed_cost plus congestion at both
     endpoint nodes. Returns ordered list of (layer, node) hops inclusive of
     start and goal, or None.
+
+    Path-fidelity term (fidelity_weight > 0): each within-layer edge is
+    penalized by its deviation from the straight pad-to-pad chord -- the
+    perpendicular distance of the edge midpoint from the chord line between
+    the start and goal nodes -- scaled by edge length and raised to
+    fidelity_power. A path that hugs the chord pays ~nothing extra; a path
+    that detours off it pays proportionally to how far it wanders. This is
+    the tunable balance against the congestion term (alpha): raise
+    fidelity_weight to make plans hug straight lines, lower it to let them
+    thread low-occupancy space.
     """
     start = (start_layer, start_node)
     goal = (goal_layer, goal_node)
     if start == goal:
         return [start]
+    # chord from start to goal (2D projection of the straight pad-to-pad line)
+    gs = mg.graphs[start_layer]
+    gg = mg.graphs[goal_layer]
+    ax_, ay_ = gs.node_pos[start_node]
+    bx_, by_ = gg.node_pos[goal_node]
+    chord_dx = bx_ - ax_
+    chord_dy = by_ - ay_
+    chord_len = math.hypot(chord_dx, chord_dy)
+    if chord_len > 0:
+        chord_nx = chord_dx / chord_len
+        chord_ny = chord_dy / chord_len
+    else:
+        chord_nx = chord_ny = 0.0
     dist = {start: 0.0}
     prev = {}
     pq = [(0.0, start)]
@@ -231,6 +256,12 @@ def _dijkstra_ml(mg: MultiLayerGraph,
             occ = occupancy[ulayer].get(vnode, 0)
             cap = g.node_capacity[vnode]
             cost = _congestion_cost(occ, cap, seg_len, alpha, overfull_penalty)
+            if fidelity_weight > 0.0 and seg_len > 0:
+                # perpendicular distance of the edge midpoint from the chord
+                mx = (ux + vx) / 2.0
+                my = (uy + vy) / 2.0
+                dev = abs((mx - ax_) * chord_ny - (my - ay_) * chord_nx)
+                cost += fidelity_weight * seg_len * (dev ** fidelity_power)
             vstate = (ulayer, vnode)
             nd = d + cost
             if nd < dist.get(vstate, float("inf")):
@@ -395,7 +426,9 @@ def _route_two_pin(mg: MultiLayerGraph,
                    occupancy: Dict[str, Dict[int, int]],
                    alpha: float,
                    via_units: int,
-                   congestion_threshold: int = 1) -> Optional[NetPlan]:
+                   congestion_threshold: int = 1,
+                   fidelity_weight: float = 4.0,
+                   fidelity_power: float = 2.0) -> Optional[NetPlan]:
     """Route one 2-pin connection through the multi-layer graph.
 
     Start layer is chosen from pad A's actual copper layers; goal layer from
@@ -421,7 +454,9 @@ def _route_two_pin(mg: MultiLayerGraph,
     path = _dijkstra_ml(mg, start_layer, sa, goal_layer, sb,
                         occupancy, alpha=alpha,
                         overfull_penalty=50.0 * (alpha / 2.0),
-                        via_units=via_units)
+                        via_units=via_units,
+                        fidelity_weight=fidelity_weight,
+                        fidelity_power=fidelity_power)
     if path is None:
         return None
     # record occupancy along path nodes (each node on its own layer).
@@ -477,12 +512,14 @@ def plan_board_multi(pcb,
                      trace_width: float,
                      clearance: float,
                      via_size: float = 0.3,
-                     alpha: float = 2.0,
+                     alpha: float = 1.0,
                      fixed_cost: float = 50.0,
                      ripup_rounds: int = 1,
                      overfull_penalty: float = 50.0,
                      congestion_threshold: int = 2,
-                     fast: bool = False) -> PlanResult:
+                     fast: bool = False,
+                     fidelity_weight: float = 4.0,
+                     fidelity_power: float = 2.0) -> PlanResult:
     """Globally route all nets (2-pin and multi-pin) through the multi-layer graph.
 
     Multi-pin nets are planned as MST-ordered sequential 2-pin plans.
@@ -491,13 +528,23 @@ def plan_board_multi(pcb,
         pcb: parsed PCBData
         graphs: layer -> CapacityGraph (all copper layers)
         trace_width / clearance / via_size: routing geometry (mm)
-        alpha: congestion exponent weight
+        alpha: congestion exponent weight (default 1.0 tuned with the
+            fidelity term in planning_lab/fidelity_findings.md; 0 disables
+            congestion weighting entirely but also disables the capacity<=0
+            obstacle penalty -- prefer a small positive value)
         fixed_cost: fixed cost per via transition
         ripup_rounds: number of rip-up/re-plan rounds for overfull edges
         overfull_penalty: extra cost multiplier for capacity-0 edges
         congestion_threshold: free-capacity units a pad's own layer must have
             before the plan keeps the net on it; below this the plan may route
             out onto another layer through a via at the pad.
+        fidelity_weight: weight of the path-fidelity term (deviation from the
+            straight pad-to-pad chord) vs the congestion term; 0 disables it.
+            Default 4.0 is the value tuned in planning_lab/fidelity_findings.md
+            (search over TRAIN boards, validated on HELD-OUT boards).
+        fidelity_power: exponent applied to the perpendicular deviation before
+            scaling by fidelity_weight (shape parameter; higher punishes large
+            detours super-linearly). Default 2.0 (tuned).
     """
     mg = build_multi_layer_graph(graphs, via_size=via_size,
                                  fixed_cost=fixed_cost)
@@ -514,7 +561,9 @@ def plan_board_multi(pcb,
             plan = _route_two_pin(mg, pads[0], pads[1], occupancy,
                                   alpha=alpha * (overfull_penalty / 50.0),
                                   via_units=via_units,
-                                  congestion_threshold=congestion_threshold)
+                                  congestion_threshold=congestion_threshold,
+                                  fidelity_weight=fidelity_weight,
+                                  fidelity_power=fidelity_power)
             if plan is not None:
                 plan.net_id = net_id
                 plan.net_name = net_name
@@ -531,7 +580,9 @@ def plan_board_multi(pcb,
             plan = _route_two_pin(mg, pa_f, pb_f, occupancy,
                                   alpha=alpha * (overfull_penalty / 50.0),
                                   via_units=via_units,
-                                  congestion_threshold=congestion_threshold)
+                                  congestion_threshold=congestion_threshold,
+                                  fidelity_weight=fidelity_weight,
+                                  fidelity_power=fidelity_power)
             if plan is not None:
                 plan.net_id = net_id
                 plan.net_name = net_name
@@ -547,7 +598,9 @@ def plan_board_multi(pcb,
             subplan = _route_two_pin(mg, pa_, pb_, occupancy,
                                      alpha=alpha * (overfull_penalty / 50.0),
                                      via_units=via_units,
-                                     congestion_threshold=congestion_threshold)
+                                     congestion_threshold=congestion_threshold,
+                                     fidelity_weight=fidelity_weight,
+                                     fidelity_power=fidelity_power)
             if subplan is None:
                 continue
             sub_paths.append(subplan.path)
