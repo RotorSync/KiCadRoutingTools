@@ -100,7 +100,7 @@ EXPECTED = {
         argv_sha='52aaeed47e14fea796be12c36db09c605a4b8ec588da12bded6a2573b1c7f0b0',
         seconds=6.3,
         truth={'headline': 3,
-               'quality': {'vias': 29, 'copper_mm': 281.66, 'segments': 278}},
+               'quality': {'vias': 29, 'copper_mm': 278.72, 'segments': 277}},
         predictors={
             'crossings': 23, 'hpwl': 236.74883999999992,
             'halo': 113.8065780241933, 'overlap_area': 1.0,
@@ -116,8 +116,8 @@ EXPECTED = {
         argv_sha='d32ea90c2e348bd6c1fb318983e73f953f179d1ea85aeca7ad4ed4b2bed5cbdc',
         seconds=6.3,
         truth={'headline': 0,
-               'quality': {'vias': 169, 'copper_mm': 2979.86,
-                           'segments': 1438}},
+               'quality': {'vias': 169, 'copper_mm': 2984.09,
+                           'segments': 1456}},
         predictors={
             'crossings': 300, 'hpwl': 2504.4400000000014,
             'halo': 297.4273114820511, 'overlap_area': 1.7621459846850488e-13,

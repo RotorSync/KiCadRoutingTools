@@ -2414,7 +2414,7 @@ def _edge_span_mm(sources, targets, grid_step):
 
 
 def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
-                             coord, layer_names):
+                             coord, layer_names, same_net_inprogress_vias=None):
     """FAILURE-ONLY memo over the #189 in-pad via placement (2026-08-14
     profiling: 2,693 attempts x a windowed plane-map build each, ~95s --
     the same boxed pads re-fail across rescue rungs and rounds).
@@ -2446,13 +2446,16 @@ def _place_shrunk_via_in_pad(pad_obj, obstacles, config, pcb_data, net_id,
         if _mkey in _memo:
             return None
     r = _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data,
-                                      net_id, coord, layer_names)
+                                      net_id, coord, layer_names,
+                                      same_net_inprogress_vias=same_net_inprogress_vias)
     if r is None and _memo is not None:
         _memo.add(_mkey)
     return r
 
 
-def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, coord, layer_names):
+def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id,
+                                  coord, layer_names,
+                                  same_net_inprogress_vias=None):
     """Issue #189: drop a DRC-legal fab-floor via INSIDE a boxed-in SMD pad so a
     stuck A* can reach the pad on an inner layer. Returns
     (Via, (gx, gy), pad_layer_idx, stub_segments) or None; stub_segments is
@@ -2527,6 +2530,20 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # drilled straight through a pending foreign track (#310, snapdragon
     # ETH_ISOLATEB via on PCIE1_WAKE_N In2.Cu).
     inflight_vias, inflight_segments = inflight_copper_dicts(pcb_data)
+    # hw sweep 2026-08-31 finding 5: earlier tap edges of THIS net place vias that are not yet in
+    # pcb_data (they live in route_multipoint_taps' all_vias) and not in any
+    # inflight window -- so try_tap_pad's local via obstacle map never sees
+    # them and can drop a #189 unblock via within hole-to-hole of one (the
+    # VIN_PROT-family same-net drill spacing DRC: /~{ALERT} vias at (76.2,90.3)
+    # and (75.915,90.3), 0.285mm apart vs 0.4mm needed). Thread them in as
+    # extra_vias so the local map blocks cells within hole-to-hole of them.
+    if same_net_inprogress_vias:
+        _snv = [{'x': v.x, 'y': v.y, 'size': v.size,
+                 'drill': getattr(v, 'drill', 0) or 0,
+                 'layers': list(getattr(v, 'layers', ['F.Cu', 'B.Cu'])),
+                 'net_id': v.net_id}
+                for v in same_net_inprogress_vias]
+        inflight_vias = list(inflight_vias or []) + _snv
     ncu = len([l for l in layer_names if l.endswith('.Cu')]) or 2
     # Forced last-resort via sizes, largest first: the configured via, then the
     # active fab-tier floor ladder (nominal floor, then any escalation rung). The
@@ -2731,7 +2748,7 @@ def _register_unblock_via(obstacles, vgx, vgy, layer_names):
 def _route_with_via_unblock(router, obstacles, config, sources, targets, track_margin,
                             pcb_data, net_id, print_prefix="",
                             direction_labels=("forward", "backward"), single_direction=False,
-                            waypoints=None):
+                            waypoints=None, same_net_inprogress_vias=None):
     """_route_main_connection plus a via-in-pad unblock (issue #189), generic over
     single-ended, multipoint-main and tap routes.
 
@@ -2792,7 +2809,9 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
             print(f"      UNBLOCK: bwd stuck ({bwd_i}<{lim}), target pad="
                   f"{pad.component_ref}.{pad.pad_number}" if pad else
                   f"      UNBLOCK: bwd stuck ({bwd_i}<{lim}), NO pad at targets")
-        r = (_place_shrunk_via_in_pad(pad, obstacles, config, pcb_data, net_id, coord, layer_names)
+        r = (_place_shrunk_via_in_pad(pad, obstacles, config, pcb_data, net_id, coord,
+                                      layer_names,
+                                      same_net_inprogress_vias=same_net_inprogress_vias)
              if pad is not None else None)
         if _dbg and pad is not None:
             print(f"      UNBLOCK: placement {'OK ' + str(r[0]) if r else 'DECLINED'}")
@@ -2804,7 +2823,9 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
     # forward probe (from sources) exhausted -> the SOURCE pad is boxed
     if fwd_i and fwd_i < lim:
         pad = _net_pad_near(pcb_data, net_id, sources, coord)
-        r = (_place_shrunk_via_in_pad(pad, obstacles, config, pcb_data, net_id, coord, layer_names)
+        r = (_place_shrunk_via_in_pad(pad, obstacles, config, pcb_data, net_id, coord,
+                                      layer_names,
+                                      same_net_inprogress_vias=same_net_inprogress_vias)
              if pad is not None else None)
         if r is not None:
             via, (vgx, vgy), pli, stub_segs = r
@@ -2848,7 +2869,8 @@ def _route_with_via_unblock(router, obstacles, config, sources, targets, track_m
         if side_cells is not None:
             for pad2 in _net_pads_near(pcb_data, net_id, side_cells, coord):
                 r2 = _place_shrunk_via_in_pad(pad2, obstacles, config, pcb_data,
-                                              net_id, coord, layer_names)
+                                              net_id, coord, layer_names,
+                                              same_net_inprogress_vias=same_net_inprogress_vias)
                 if _dbg:
                     print(f"      UNBLOCK rung2: {'source' if is_source else 'target'} "
                           f"pad {pad2.component_ref}.{pad2.pad_number} -> "
@@ -4702,7 +4724,8 @@ def _route_multipoint_taps_impl(
              unblock_segments) = _route_with_via_unblock(
                 router, obstacles, config, sources, targets, track_margin,
                 pcb_data, net_id, print_prefix="      ", direction_labels=("forward", "backward"),
-                waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), [])
+                waypoints=waypoint_buckets.get(frozenset((src_idx, tgt_idx)), []),
+                same_net_inprogress_vias=all_vias
             )
 
             if path is None:

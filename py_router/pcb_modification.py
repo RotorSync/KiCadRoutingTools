@@ -410,19 +410,59 @@ def _safe_prune_net(net_id, prunable, vias, pads, zones,
     return kept, removed
 
 
+def _pad_corner_radius_mod(pad):
+    """Corner radius for the rounded-rect pad model (matches check_drc's
+    point_to_pad_distance): circle/oval -> min(half), roundrect -> rratio*min,
+    rect/custom -> 0. Custom pads keep the conservative bbox (their real
+    outline is a polygon)."""
+    sx = pad.size_x; sy = pad.size_y
+    shape = getattr(pad, 'shape', 'rect')
+    if shape in ('circle', 'oval'):
+        return min(sx, sy) / 2.0
+    if shape == 'roundrect':
+        rr = getattr(pad, 'roundrect_rratio', 0.0) or 0.0
+        return rr * min(sx, sy)
+    return 0.0
+
+
 def _nearest_pad_point(px, py, pad):
-    """Nearest point on a pad's (rotated) bounding box to (px, py), and the gap."""
+    """Nearest point on a pad's copper outline to (px, py), and the gap.
+
+    Uses the SAME rounded-rect model as check_drc's point_to_pad_distance
+    (circle/oval/roundrect pads get their corner radius; rect/custom keep the
+    sharp bbox), so the nudge's shortfall estimate matches what DRC grades.
+    The old sharp-bbox-only version over-estimated the gap to a round BGA ball
+    by up to (sqrt(2)-1)*r at the corner -- a via 16um inside a ball's clearance
+    read as 88um short, beyond the nudge cap, so a fixable graze shipped."""
     cx, cy = pad.global_x, pad.global_y
-    # size_x/size_y are board-resolved (axis-aligned for orthogonal pads); only
-    # the residual rect_rotation tilts the rectangle - NOT the total pad rotation.
     rot = math.radians(getattr(pad, 'rect_rotation', 0.0) or 0.0)
     ca, sa = math.cos(-rot), math.sin(-rot)
     # into pad-local frame
     lx = (px - cx) * ca - (py - cy) * sa
     ly = (px - cx) * sa + (py - cy) * ca
     hx, hy = pad.size_x / 2, pad.size_y / 2
-    clx = max(-hx, min(hx, lx))
-    cly = max(-hy, min(hy, ly))
+    cr = _pad_corner_radius_mod(pad)
+    if cr > 0:
+        # Rounded rect: clamp to the inner rect (half-extents shrunk by cr),
+        # then push out to the arc radius when in a corner region.
+        ihx, ihy = hx - cr, hy - cr
+        clx = max(-ihx, min(ihx, lx))
+        cly = max(-ihy, min(ihy, ly))
+        # If the clamped point is at an inner corner, the nearest outline point
+        # is on the arc: extend from the corner centre by cr.
+        if abs(lx) > ihx and abs(ly) > ihy:
+            ddx = lx - clx
+            ddy = ly - cly
+            dd = math.hypot(ddx, ddy)
+            if dd > 1e-12:
+                clx += ddx / dd * cr
+                cly += ddy / dd * cr
+            else:
+                clx += cr
+                cly += cr
+    else:
+        clx = max(-hx, min(hx, lx))
+        cly = max(-hy, min(hy, ly))
     # back to board frame
     ca2, sa2 = math.cos(rot), math.sin(rot)
     tx = cx + clx * ca2 - cly * sa2
