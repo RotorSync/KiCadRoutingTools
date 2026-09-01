@@ -102,7 +102,7 @@ class GridRouteConfig:
     layers: List[str] = field(default_factory=lambda: ['F.Cu', 'B.Cu'])
     max_iterations: int = 200000
     max_probe_iterations: int = 5000  # Quick probe per direction to detect stuck routes
-    heuristic_weight: float = 2.3  # (#586: 1.9 -> 2.3, corpus dose-response peak)
+    heuristic_weight: float = 1.9  # (2026-08-31 sweep: 2.3 -> 1.9; history in routing_defaults.HEURISTIC_WEIGHT)
     # #589 rough-pass probe marker: the result is a HINT (predicted path),
     # never shipped copper, so ship-safety rejects (the #157 terminal-bridge
     # short gate) must not veto it -- on a fanned board the probe map

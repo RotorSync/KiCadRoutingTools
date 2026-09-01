@@ -104,7 +104,13 @@ STITCH_PITCH = 20.0  # mm
 
 # Algorithm parameters
 MAX_ITERATIONS = 200000
-HEURISTIC_WEIGHT = 2.3  # 1.9 -> 2.3: #586 corpus dose-response peak (-30 verdict, DRC -67, cpu/mem ~0.85x; 1.7 and 2.5 both worse)
+HEURISTIC_WEIGHT = 1.9  # 2.3 -> 1.9: 2026-08-31 8-board faithful-chain sweep (carrier_lab/hw_sweep_findings.md):
+# equal-or-better connectivity/DRC on all 8 boards, faster on all 8 (greedy paths were feeding the
+# rip-up/rescue loops that dominate wall time), jog/bends better on all 8; replicated on a second
+# machine/arch. DIRECTLY CONTRADICTS #586 (1.9 -> 2.3: -30 verdict, DRC -67, "1.7 and 2.5 both
+# worse") -- #586 predates the 283-commit merge, SI enforcement default-ON, and the rescue-loop
+# evolution, so that landscape no longer exists. 1.5/1.2 measured better still on completion but
+# expose two latent writer bugs (via-near-BGA-pad, same-net drill spacing); re-evaluate after those.
 PROXIMITY_HEURISTIC_FACTOR = 0.02  # restored from 0 (1af3096): "quality-neutral"
 # was measured on a CLI that never applied it -- route.py's argparse still passed an
 # explicit 0.02, which overrides the module default, so the corpus kept routing at 0.02

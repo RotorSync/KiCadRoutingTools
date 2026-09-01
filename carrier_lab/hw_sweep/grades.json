@@ -1,0 +1,830 @@
+{
+ "base": {
+  "glasgow": {
+   "conn": 9,
+   "drc": 0,
+   "final": 58.88,
+   "subs": {
+    "bends": 67.07581839921355,
+    "fragmentation": 68.78278057600767,
+    "jog_chains": 38.5316,
+    "layer_direction": 66.43342757633141,
+    "pad_entry": 47.26426076833528,
+    "parallel": 53.107909235164875,
+    "si_coupling": 94.50324627141006,
+    "stubs": 2.1556572187495333e-05,
+    "vias": 44.83938365380984
+   },
+   "unrouted": 1
+  },
+  "haasoscope": {
+   "conn": 10,
+   "drc": 1,
+   "final": 68.58,
+   "subs": {
+    "bends": 80.33532746408136,
+    "fragmentation": 82.42922550384775,
+    "jog_chains": 58.4734,
+    "layer_direction": 92.36874511162557,
+    "pad_entry": 84.7457627118644,
+    "parallel": 54.629925352409856,
+    "si_coupling": 80.28832242152534,
+    "stubs": 0.11137751478448032,
+    "vias": 41.33416344282399
+   },
+   "unrouted": 1
+  },
+  "interf_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 64.33,
+   "subs": {
+    "bends": 83.124709318319,
+    "fragmentation": 85.9398173809758,
+    "jog_chains": 68.6917,
+    "layer_direction": 61.19213222159105,
+    "pad_entry": 30.000000000000004,
+    "parallel": 46.70041334055832,
+    "si_coupling": 100.0,
+    "stubs": 0.13603680375478938,
+    "vias": 53.892340809379334
+   },
+   "unrouted": 0
+  },
+  "kitdev": {
+   "conn": 0,
+   "drc": 1,
+   "final": 63.59,
+   "subs": {
+    "bends": 84.13612933607955,
+    "fragmentation": 84.88225878080966,
+    "jog_chains": 67.8105,
+    "layer_direction": 60.09335776358046,
+    "pad_entry": 41.5954415954416,
+    "parallel": 45.02374575679722,
+    "si_coupling": 98.44856076041631,
+    "stubs": 0.0008719052362273869,
+    "vias": 44.61868163787221
+   },
+   "unrouted": 0
+  },
+  "sonde_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 69.29,
+   "subs": {
+    "bends": 87.09756060260479,
+    "fragmentation": 87.93712083345994,
+    "jog_chains": 75.7458,
+    "layer_direction": 60.36161677707388,
+    "pad_entry": 34.285714285714285,
+    "parallel": 38.543846836772985,
+    "si_coupling": 100.0,
+    "stubs": 21.224797382674303,
+    "vias": 82.5052966980536
+   },
+   "unrouted": 0
+  },
+  "tigard": {
+   "conn": 0,
+   "drc": 0,
+   "final": 63.01,
+   "subs": {
+    "bends": 72.93163711433525,
+    "fragmentation": 73.97013888269574,
+    "jog_chains": 48.3165,
+    "layer_direction": 56.42604456677995,
+    "pad_entry": 65.58265582655827,
+    "parallel": 50.001164978411715,
+    "si_coupling": 93.29161066717408,
+    "stubs": 3.337326996032608,
+    "vias": 56.63021830238761
+   },
+   "unrouted": 0
+  },
+  "ulx3s": {
+   "conn": 8,
+   "drc": 0,
+   "final": 58.95,
+   "subs": {
+    "bends": 73.10815805880483,
+    "fragmentation": 76.1639737173063,
+    "jog_chains": 47.5098,
+    "layer_direction": 72.02048035216126,
+    "pad_entry": 44.14893617021277,
+    "parallel": 53.46079733978222,
+    "si_coupling": 74.4501806798028,
+    "stubs": 7.15703401158952e-05,
+    "vias": 40.207722327556304
+   },
+   "unrouted": 2
+  },
+  "watchy": {
+   "conn": 0,
+   "drc": 0,
+   "final": 53.5,
+   "subs": {
+    "bends": 69.01400327627758,
+    "fragmentation": 69.83662471337094,
+    "jog_chains": 41.3383,
+    "layer_direction": 52.54765559393712,
+    "pad_entry": 55.08474576271186,
+    "parallel": 52.345943084309845,
+    "si_coupling": 28.992877198919388,
+    "stubs": 1.925470177538692,
+    "vias": 52.98188486897525
+   },
+   "unrouted": 0
+  }
+ },
+ "hw12": {
+  "glasgow": {
+   "conn": 2,
+   "drc": 2,
+   "final": 62.86,
+   "subs": {
+    "bends": 73.9687595013765,
+    "fragmentation": 74.14941693395795,
+    "jog_chains": 47.8195,
+    "layer_direction": 62.85292927493202,
+    "pad_entry": 61.9767441860465,
+    "parallel": 51.15437456934482,
+    "si_coupling": 98.01398631506792,
+    "stubs": 2.504516372327622e-05,
+    "vias": 48.10173918432128
+   },
+   "unrouted": 1
+  },
+  "haasoscope": {
+   "conn": 2,
+   "drc": 0,
+   "final": 71.64,
+   "subs": {
+    "bends": 86.52553308487708,
+    "fragmentation": 87.02302462974907,
+    "jog_chains": 69.923,
+    "layer_direction": 88.78431921303928,
+    "pad_entry": 86.66666666666667,
+    "parallel": 53.329653574663105,
+    "si_coupling": 90.2892301608292,
+    "stubs": 0.07848640813109317,
+    "vias": 43.39632952402351
+   },
+   "unrouted": 0
+  },
+  "interf_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 67.17,
+   "subs": {
+    "bends": 91.15589605698202,
+    "fragmentation": 91.65646109515883,
+    "jog_chains": 81.1513,
+    "layer_direction": 60.31378238787315,
+    "pad_entry": 31.11111111111111,
+    "parallel": 47.01736252812232,
+    "si_coupling": 100.0,
+    "stubs": 0.23578620064902328,
+    "vias": 58.84266315583204
+   },
+   "unrouted": 0
+  },
+  "kitdev": {
+   "conn": 0,
+   "drc": 0,
+   "final": 64.61,
+   "subs": {
+    "bends": 86.10317634476657,
+    "fragmentation": 85.94715917889074,
+    "jog_chains": 70.4691,
+    "layer_direction": 58.51663944747302,
+    "pad_entry": 43.732193732193736,
+    "parallel": 46.07929621164076,
+    "si_coupling": 100.0,
+    "stubs": 0.003535750085040998,
+    "vias": 47.633838033180645
+   },
+   "unrouted": 0
+  },
+  "sonde_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 65.94,
+   "subs": {
+    "bends": 88.82134075873176,
+    "fragmentation": 88.87706812545063,
+    "jog_chains": 76.2297,
+    "layer_direction": 57.90692688820085,
+    "pad_entry": 42.85714285714286,
+    "parallel": 42.70835059912705,
+    "si_coupling": 49.75048369092991,
+    "stubs": 18.268352405273465,
+    "vias": 83.56986649599261
+   },
+   "unrouted": 0
+  },
+  "tigard": {
+   "conn": 0,
+   "drc": 0,
+   "final": 65.58,
+   "subs": {
+    "bends": 77.31705413398066,
+    "fragmentation": 77.43120425239607,
+    "jog_chains": 54.764,
+    "layer_direction": 66.1128175173344,
+    "pad_entry": 63.143631436314365,
+    "parallel": 48.03464562646418,
+    "si_coupling": 99.34475614637729,
+    "stubs": 2.127973643837717,
+    "vias": 61.49129845000262
+   },
+   "unrouted": 0
+  },
+  "ulx3s": {
+   "conn": 2,
+   "drc": 0,
+   "final": 61.03,
+   "subs": {
+    "bends": 79.05981734775257,
+    "fragmentation": 80.78277107021349,
+    "jog_chains": 56.0551,
+    "layer_direction": 72.7962079124095,
+    "pad_entry": 46.61354581673307,
+    "parallel": 52.471976296987656,
+    "si_coupling": 73.50931890375533,
+    "stubs": 1.8553913626159783e-05,
+    "vias": 41.57702821461657
+   },
+   "unrouted": 0
+  },
+  "watchy": {
+   "conn": 0,
+   "drc": 0,
+   "final": 57.33,
+   "subs": {
+    "bends": 72.8447066459044,
+    "fragmentation": 72.13193650929806,
+    "jog_chains": 46.4345,
+    "layer_direction": 58.618343295212725,
+    "pad_entry": 53.38983050847458,
+    "parallel": 49.285873216675974,
+    "si_coupling": 55.27651783058338,
+    "stubs": 2.3517745856009107,
+    "vias": 55.366527667910525
+   },
+   "unrouted": 0
+  }
+ },
+ "hw15": {
+  "glasgow": {
+   "conn": 3,
+   "drc": 0,
+   "final": 62.5,
+   "subs": {
+    "bends": 69.96298564598216,
+    "fragmentation": 71.18879972718308,
+    "jog_chains": 42.2689,
+    "layer_direction": 65.41163499693498,
+    "pad_entry": 64.9592549476135,
+    "parallel": 54.01857146160724,
+    "si_coupling": 99.02736102973928,
+    "stubs": 1.5190659675689639e-05,
+    "vias": 47.09627898744898
+   },
+   "unrouted": 0
+  },
+  "haasoscope": {
+   "conn": 2,
+   "drc": 0,
+   "final": 70.97,
+   "subs": {
+    "bends": 82.87013799690439,
+    "fragmentation": 84.29957652102622,
+    "jog_chains": 62.7266,
+    "layer_direction": 89.88465832949315,
+    "pad_entry": 90.0,
+    "parallel": 52.84801880158598,
+    "si_coupling": 93.57377718838005,
+    "stubs": 0.033546262790251184,
+    "vias": 42.979606748951625
+   },
+   "unrouted": 3
+  },
+  "interf_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 66.25,
+   "subs": {
+    "bends": 88.42293401407602,
+    "fragmentation": 89.73714033769961,
+    "jog_chains": 76.933,
+    "layer_direction": 61.73410048392458,
+    "pad_entry": 31.11111111111111,
+    "parallel": 46.95345202507269,
+    "si_coupling": 100.0,
+    "stubs": 0.11137751478448032,
+    "vias": 55.38235798307587
+   },
+   "unrouted": 0
+  },
+  "kitdev": {
+   "conn": 0,
+   "drc": 0,
+   "final": 63.95,
+   "subs": {
+    "bends": 85.79219831605681,
+    "fragmentation": 86.22881623787735,
+    "jog_chains": 70.0384,
+    "layer_direction": 63.22631698304066,
+    "pad_entry": 42.87749287749287,
+    "parallel": 45.37555272503474,
+    "si_coupling": 91.65945984069762,
+    "stubs": 0.0024916009731503204,
+    "vias": 46.73085418718351
+   },
+   "unrouted": 0
+  },
+  "sonde_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 62.5,
+   "subs": {
+    "bends": 87.78689422425198,
+    "fragmentation": 88.47512610061379,
+    "jog_chains": 73.748,
+    "layer_direction": 58.71672982854375,
+    "pad_entry": 37.142857142857146,
+    "parallel": 42.57921850640787,
+    "si_coupling": 21.537297206741695,
+    "stubs": 20.189651799465537,
+    "vias": 83.56986649599261
+   },
+   "unrouted": 0
+  },
+  "tigard": {
+   "conn": 0,
+   "drc": 0,
+   "final": 62.76,
+   "subs": {
+    "bends": 75.30310639463126,
+    "fragmentation": 75.84237750128086,
+    "jog_chains": 50.7796,
+    "layer_direction": 64.34545164979845,
+    "pad_entry": 65.04065040650406,
+    "parallel": 50.3964057904982,
+    "si_coupling": 74.96641295672612,
+    "stubs": 1.4264233908999255,
+    "vias": 59.59210668709215
+   },
+   "unrouted": 0
+  },
+  "ulx3s": {
+   "conn": 4,
+   "drc": 0,
+   "final": 59.94,
+   "subs": {
+    "bends": 76.78463541673769,
+    "fragmentation": 79.00356754721167,
+    "jog_chains": 52.8025,
+    "layer_direction": 74.24304789234755,
+    "pad_entry": 45.2855245683931,
+    "parallel": 52.86697724119562,
+    "si_coupling": 70.73526073515085,
+    "stubs": 1.5969501451937285e-05,
+    "vias": 40.05493036054153
+   },
+   "unrouted": 0
+  },
+  "watchy": {
+   "conn": 0,
+   "drc": 0,
+   "final": 54.41,
+   "subs": {
+    "bends": 71.15680785343675,
+    "fragmentation": 71.24472876858658,
+    "jog_chains": 44.8817,
+    "layer_direction": 56.2705495337972,
+    "pad_entry": 53.813559322033896,
+    "parallel": 50.21331535597673,
+    "si_coupling": 31.526491298194344,
+    "stubs": 2.3517745856009107,
+    "vias": 53.316154330650036
+   },
+   "unrouted": 0
+  }
+ },
+ "hw19": {
+  "glasgow": {
+   "conn": 4,
+   "drc": 0,
+   "final": 61.3,
+   "subs": {
+    "bends": 70.32677045662655,
+    "fragmentation": 71.63843272118525,
+    "jog_chains": 42.7672,
+    "layer_direction": 64.35499995787114,
+    "pad_entry": 61.46682188591386,
+    "parallel": 52.513061743149734,
+    "si_coupling": 92.16239518109752,
+    "stubs": 1.3074721950024548e-05,
+    "vias": 46.12525644731244
+   },
+   "unrouted": 0
+  },
+  "haasoscope": {
+   "conn": 5,
+   "drc": 0,
+   "final": 68.91,
+   "subs": {
+    "bends": 82.92523323427426,
+    "fragmentation": 84.04214203660119,
+    "jog_chains": 62.4384,
+    "layer_direction": 90.80780803935669,
+    "pad_entry": 83.05084745762711,
+    "parallel": 52.751459704443604,
+    "si_coupling": 82.19596275786122,
+    "stubs": 0.0452827182886797,
+    "vias": 40.90960498772206
+   },
+   "unrouted": 1
+  },
+  "interf_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 64.91,
+   "subs": {
+    "bends": 86.06193598780531,
+    "fragmentation": 88.07531751729644,
+    "jog_chains": 73.0765,
+    "layer_direction": 60.731344494467166,
+    "pad_entry": 27.222222222222225,
+    "parallel": 46.67166243462837,
+    "si_coupling": 100.0,
+    "stubs": 0.09586351536940199,
+    "vias": 55.214786679998426
+   },
+   "unrouted": 0
+  },
+  "kitdev": {
+   "conn": 0,
+   "drc": 1,
+   "final": 63.16,
+   "subs": {
+    "bends": 84.95928508341804,
+    "fragmentation": 85.52509909201734,
+    "jog_chains": 68.9512,
+    "layer_direction": 53.72265256437544,
+    "pad_entry": 41.45299145299145,
+    "parallel": 45.82226441808784,
+    "si_coupling": 96.92002811065822,
+    "stubs": 0.0013674196065680965,
+    "vias": 45.48085181321939
+   },
+   "unrouted": 0
+  },
+  "sonde_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 68.63,
+   "subs": {
+    "bends": 88.28048056420968,
+    "fragmentation": 88.63974454280046,
+    "jog_chains": 79.1216,
+    "layer_direction": 57.9798076674807,
+    "pad_entry": 28.57142857142857,
+    "parallel": 40.22610200659754,
+    "si_coupling": 100.0,
+    "stubs": 17.377394345044515,
+    "vias": 83.56986649599261
+   },
+   "unrouted": 0
+  },
+  "tigard": {
+   "conn": 0,
+   "drc": 0,
+   "final": 63.74,
+   "subs": {
+    "bends": 75.00509119269894,
+    "fragmentation": 75.44859669359305,
+    "jog_chains": 51.6139,
+    "layer_direction": 58.44732797562673,
+    "pad_entry": 65.31165311653116,
+    "parallel": 49.47022493912343,
+    "si_coupling": 95.13454815698404,
+    "stubs": 2.3517745856009107,
+    "vias": 54.452406708024355
+   },
+   "unrouted": 0
+  },
+  "ulx3s": {
+   "conn": 8,
+   "drc": 0,
+   "final": 61.17,
+   "subs": {
+    "bends": 76.15367855841455,
+    "fragmentation": 78.4958284660886,
+    "jog_chains": 52.1163,
+    "layer_direction": 72.94532482619094,
+    "pad_entry": 45.81673306772909,
+    "parallel": 51.929398169455744,
+    "si_coupling": 86.9916542583362,
+    "stubs": 3.927863545481039e-05,
+    "vias": 40.524502157604964
+   },
+   "unrouted": 1
+  },
+  "watchy": {
+   "conn": 0,
+   "drc": 0,
+   "final": 53.94,
+   "subs": {
+    "bends": 70.34691227881541,
+    "fragmentation": 70.35958275435871,
+    "jog_chains": 43.8766,
+    "layer_direction": 52.62743334289508,
+    "pad_entry": 52.966101694915245,
+    "parallel": 50.40236414870846,
+    "si_coupling": 35.11948785654193,
+    "stubs": 4.076220397836621,
+    "vias": 51.665633304730775
+   },
+   "unrouted": 0
+  }
+ },
+ "tc3000": {
+  "glasgow": {
+   "conn": 3,
+   "drc": 0,
+   "final": 61.11,
+   "subs": {
+    "bends": 70.53141567471678,
+    "fragmentation": 71.72564528168573,
+    "jog_chains": 42.6097,
+    "layer_direction": 63.290299510166534,
+    "pad_entry": 60.23255813953489,
+    "parallel": 53.199643844407085,
+    "si_coupling": 93.16631096269992,
+    "stubs": 3.066941294563555e-06,
+    "vias": 45.334080333497496
+   },
+   "unrouted": 0
+  },
+  "haasoscope": {
+   "conn": 8,
+   "drc": 1,
+   "final": 68.0,
+   "subs": {
+    "bends": 83.67429377561653,
+    "fragmentation": 84.80671620422578,
+    "jog_chains": 63.1791,
+    "layer_direction": 92.33499285948807,
+    "pad_entry": 79.3103448275862,
+    "parallel": 53.58653159948474,
+    "si_coupling": 72.08112248809174,
+    "stubs": 0.038975196825275484,
+    "vias": 42.24825466014893
+   },
+   "unrouted": 2
+  },
+  "interf_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 66.32,
+   "subs": {
+    "bends": 89.27317429743667,
+    "fragmentation": 90.25313288067979,
+    "jog_chains": 77.1891,
+    "layer_direction": 63.62793790425698,
+    "pad_entry": 31.11111111111111,
+    "parallel": 45.63063267819835,
+    "si_coupling": 100.0,
+    "stubs": 0.11708796207911744,
+    "vias": 54.384504900322796
+   },
+   "unrouted": 0
+  },
+  "kitdev": {
+   "conn": 0,
+   "drc": 0,
+   "final": 63.21,
+   "subs": {
+    "bends": 85.69882951250032,
+    "fragmentation": 85.96560769937919,
+    "jog_chains": 70.5063,
+    "layer_direction": 58.39966223401143,
+    "pad_entry": 39.458689458689456,
+    "parallel": 44.13323309462315,
+    "si_coupling": 95.19050372062387,
+    "stubs": 0.005274719301551385,
+    "vias": 44.193745040029555
+   },
+   "unrouted": 0
+  },
+  "sonde_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 69.67,
+   "subs": {
+    "bends": 88.87032257959409,
+    "fragmentation": 89.32247886246172,
+    "jog_chains": 79.3791,
+    "layer_direction": 58.37389724364941,
+    "pad_entry": 34.285714285714285,
+    "parallel": 41.060234166989545,
+    "si_coupling": 100.0,
+    "stubs": 18.268352405273465,
+    "vias": 82.5052966980536
+   },
+   "unrouted": 0
+  },
+  "tigard": {
+   "conn": 0,
+   "drc": 0,
+   "final": 63.39,
+   "subs": {
+    "bends": 75.80221080663078,
+    "fragmentation": 76.41425092110208,
+    "jog_chains": 51.9734,
+    "layer_direction": 57.839852766308134,
+    "pad_entry": 65.31165311653116,
+    "parallel": 50.1902140630292,
+    "si_coupling": 91.93613819749118,
+    "stubs": 3.0197383422318502,
+    "vias": 51.74597527081123
+   },
+   "unrouted": 0
+  },
+  "ulx3s": {
+   "conn": 3,
+   "drc": 0,
+   "final": 60.3,
+   "subs": {
+    "bends": 78.08355545436136,
+    "fragmentation": 79.84578869917497,
+    "jog_chains": 54.7385,
+    "layer_direction": 70.25731109787691,
+    "pad_entry": 42.23107569721115,
+    "parallel": 52.80747880764538,
+    "si_coupling": 80.91880026377105,
+    "stubs": 0.00010677040100347826,
+    "vias": 37.48040280969005
+   },
+   "unrouted": 1
+  },
+  "watchy": {
+   "conn": 0,
+   "drc": 0,
+   "final": 52.79,
+   "subs": {
+    "bends": 71.22901629799087,
+    "fragmentation": 71.06532558597267,
+    "jog_chains": 44.2079,
+    "layer_direction": 54.78271743406508,
+    "pad_entry": 52.966101694915245,
+    "parallel": 50.037931310612,
+    "si_coupling": 15.62275001147681,
+    "stubs": 2.23707718561656,
+    "vias": 52.98188486897525
+   },
+   "unrouted": 0
+  }
+ },
+ "tc5000": {
+  "glasgow": {
+   "conn": 3,
+   "drc": 1,
+   "final": 61.67,
+   "subs": {
+    "bends": 71.731364991101,
+    "fragmentation": 72.36765646825295,
+    "jog_chains": 44.6613,
+    "layer_direction": 61.610354493005225,
+    "pad_entry": 61.3953488372093,
+    "parallel": 53.05137872855457,
+    "si_coupling": 96.95453778302284,
+    "stubs": 1.0704676948428807e-05,
+    "vias": 43.235056856534534
+   },
+   "unrouted": 0
+  },
+  "haasoscope": {
+   "conn": 7,
+   "drc": 0,
+   "final": 67.48,
+   "subs": {
+    "bends": 84.46508632644544,
+    "fragmentation": 85.24209464188696,
+    "jog_chains": 65.2908,
+    "layer_direction": 91.74447450888415,
+    "pad_entry": 78.33333333333333,
+    "parallel": 52.83609049596036,
+    "si_coupling": 68.21061418753219,
+    "stubs": 0.015846132511575125,
+    "vias": 39.013484283721965
+   },
+   "unrouted": 1
+  },
+  "interf_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 65.6,
+   "subs": {
+    "bends": 90.88048619690575,
+    "fragmentation": 91.53499361406855,
+    "jog_chains": 80.0137,
+    "layer_direction": 54.22807038424676,
+    "pad_entry": 27.222222222222225,
+    "parallel": 46.325974588367664,
+    "si_coupling": 100.0,
+    "stubs": 0.09118819655545163,
+    "vias": 55.71902781862548
+   },
+   "unrouted": 0
+  },
+  "kitdev": {
+   "conn": 0,
+   "drc": 0,
+   "final": 61.91,
+   "subs": {
+    "bends": 87.0085723088189,
+    "fragmentation": 86.94903159193396,
+    "jog_chains": 73.225,
+    "layer_direction": 54.79137304316867,
+    "pad_entry": 40.17094017094017,
+    "parallel": 44.53921716435879,
+    "si_coupling": 79.94670186734473,
+    "stubs": 0.004107955522530072,
+    "vias": 42.398626146714186
+   },
+   "unrouted": 0
+  },
+  "sonde_u": {
+   "conn": 0,
+   "drc": 0,
+   "final": 69.64,
+   "subs": {
+    "bends": 88.94911425871005,
+    "fragmentation": 89.37355667865123,
+    "jog_chains": 79.2389,
+    "layer_direction": 58.23772458096329,
+    "pad_entry": 32.85714285714286,
+    "parallel": 42.53571897973523,
+    "si_coupling": 100.0,
+    "stubs": 18.268352405273465,
+    "vias": 82.5052966980536
+   },
+   "unrouted": 0
+  },
+  "tigard": {
+   "conn": 0,
+   "drc": 0,
+   "final": 63.56,
+   "subs": {
+    "bends": 75.63459090157932,
+    "fragmentation": 76.07506689911224,
+    "jog_chains": 51.4072,
+    "layer_direction": 59.394048839803126,
+    "pad_entry": 68.02168021680217,
+    "parallel": 49.91093282728964,
+    "si_coupling": 89.57355989612435,
+    "stubs": 3.337326996032608,
+    "vias": 51.543447250908294
+   },
+   "unrouted": 0
+  },
+  "ulx3s": {
+   "conn": 6,
+   "drc": 0,
+   "final": 61.09,
+   "subs": {
+    "bends": 79.66956618006836,
+    "fragmentation": 80.90370985385734,
+    "jog_chains": 57.7609,
+    "layer_direction": 72.13225507175179,
+    "pad_entry": 42.62734584450401,
+    "parallel": 52.427428447300386,
+    "si_coupling": 80.91960945581964,
+    "stubs": 0.00010677040100347826,
+    "vias": 39.09069549146084
+   },
+   "unrouted": 5
+  },
+  "watchy": {
+   "conn": 0,
+   "drc": 0,
+   "final": 55.35,
+   "subs": {
+    "bends": 72.7008992042768,
+    "fragmentation": 72.38750830597839,
+    "jog_chains": 47.9259,
+    "layer_direction": 58.984196128556746,
+    "pad_entry": 53.38983050847458,
+    "parallel": 48.935621796149235,
+    "si_coupling": 34.027335469404775,
+    "stubs": 2.3517745856009107,
+    "vias": 54.331669713846665
+   },
+   "unrouted": 0
+  }
+ }
+}
