@@ -2152,6 +2152,31 @@ def route_net_with_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteCo
     # #535 off-pad escape rung: the pad->via stub ships with its via.
     new_segments = list(new_segments) + unblock_segments
 
+    # Same-net drill hole-to-hole gate (#468 doctrine, writer-gap findings
+    # 2026-09-01): the A* prices no spacing between the path's own vias or
+    # against the net's committed barrels (same-net copper is deliberately
+    # not an obstacle; the hole-to-hole floor is net-blind). Reject like the
+    # #157 short gate above so callers fall to their next option. Plan
+    # probes are hints, never shipped copper (#589) -- exempt.
+    if not config.plan_probe:
+        _h2h_se = _same_net_via_drill_pairs(
+            new_vias, [_bv for _bv in pcb_data.vias if _bv.net_id == net_id],
+            config)
+        if _h2h_se:
+            _bv, _bo, _bd, _bneed = _h2h_se[0]
+            print(f"  {YELLOW}same-net via pair would violate drill "
+                  f"hole-to-hole: ({_bv.x:.2f},{_bv.y:.2f}) {_bd:.3f}mm from "
+                  f"({_bo.x:.2f},{_bo.y:.2f}), need {_bneed:.3f}mm -- "
+                  f"rejecting the route rather than shipping it{RESET}")
+            return {
+                'failed': True,
+                'iterations': total_iterations,
+                'blocked_cells_forward': [],
+                'blocked_cells_backward': [],
+                'iterations_forward': fwd_iters,
+                'iterations_backward': bwd_iters,
+            }
+
     return {
         'new_segments': new_segments,
         'new_vias': new_vias,
@@ -4169,6 +4194,23 @@ def route_multipoint_main(
     vias = list(vias) + main_unblock_vias
     segments = list(segments) + main_unblock_segments
 
+    # Same-net drill hole-to-hole gate (#468 doctrine, writer-gap findings
+    # 2026-09-01): the path's own vias and the net's committed barrels are
+    # unpriced by the A* (same-net copper is deliberately not an obstacle,
+    # but the hole-to-hole floor is net-blind). Decline the edge like the
+    # terminal-bridge gate above -- Phase 3's island machinery retries it
+    # with its own gate (which blocks the cell and re-asks) rather than
+    # shipping a fab defect.
+    _h2h_p1 = _same_net_via_drill_pairs(
+        vias, [_bv for _bv in pcb_data.vias if _bv.net_id == net_id], config)
+    if _h2h_p1:
+        _bv, _bo, _bd, _bneed = _h2h_p1[0]
+        print(f"  {YELLOW}Phase 1 same-net via pair would violate drill "
+              f"hole-to-hole: ({_bv.x:.2f},{_bv.y:.2f}) {_bd:.3f}mm from "
+              f"({_bo.x:.2f},{_bo.y:.2f}), need {_bneed:.3f}mm -- failing "
+              f"the edge rather than shipping it{RESET}")
+        return {'failed': True, 'iterations': total_iterations}
+
     print(f"  Phase 1 routed in {total_iterations} iterations, {len(segments)} segments")
 
     return {
@@ -4255,6 +4297,39 @@ def get_all_segment_tap_points(
     # Return sorted list for deterministic iteration
     return sorted([(gx, gy, layer_idx, ox, oy)
                    for (gx, gy, layer_idx), (ox, oy) in tap_points.items()])
+
+
+def _same_net_via_drill_pairs(new_vias, other_vias, config):
+    """Same-net via pairs among/against `new_vias` violating the fab drill
+    hole-to-hole floor: [(new_via, other_via, dist_mm, need_mm), ...].
+
+    KiCad's hole-to-hole rule is net-independent, but the A* deliberately
+    does not price same-net copper -- so nothing spaces a path's own vias
+    (a dive under an obstacle that pops back up 1-2 cells later), and the
+    writer-gap findings 2026-09-01 measured shipped pairs (carrier GNDA
+    0.224mm apart vs 0.40 needed). `new_vias` are checked against
+    `other_vias` AND against each other, earlier-first, so for an own-path
+    pair the SECOND via is the reported new_via (the one to block/decline).
+    Coincident barrels (< 1um) are the reuse/stacked case, handled by via
+    dedup -- exempt here."""
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    if h2h <= 0 or not new_vias:
+        return []
+    out = []
+    pool = list(other_vias)
+    for v in new_vias:
+        for o in pool:
+            if o.net_id != v.net_id or o is v:
+                continue
+            d = math.hypot(o.x - v.x, o.y - v.y)
+            if d < 1e-6:
+                continue
+            need = ((getattr(v, 'drill', 0) or config.via_drill) / 2.0
+                    + (getattr(o, 'drill', 0) or config.via_drill) / 2.0 + h2h)
+            if d < need:
+                out.append((v, o, d, need))
+        pool.append(v)
+    return out
 
 
 def route_multipoint_taps(
@@ -4503,6 +4578,7 @@ def _route_multipoint_taps_impl(
     edges_routed = 0
     failed_edges = set()  # Track edges that failed to route
     failed_edge_blocking = {}  # edge_key -> (blocked_cells, tgt_xy, {'fwd','bwd','extra'} dir split)
+    _h2h_declines = {}  # edge_key -> same-net drill-gate retries (#468 gate below)
     fallback_attempted = set()  # Pads attempted directly after their MST edge chain failed
     max_passes = len(remaining_edges) * 2 + len(pad_info)  # Safety limit
 
@@ -4893,6 +4969,46 @@ def _route_multipoint_taps_impl(
         # instead ships its pad->via stub alongside.
         vias = list(vias) + unblock_vias
         segments = list(segments) + unblock_segments
+        # Same-net drill hole-to-hole gate (#468 doctrine, writer-gap findings
+        # 2026-09-01): nothing prices the spacing between a path's OWN vias or
+        # against the net's committed barrels (same-net copper is deliberately
+        # not an A* obstacle, but the hole-to-hole floor is net-blind).
+        # Exact-check the emitted vias; on a violation block the offending
+        # cell and RETRY the edge -- the block forces the next search to
+        # space its transitions -- and DECLINE the edge after repeated
+        # violations rather than ship a fab defect.
+        _h2h_bad = _same_net_via_drill_pairs(
+            vias, all_vias + [_bv for _bv in pcb_data.vias
+                              if _bv.net_id == net_id], config)
+        if _h2h_bad:
+            edge_key = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
+            _n_dec = _h2h_declines.get(edge_key, 0) + 1
+            _h2h_declines[edge_key] = _n_dec
+            for _bv, _bo, _bd, _bneed in _h2h_bad:
+                _bgx, _bgy = coord.to_grid(_bv.x, _bv.y)
+                obstacles.add_blocked_via(_bgx, _bgy)
+                if _small_rung_on:
+                    obstacles.add_blocked_via_small(_bgx, _bgy)
+                if _ring_cells is not None:
+                    _ring_cells.append((_bgx, _bgy))
+            _bv, _bo, _bd, _bneed = _h2h_bad[0]
+            _act = ('retrying the edge with the cell blocked'
+                    if _n_dec <= 2 else 'declining the edge')
+            print(f"      {YELLOW}same-net via pair would violate drill "
+                  f"hole-to-hole: ({_bv.x:.2f},{_bv.y:.2f}) {_bd:.3f}mm from "
+                  f"({_bo.x:.2f},{_bo.y:.2f}), need {_bneed:.3f}mm -- "
+                  f"{_act}{RESET}")
+            if _n_dec <= 2:
+                continue  # neither routed nor failed: same edge re-selected
+            failed_edges.add(edge_key)
+            blocked_cells = list(blocked_cells) + _via_conflict_extra
+            if blocked_cells:
+                failed_edge_blocking[edge_key] = (
+                    blocked_cells, (tgt_x, tgt_y),
+                    {'fwd': list(forward_blocked),
+                     'bwd': list(backward_blocked),
+                     'extra': list(_via_conflict_extra)})
+            continue
         # A tap edge that launches from an off-grid tap point an earlier edge
         # already bridged re-emits that edge's endpoint connector (path[0]
         # maps through tap_point_map back to the sampled copper's ORIGINAL

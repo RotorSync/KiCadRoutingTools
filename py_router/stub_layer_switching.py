@@ -850,6 +850,50 @@ def switch_boxed_stub_near(pcb_data: PCBData, net_id: int,
     return None
 
 
+def pad_via_drill_conflict(pad_x: float, pad_y: float, via_drill: float,
+                           net_id: int, pcb_data: PCBData,
+                           config: GridRouteConfig) -> str:
+    """Reason string when a via hole drilled at (pad_x, pad_y) would violate
+    the fab hole-to-hole floor against an EXISTING drill hole, else "".
+
+    KiCad's hole-to-hole rule is net-independent, but every clearance funnel
+    this module owned excluded the via's OWN net -- so a layer-switch pad via
+    could be drilled within hole-to-hole of the net's own earlier via (the
+    ulx3s SDRAM_D15 0.10mm drill pair, writer-gap findings 2026-09-01).
+    Checks all vias and all drilled pads on ANY net; a coincident SAME-NET
+    barrel is exempt (that is the reuse case -- no second hole is drilled,
+    see apply_bare_pad_target_via / _reuse_nearby_same_net_via)."""
+    h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
+    if h2h <= 0:
+        return ""
+    for v in pcb_data.vias:
+        d = math.hypot(v.x - pad_x, v.y - pad_y)
+        if d < 1e-6 and v.net_id == net_id:
+            continue  # same-net barrel already at the pad: reused, not re-drilled
+        req = via_drill / 2.0 + (getattr(v, 'drill', 0) or config.via_drill) / 2.0 + h2h
+        if d < req:
+            net = pcb_data.nets.get(v.net_id)
+            nm = net.name if net else f"net {v.net_id}"
+            return (f"pad via hole at ({pad_x:.2f},{pad_y:.2f}) within "
+                    f"{d:.3f}mm of {nm} via hole (hole-to-hole needs {req:.3f}mm)")
+    from kicad_parser import pad_drill_capsule
+    for plist in pcb_data.pads_by_net.values():
+        for pad in plist:
+            if not pad.drill or pad.drill <= 0:
+                continue
+            (p1x, p1y), (p2x, p2y), prad = pad_drill_capsule(pad)
+            d = point_to_segment_distance_seg(
+                pad_x, pad_y,
+                Segment(start_x=p1x, start_y=p1y, end_x=p2x, end_y=p2y,
+                        width=0.0, layer='F.Cu', net_id=0))
+            req = via_drill / 2.0 + prad + h2h
+            if d < req:
+                return (f"pad via hole at ({pad_x:.2f},{pad_y:.2f}) within "
+                        f"{d:.3f}mm of pad {pad.component_ref}.{pad.pad_number} "
+                        f"drill (hole-to-hole needs {req:.3f}mm)")
+    return ""
+
+
 def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
                     config: GridRouteConfig, exclude_net_ids: Set[int]
                     ) -> Optional[Tuple[float, float]]:
@@ -860,6 +904,12 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
     0.3/0.25 rungs do -- and a stub that can layer-switch with a small via
     escapes a pocket the nominal via walls it into. Returns None when no
     size fits (the swap is then genuinely invalid).
+
+    Every rung must ALSO clear existing drill holes at the fab hole-to-hole
+    floor (pad_via_drill_conflict): the rule is net-independent, and the
+    foreign-copper funnel deliberately excludes the via's own net, so the
+    net's own earlier via was never priced here (#468 doctrine: DECLINE
+    rather than ship the violation).
 
     Deterministic pure function of board state: validate_swap and
     apply_stub_layer_switch both call it and get the same answer."""
@@ -881,6 +931,9 @@ def fitting_pad_via(pad_x: float, pad_y: float, net_id: int, pcb_data: PCBData,
         clear, _ = via_barrel_clear_of_foreign_copper(
             pad_x, pad_y, net_id, pcb_data, config, exclude_net_ids,
             via_size=v_dia)
+        if clear and pad_via_drill_conflict(pad_x, pad_y, v_drill, net_id,
+                                            pcb_data, config):
+            clear = False
         if clear:
             if i > 0:
                 if v_dia < ladder[0]['via_diameter'] - 1e-9:
