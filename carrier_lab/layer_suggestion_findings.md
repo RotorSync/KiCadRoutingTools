@@ -140,10 +140,59 @@ the SOURCE of the preferred layer. A trustworthy source would need:
   * Explicit plane/pour modeling -- the carrier's B.Cu dominance is plane-driven.
   * Geometric via placement at real pad-escape points.
 
+
+## Ground-truth control arm + response curve (added after co-session heads-up)
+
+Heads-up from the planner-validation session: the plan reproduces the right overall
+layer SPREAD but gets ~2/3 of INDIVIDUAL per-net assignments wrong (rp2350: 31%
+per-net agreement, 6.26 predicted vs 0.97 actual vias). To separate "layer bias as
+a mechanism does not help" from "the mechanism works but the plan's picks are
+bad", I added a CONTROL arm that biases the router toward the GROUND-TRUTH layer
+assignment (the layer each net actually routed on in ab2_base/routed_routed.kicad_pcb)
+via KICAD_LAYER_SUGGEST_SOURCE=ground_truth + KICAD_LAYER_SUGGEST_GT=<routed board>.
+
+### Response curve (carrier step-6 bulk, all arms on the same commit)
+
+| Arm | Source | Tax | vias | vias/net | connectivity | final |
+|---|---|---|---|---|---|---|
+| OFF | -- | -- | 1292 | 4.85 | MUX_A0P (HEAD-level) | 59.95 |
+| ON #1 | plan | 1.3 | 1312 | 4.91 | IPAD_DM (NEW) | 60.28 |
+| ON #2 | plan | 1.3 | 1326 | 4.98 | IPAD_DP+MUX_A0N (NEW) | 60.09 |
+| GT | ground_truth | 1.3 | 1305 | 4.89 | IPAD_DP+RTL_XO (NEW) | 59.64 |
+| GT tax1.1 | ground_truth | 1.1 | **1283** | **4.82** | MUX_A0P only (OK) | **60.41** |
+| GT tax2.0 | ground_truth | 2.0 | 1338 | 5.01 | RTL_XI+RTL_XO (NEW) | 60.09 |
+| PLAN tax1.1 | plan | 1.1 | 1296 | 4.88 | MUX_A0N+MUX_A0P (NEW) | 60.65 |
+
+### What the curve says
+
+1. **The mechanism CAN help, but only with perfect layer info AND very weak bias.**
+   The ground-truth arm at tax 1.1 is the ONLY arm that reduces vias below OFF
+   (4.82 vs 4.85, -0.6%), holds connectivity (only the HEAD-level MUX_A0P), and
+   improves final score (60.41 vs 59.95) and DRC (1 vs 2 violations).
+2. **The benefit is marginal and fragile.** -0.6% vias at tax 1.1; at tax 1.3 the
+   same ground-truth source already goes UP (4.89) and breaks connectivity. There is
+   no robust operating point.
+3. **The plan's picks negate even the weak-bias benefit.** The plan arm at tax 1.1
+   gives vias 4.88 (above OFF) and breaks connectivity (MUX_A0N NEW). The plan's
+   per-net layer choices are bad enough that biasing toward them never helps.
+4. **Timing regresses even on the winning arm.** GT tax1.1: user 427.44s / net-sum
+   197.8s vs OFF 361.62s / 174.3s (+18% / +13%). The marginal vias win costs real
+   time.
+
+### Verdict (updated)
+
+**Fragile -- knob stays default OFF.** The seam is proven worth keeping as a HARNESS
+(the per-net preferred-layer map + soft per-layer cost bias + source/strength knobs
+let us test ANY layer oracle later), but neither the plan source nor even the
+GROUND-TRUTH source delivers a robust win. The verdict is NOT "fix the planner"
+-- it is "layer bias as a mechanism does not help enough to justify its cost".
+The plan's layer picks are bad (co-session: 31% per-net agreement), but even perfect
+picks only buy -0.6% vias at a fragile weak-bias operating point.
+
 ## Gates
 
 - Full suite: tests/run_all.py --fast = **321 passed / 3 failed / 131 skipped** --
   exact baseline parity (the same 3 failures reproduce on clean HEAD:
   test_connection_width_grading, test_exact_clusters, test_plane_score).
-- New unit tests: tests/test_layer_suggestion.py = **7 passed / 0 failed**.
+- New unit tests: tests/test_layer_suggestion.py = **8 passed / 0 failed**.
 - No git push.

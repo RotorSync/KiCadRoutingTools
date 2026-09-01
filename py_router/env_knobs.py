@@ -104,6 +104,8 @@ def refresh() -> None:
     g['LAYER_SUGGEST'] = _s('KICAD_LAYER_SUGGEST', '0') == '1'
     g['LAYER_SUGGEST_TAX'] = _f('KICAD_LAYER_SUGGEST_TAX', 1.3)
     g['LAYER_SUGGEST_DEBUG'] = _s('KICAD_LAYER_SUGGEST_DEBUG', '') == '1'
+    g['LAYER_SUGGEST_SOURCE'] = _s('KICAD_LAYER_SUGGEST_SOURCE', 'plan')
+    g['LAYER_SUGGEST_GT'] = _s('KICAD_LAYER_SUGGEST_GT', '')
     # C2 phase-3 ordering: promote long-span / high-pad-count multipoint
     # nets earlier in the Phase-3 tap order (composite score =
     # boxed-in-risk + alpha*log(1+span) + beta*log(1+pads)). The power

@@ -97,3 +97,20 @@ def test_suggested_layer_not_in_stack_is_inert():
     _ACTIVE_PREFS[5] = 'In1.Cu'  # not in this run's stack
     out = apply_layer_suggestion(cfg, cfg, 5)
     assert out is cfg
+
+
+def test_ground_truth_source_dispatch():
+    """KICAD_LAYER_SUGGEST_SOURCE=ground_truth loads the map from a routed board."""
+    _set_knob(True)
+    os.environ['KICAD_LAYER_SUGGEST_SOURCE'] = 'ground_truth'
+    os.environ['KICAD_LAYER_SUGGEST_GT'] = 'carrier_lab/ab2_base/routed_routed.kicad_pcb'
+    env_knobs.refresh()
+    from global_planner.layer_suggestion import ground_truth_layer_prefs
+    prefs = ground_truth_layer_prefs(os.environ['KICAD_LAYER_SUGGEST_GT'])
+    assert len(prefs) > 0
+    # every pref is a real copper layer
+    assert all(l.endswith('.Cu') for l in prefs.values())
+    # restore
+    os.environ['KICAD_LAYER_SUGGEST_SOURCE'] = 'plan'
+    os.environ.pop('KICAD_LAYER_SUGGEST_GT', None)
+    env_knobs.refresh()

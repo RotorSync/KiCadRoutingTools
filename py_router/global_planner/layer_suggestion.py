@@ -80,6 +80,26 @@ def planner_layer_prefs(pcb_data,
     return prefs
 
 
+def ground_truth_layer_prefs(routed_board_path: str) -> Dict[int, str]:
+    """Load the per-net majority layer from an EXISTING routed board.
+
+    This is the CONTROL arm: instead of the plan's predicted layer, bias the
+    router toward the layer each net ACTUALLY routed on in a reference routed
+    board. Separates "layer bias as a mechanism does not help" from
+    "the mechanism works but the plan's layer picks are bad".
+    """
+    from kicad_parser import parse_kicad_pcb
+    from collections import defaultdict
+    pcb = parse_kicad_pcb(routed_board_path)
+    seglayer = defaultdict(Counter)
+    for s in pcb.segments:
+        seglayer[s.net_id][s.layer] += 1
+    prefs = {nid: c.most_common(1)[0][0] for nid, c in seglayer.items()}
+    global _ACTIVE_PREFS
+    _ACTIVE_PREFS = dict(prefs)
+    return prefs
+
+
 def apply_layer_suggestion(cfg_route, config, net_id: int):
     """Apply the per-net soft layer-suggestion bias to a routing config clone.
 

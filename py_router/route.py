@@ -1730,12 +1730,23 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # re-enter with final_reconcile=False and inherit the outer config's map.
     if env_knobs.LAYER_SUGGEST and final_reconcile and single_ended_nets:
         try:
-            from global_planner.layer_suggestion import planner_layer_prefs
-            _ls_prefs = planner_layer_prefs(
-                pcb_data, track_width, clearance, via_size=via_size)
+            from global_planner.layer_suggestion import (
+                planner_layer_prefs, ground_truth_layer_prefs)
+            _src = getattr(env_knobs, 'LAYER_SUGGEST_SOURCE', 'plan')
+            if _src == 'ground_truth':
+                _gt = getattr(env_knobs, 'LAYER_SUGGEST_GT', '')
+                if not _gt:
+                    raise ValueError('KICAD_LAYER_SUGGEST_SOURCE=ground_truth '
+                                     'requires KICAD_LAYER_SUGGEST_GT=<routed board>')
+                _ls_prefs = ground_truth_layer_prefs(_gt)
+                print(f"Layer suggestion: {len(_ls_prefs)} net(s) got a preferred "
+                      f"layer from GROUND TRUTH {_gt}")
+            else:
+                _ls_prefs = planner_layer_prefs(
+                    pcb_data, track_width, clearance, via_size=via_size)
+                print(f"Layer suggestion: {len(_ls_prefs)} net(s) got a preferred "
+                      f"layer from the Phase B planner")
             config._layer_suggestion_prefs = _ls_prefs
-            print(f"Layer suggestion: {len(_ls_prefs)} net(s) got a preferred "
-                  f"layer from the Phase B planner")
         except Exception as _e:  # pragma: no cover - must never break routing
             print(f"Layer suggestion skipped ({_e})")
 
