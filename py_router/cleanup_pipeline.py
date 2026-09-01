@@ -349,6 +349,40 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Via nudge: moved {_vn_moved} grazing via(s) on "
                   f"{_vn_nets} net(s) by their sub-grid clearance shortfall (#280)")
 
+        # Same-net via drill-hole merge: a rip-restore / partial-restore can
+        # leave two same-net vias within hole-to-hole of each other (one from
+        # the pre-rip route, one from the escape stub / partial piece) -- the
+        # per-net via map's hole-to-hole block never fires between same-net
+        # vias, and the nudge above only moves sub-cap grazes. Merge the pair
+        # into the survivor (reconnecting attached segments) so no illegal
+        # same-net drill spacing ships. Same mechanism as the plane fronts'
+        # merge_close_same_net_vias (hackrf C133.1, ulx3s SDRAM_D15).
+        #
+        # The write-list holds the SAME Via objects add_route_to_pcb_data
+        # appended to pcb_data.vias, so pass those objects (not dict copies --
+        # a copy would let the merge drop the via from pcb_data while the
+        # writer still re-emits it from results[].new_vias). The merge's
+        # all_new_vias[:] = kept rebinds only the list passed in, so after it
+        # returns we rebind each result's new_vias to the kept subset to keep
+        # board == write model.
+        _all_v = [v for r in results for v in (r.get('new_vias') or [])]
+        _all_s = [s for r in results for s in (r.get('new_segments') or [])]
+        if _all_v:
+            from pcb_modification import merge_close_same_net_vias
+            _merged = merge_close_same_net_vias(
+                _all_v, _all_s, pcb_data, config.hole_to_hole_clearance,
+                verbose=False)
+            if _merged:
+                _kept_ids = {id(v) for v in _all_v}
+                for _r in results:
+                    _nv = _r.get('new_vias') or []
+                    if any(id(v) not in _kept_ids for v in _nv):
+                        _r['new_vias'] = [v for v in _nv if id(v) in _kept_ids]
+                counts['vias_merged'] = _merged
+                _trace('via_merge')
+                print(f"{label}Via merge: merged {_merged} same-net via pair(s) "
+                      f"violating drill hole-to-hole (#230)")
+
     # #473 (extended): protected nets keep ALL their copper through EVERY
     # subtractive pass, not just the dead-end sweep. Cycle prune / strict
     # collapse / orphan islands / dangle trim on an unfinished net is the

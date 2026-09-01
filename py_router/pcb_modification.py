@@ -5895,6 +5895,14 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
     def _span(layers):
         return frozenset(layers or [])
 
+    def _via_get(nv, key, default=None):
+        # Duck-typed via access: the plane fronts pass dicts, the cleanup
+        # pipeline passes real Via objects (results[].new_vias). Both must
+        # merge identically.
+        if isinstance(nv, dict):
+            return nv.get(key, default)
+        return getattr(nv, key, default)
+
     def _seg_ends(s):
         if isinstance(s, dict):
             return s.get('start'), s.get('end')
@@ -5913,7 +5921,8 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
     # during routing, so pcb_data.vias already contains all_new_vias -- exclude
     # those positions or each new via matches its own copy at distance 0 and every
     # via gets "merged" away (hackrf: 358 false merges, planes disconnected).
-    new_pos = {(round(nv['x'], 4), round(nv['y'], 4)) for nv in all_new_vias}
+    new_pos = {(round(_via_get(nv, 'x'), 4), round(_via_get(nv, 'y'), 4))
+               for nv in all_new_vias}
     survivors_by_net = {}  # net_id -> [(x, y, drill, span)]
     for v in pcb_data.vias:
         if (round(v.x, 4), round(v.y, 4)) in new_pos:
@@ -5939,10 +5948,10 @@ def merge_close_same_net_vias(all_new_vias, all_new_segments, pcb_data,
 
     kept, merged, unmergeable = [], 0, 0
     for nv in all_new_vias:
-        nid = nv['net_id']
-        nx, ny = nv['x'], nv['y']
-        ndrill = nv.get('drill', 0.0)
-        nspan = _span(nv.get('layers'))
+        nid = _via_get(nv, 'net_id')
+        nx, ny = _via_get(nv, 'x'), _via_get(nv, 'y')
+        ndrill = _via_get(nv, 'drill', 0.0)
+        nspan = _span(_via_get(nv, 'layers'))
         survivor = None
         blocked = False
         for (sx, sy, sdrill, sspan) in survivors_by_net.get(nid, []):
