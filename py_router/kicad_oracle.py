@@ -1665,10 +1665,28 @@ def oracle_reconnect(board_file: str, net_names, config,
         # clusters its fill truth reproducibly and anchors each link at the
         # true nearest approach. KICAD_LEGACY_ORACLE=1 restores kicad-cli.
         _links_from_exact = False
+        # Reuse the round's already-parsed board when enabled: the fetch's
+        # internal parse_kicad_pcb (kicad_exact_fill line 819) is a full-board
+        # parse that the round loop repeats below -- two parses per round for
+        # the same unchanged file. exact_unconnected's pcb_data param is
+        # documented to accept a pre-parsed board; the file cannot change
+        # between this fetch and the round's parse (no copper lands until the
+        # link loop), so the clustering sees identical input. Measured: ~1.7s
+        # of parse per oracle leg on carrier (10% of the leg).
+        _reuse_pd = None
+        # Only the exact-fill source consumes pcb_data in the fetch; in
+        # LEGACY_ORACLE mode the fetch is kicad-cli and the round's own parse
+        # below is the only consumer, so skip the extra parse entirely.
+        if env_knobs.ORACLE_REUSE_PARSE and not env_knobs.LEGACY_ORACLE:
+            try:
+                _reuse_pd = parse_kicad_pcb(board_file)
+            except Exception:
+                _reuse_pd = None
         if not env_knobs.LEGACY_ORACLE:
             try:
                 from kicad_exact_fill import exact_unconnected
                 links = exact_unconnected(board_file, names,
+                                          pcb_data=_reuse_pd,
                                           project_from=project_from)
                 _links_from_exact = links is not None
                 if links is not None and rnd == 0:
@@ -1799,7 +1817,13 @@ def oracle_reconnect(board_file: str, net_names, config,
         print(f"  KiCad-oracle recheck round {rnd + 1}: KiCad reports "
               f"{len(ours)} missing link(s) on processed nets")
 
-        pcb_data = parse_kicad_pcb(board_file)
+        # Reuse the fetch's already-parsed board (ORACLE_REUSE_PARSE) so the
+        # round does not parse the same unchanged file a second time. The
+        # fetch parsed it moments ago and no copper lands between; the object
+        # is identical to a fresh parse of the same bytes.
+        pcb_data = _reuse_pd if (_reuse_pd is not None
+                                 and env_knobs.ORACLE_REUSE_PARSE) \
+            else parse_kicad_pcb(board_file)
         name_to_id = {net.name: nid for nid, net in pcb_data.nets.items()}
         routing_layers = pcb_data.board_info.copper_layers
         layer_map = {name: i for i, name in enumerate(routing_layers)}

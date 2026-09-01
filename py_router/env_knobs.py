@@ -416,6 +416,7 @@ def refresh() -> None:
     g['LEGACY_ORACLE'] = _truthy('KICAD_LEGACY_ORACLE')
     g['NO_EXACT_FILL'] = _truthy('KICAD_NO_EXACT_FILL')
     g['NO_FILL_NETCLASS'] = _truthy('KICAD_NO_FILL_NETCLASS')  # fill-model A/B
+    g['ORACLE_REUSE_PARSE'] = _on_default('KICAD_ORACLE_REUSE_PARSE')  # oracle: reuse round pcb_data in the fetch (default ON)
 
     # --- numeric knobs -------------------------------------------------------
     # Rasterization memo budget (MB, shared convention across the capsule/
