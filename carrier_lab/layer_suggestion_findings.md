@@ -189,6 +189,65 @@ GROUND-TRUTH source delivers a robust win. The verdict is NOT "fix the planner"
 The plan's layer picks are bad (co-session: 31% per-net agreement), but even perfect
 picks only buy -0.6% vias at a fragile weak-bias operating point.
 
+
+## Honest-input ground-truth experiment (HEADLINE -- added after validation landed)
+
+Validation (8e5c5318) confirmed the plan's layer choices are NOT trustworthy
+(per-net agreement 1-16% once the trivial F.Cu majority is stripped; ~93% of nets
+stay on F.Cu via _choose_pad_layer). The plan-bias arm is therefore a known-futile
+control. The GROUND-TRUTH arm is the headline experiment: bias the router with the
+layer each net ACTUALLY routed on (extracted from an existing routed board), and
+measure whether a per-net layer bias is a lever worth having AT ALL if the picks
+were correct.
+
+Setup (honest, non-circular): route the UNROUTED input (carrier_lab/in.kicad_pcb
+for carrier; hw_sweep/base/<b>/a.kicad_pcb for corpus) with ground-truth labels
+extracted by net NAME from the routed reference (ab2_base/routed_routed.kicad_pcb
+for carrier; hw_sweep/base/<b>/n.kicad_pcb for corpus). Ground-truth labels are an
+ORACLE, not an achievable input -- this arm measures the CEILING of the mechanism.
+
+### Results (all arms tax=1.3 unless noted)
+
+| Board | OFF vias/net | GT vias/net | OFF conn | GT conn | OFF final | GT final | OFF net s | GT net s |
+|---|---|---|---|---|---|---|---|---|
+| carrier | 4.25 | **4.21** | RTL_XI open | **ALL CONNECTED** | 59.13 | **60.18** | 282.6 | **181.6** |
+| kitdev | 2.26 | 2.29 | ALL CONNECTED | ALL CONNECTED | 63.96 | 63.88 | 48.7 | 106.7 |
+| ulx3s | 2.49 | 2.59 | 15 issues | **6 issues** | 60.41 | **60.94** | 280.2 | **127.3** |
+
+### What this says
+
+1. **The mechanism IS a lever worth having -- on boards where layers matter.**
+   carrier (B.Cu-heavy GT) and ulx3s (balanced GT) both show big wins: carrier
+   ALL CONNECTED (fixes OFF's RTL_XI) + 35% faster; ulx3s connectivity 15->6
+   issues + 2.2x faster. Both speedups are load-independent (net-time sums).
+2. **The win is connectivity + speed, not vias.** vias/net is flat-to-slightly-up
+   (carrier -1%, kitdev +1%, ulx3s +4%). The bias's real value is that nets start
+   on the right layer, so the router finds routes faster and strands fewer nets.
+3. **kitdev is a wash** (F.Cu-heavy GT, 193/209): no connectivity gain, slightly
+   worse vias, 2x slower. When the oracle has nothing to say (everything F.Cu),
+   the bias just adds cost.
+4. **The connectivity gate is NOT cleanly passed.** On ulx3s, GT fixes 6 nets
+   (BTN_U, SD_D1, SDRAM_D6, SW3, WIFI_RXD, WIFI_TXD) but introduces 3 (+3V3,
+   SDRAM_D3, SHUTDOWN) -- a net improvement (15->6) but not a strict superset.
+   On carrier it IS a strict superset (fixes RTL_XI, introduces none).
+5. **Response curve on carrier honest input:** tax 1.3 is the sweet spot (ALL
+   CONNECTED, vias down, 35% faster). tax 1.1 is fastest (net 106.9s) but breaks
+   connectivity (VBUS+PD_nIRQ+RTL_XI); tax 2.0 has best vias (4.18) but breaks
+   CTL1. Reproducible: tax1.3 re-run gives identical output (deterministic).
+
+### Verdict (headline)
+
+**YES -- a per-net layer bias is a lever worth having, if the layer picks were
+correct.** The roadmap becomes "build a trustworthy layer oracle" and this seam
+is exactly the harness that consumes it. The oracle must be good enough to get the
+layer SPREAD right (the plan fails this: ~93% F.Cu) -- when it does, the router
+routes faster and strands fewer nets. The vias benefit is secondary; the real win
+is connectivity + speed.
+
+Caveats: the connectivity gate is not a strict superset on ulx3s (GT introduces
+3 disconnects while fixing 6), and kitdev shows no benefit. A trustworthy oracle
+would need to be right per-net, not just per-distribution.
+
 ## Gates
 
 - Full suite: tests/run_all.py --fast = **321 passed / 3 failed / 131 skipped** --
